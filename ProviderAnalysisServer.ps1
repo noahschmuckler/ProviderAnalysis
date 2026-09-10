@@ -440,7 +440,7 @@ button{padding:8px 12px;margin:6px 6px 6px 0;cursor:pointer}button:disabled{opac
 </div>
 <div id="mapping" class="map"></div>
 </div>
-<div id="finish" class="card" style="display:none"><label>Display name</label><input id="displayName" type="text"><label>Location</label><input id="finishLocation" type="text" list="locationList" autocomplete="off"><label class="inline"><input id="save" type="checkbox" style="width:auto"> Save/update provider profile</label><br><button id="queue">Validate mapping and prepare job</button><button id="another" style="display:none">Select another provider</button><div id="result"></div></div>
+<div id="finish" class="card" style="display:none"><label>Display name</label><input id="displayName" type="text"><label>Location</label><input id="finishLocation" type="text" list="locationList" autocomplete="off"><label class="inline"><input id="save" type="checkbox" style="width:auto"> Save/update provider profile</label><br><button id="queue">Validate mapping and prepare job</button><button id="saveOnly">Save profile only</button><button id="another" style="display:none">Select another provider</button><div id="result"></div></div>
 <div class="card"><h2>Prepared jobs</h2><div id="jobs"></div></div>
 </main>
 <script>
@@ -456,7 +456,7 @@ function selectName(v){el('filter').value='';fillNames();el('names').value=v}
 function startEnabled(){el('startWizard').disabled=!(el('riskPoolSelect').value&&el('locationInput').value.trim())}
 async function loadLocations(pool){const list=el('locationList');list.innerHTML='';if(!pool)return[];try{const locs=await api('/api/locations?riskPool='+encodeURIComponent(pool));locs.forEach(l=>list.appendChild(new Option(l)));el('locationNote').textContent=locs.length?locs.length+' known location'+(locs.length===1?'':'s')+' for '+pool+': '+locs.join(', ')+'. Pick one or type a new one.':'No locations saved for '+pool+' yet; type the first one.';return locs}catch(e){el('locationNote').textContent='Could not load locations: '+e.message;return[]}}
 function showContext(){el('context').textContent='Risk pool: '+riskPool+'  |  Location: '+(providerLocation||'(none)')}
-function openWizard(){sources=poolSources();el('startCard').style.display='none';el('wizardCard').style.display='block';el('finishLocation').value=providerLocation;showContext();load()}
+function openWizard(){sources=poolSources();if(complete)i=sources.length;el('startCard').style.display='none';el('wizardCard').style.display='block';el('finishLocation').value=providerLocation;showContext();load()}
 async function init(){
  allSources=await api('/api/provider-sources');profiles=await api('/api/profiles');
  const profile=el('profile');profile.innerHTML='<option value="">New mapping</option>'+profiles.map((p,n)=>'<option value="'+n+'">'+esc(p.displayName)+' ('+esc(p.npi)+')'+(p.location?' - '+esc(p.location):'')+'</option>').join('');
@@ -470,15 +470,15 @@ async function init(){
  el('ok').onclick=()=>{const v=el('names').value;if(!v)return;aliases[sources[i].sourceKey]=v;advance()};
  el('blank').onclick=()=>{aliases[sources[i].sourceKey]='';advance()};
  el('retry').onclick=()=>load();
- el('queue').onclick=queue;el('another').onclick=reset;
+ el('queue').onclick=queue;el('saveOnly').onclick=saveProfileOnly;el('another').onclick=reset;
  const wanted=new URLSearchParams(window.location.search).get('profile');
  if(wanted){const n=profiles.findIndex(p=>p.npi===wanted);if(n>=0){profile.value=String(n);applyProfile(profiles[n]);aliases[otherHrKey()]=aliases[otherHrKey()]||'';openWizard()}}
 }
-function applyProfile(p){if(p.riskPool&&p.riskPool!==riskPool){riskPool=p.riskPool;el('riskPoolSelect').value=riskPool;sources=poolSources();loadLocations(riskPool)}if(p.location){providerLocation=p.location;el('finishLocation').value=providerLocation}aliases=Object.assign({},p.aliases||{});el('displayName').value=p.displayName||'';i=0;complete=false;showContext()}
+function applyProfile(p){if(p.riskPool&&p.riskPool!==riskPool){riskPool=p.riskPool;el('riskPoolSelect').value=riskPool;sources=poolSources();loadLocations(riskPool)}if(p.location){providerLocation=p.location;el('finishLocation').value=providerLocation}aliases=Object.assign({},p.aliases||{});el('displayName').value=p.displayName||'';el('save').checked=true;complete=true;i=sources.length;showContext()}
 function advance(){loadToken++;if(complete){i=sources.length}else{i++}load()}
 async function load(){
  const my=++loadToken;
- if(i>=sources.length){complete=true;el('finish').style.display='block';el('pickCard').style.display='none';el('step').textContent='Mapping complete';setNote('Review the mapping below (use edit to change a source), confirm the location, then validate and prepare the job.');if(!el('displayName').value)el('displayName').value=aliases.Export||'';if(!el('finishLocation').value)el('finishLocation').value=providerLocation;render();return}
+ if(i>=sources.length){complete=true;el('finish').style.display='block';el('pickCard').style.display='none';el('step').textContent=el('profile').value!==''?'Saved profile loaded':'Mapping complete';setNote(el('profile').value!==''?'Every source is already confirmed from the saved profile. Use edit to change one, update the display name or location, then save the profile (with or without running a report).':'Review the mapping below (use edit to change a source), confirm the location, then validate and prepare the job.');if(!el('displayName').value)el('displayName').value=aliases.Export||'';if(!el('finishLocation').value)el('finishLocation').value=providerLocation;render();return}
  el('finish').style.display=complete?'block':'none';el('pickCard').style.display='';
  const s=sources[i];el('step').textContent=(i+1)+' of '+sources.length+': '+s.displayName;
  const fields='Provider field'+(s.providerColumns.length>1?'s':'')+': '+s.providerColumns.join(' / ');
@@ -521,6 +521,20 @@ async function queue(){
   el('another').style.display='inline-block';await jobs();
  }catch(e){result.textContent='Error: '+e.message}
  finally{el('queue').disabled=false}
+}
+async function reloadProfiles(selectNpi){profiles=await api('/api/profiles');const profile=el('profile');profile.innerHTML='<option value="">New mapping</option>'+profiles.map((p,n)=>'<option value="'+n+'">'+esc(p.displayName)+' ('+esc(p.npi)+')'+(p.location?' - '+esc(p.location):'')+'</option>').join('');const n=profiles.findIndex(p=>p.npi===selectNpi);profile.value=n>=0?String(n):''}
+async function saveProfileOnly(){
+ const result=el('result');
+ try{
+  providerLocation=el('finishLocation').value.trim();if(!providerLocation){result.textContent='Error: a location is required.';return}showContext();
+  const body={displayName:el('displayName').value,aliases,riskPool,location:providerLocation};
+  if(el('profile').value!==''&&!confirm('Overwrite this saved provider profile?'))return;
+  el('saveOnly').disabled=true;result.textContent='Saving profile...';
+  const p=await api('/api/profile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  await reloadProfiles(p.npi);result.textContent='Profile saved: '+p.displayName+' (NPI '+p.npi+') at '+p.location+'. No report was generated; use Generate report on the Provider Index tab when you want one.';
+  el('another').style.display='inline-block';
+ }catch(e){result.textContent='Error: '+e.message}
+ finally{el('saveOnly').disabled=false}
 }
 function reset(){loadToken++;i=0;aliases={};items=[];sources=[];riskPool='';providerLocation='';complete=false;el('riskPoolSelect').value='';el('locationInput').value='';el('locationInput').disabled=true;el('locationNote').textContent='Choose a risk pool first.';startEnabled();el('profile').value='';el('displayName').value='';el('finishLocation').value='';el('save').checked=false;el('finish').style.display='none';el('pickCard').style.display='';el('another').style.display='none';el('result').textContent='';el('mapping').innerHTML='';el('wizardCard').style.display='none';el('startCard').style.display='block'}
 async function jobs(){
