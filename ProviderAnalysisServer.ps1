@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# ProviderAnalysisServer.ps1 - Draft 4 future ACV suppression 4.5
+# ProviderAnalysisServer.ps1 - Draft 4.6 (bulk column reads, warm provider indexes, resilient wizard)
 # Adds provider indexes, guided cross-source mapping, fuzzy suggestions, NPI profiles, and prepared job tracking.
 [CmdletBinding()]
 param([int]$PreferredPort=8765,[switch]$NoBrowser,[switch]$SkipModuleInstallPrompt,[string]$RunJobId='')
@@ -8,6 +8,10 @@ $ErrorActionPreference='Stop'
 $script:Root=Split-Path -Parent $MyInvocation.MyCommand.Path
 if([string]::IsNullOrWhiteSpace($script:Root)){$script:Root=(Get-Location).Path}
 Set-Location -LiteralPath $script:Root
+$script:IndexVersion=7
+$script:IndexMemo=@{}
+$script:TokenCache=@{}
+$script:RunNext=$false
 $script:Paths=[ordered]@{
  CanonicalCurrent=Join-Path $script:Root 'canonical-current'
  CanonicalArchive=Join-Path $script:Root 'canonical-archive'
@@ -52,11 +56,14 @@ function Json([string]$Path){if(Test-Path $Path){Get-Content $Path -Raw -Encodin
 
 function Test-ImportExcelModule{
  $m=Get-Module -ListAvailable ImportExcel|Sort-Object Version -Descending|Select-Object -First 1
- if($m){Log 'MODULE_CHECK' 'FOUND' ('ImportExcel '+$m.Version);return}
- if($SkipModuleInstallPrompt){throw 'ImportExcel is required but was not found.'}
- $a=Read-Host 'ImportExcel was not found. Install for CurrentUser now? [Y/N]'
- if($a -notmatch '^(?i)y(es)?$'){throw 'ImportExcel installation was declined.'}
- Install-Module ImportExcel -Scope CurrentUser -Force -AllowClobber;Log 'MODULE_INSTALL'
+ if(!$m){
+  if($SkipModuleInstallPrompt){throw 'ImportExcel is required but was not found.'}
+  $a=Read-Host 'ImportExcel was not found. Install for CurrentUser now? [Y/N]'
+  if($a -notmatch '^(?i)y(es)?$'){throw 'ImportExcel installation was declined.'}
+  Install-Module ImportExcel -Scope CurrentUser -Force -AllowClobber;Log 'MODULE_INSTALL'
+ }
+ Import-Module ImportExcel -ErrorAction Stop
+ Log 'MODULE_CHECK' 'FOUND' ('ImportExcel '+(Get-Module ImportExcel).Version)
 }
 function Lock{
  $b=[Text.Encoding]::UTF8.GetBytes($script:Root.ToLowerInvariant());$s=[Security.Cryptography.SHA256]::Create()
@@ -70,8 +77,35 @@ function Status{
  foreach($s in $c.sources){
   $f=Get-Item (Join-Path $script:Paths.CanonicalCurrent $s.canonicalFileName) -ErrorAction SilentlyContinue;$me=$null
   if($m -and $m.sources){$p=$m.sources.PSObject.Properties[$s.sourceKey];if($p){$me=$p.Value}}
-  $out+=[ordered]@{sourceKey=$s.sourceKey;displayName=$s.displayName;canonicalFileName=$s.canonicalFileName;present=($null -ne $f);byteLength=$(if($f){$f.Length}else{$null});fileCreationTime=$(if($f){$f.CreationTime.ToString('o')}else{$null});lastWriteTime=$(if($f){$f.LastWriteTime.ToString('o')}else{$null});importedUtc=$(if($me){$me.importedUtc}else{$null});rowCount=$(if($me){$me.rowCount}else{$null});sha256=$(if($me){$me.sha256}else{$null})}
+  $sha=$(if($me){[string]$me.sha256}else{''});$index=$(if($f){Get-ProviderIndexState $s.sourceKey $f $sha}else{[ordered]@{state='NoFile';count=$null;builtUtc=$null}})
+  $out+=[ordered]@{sourceKey=$s.sourceKey;displayName=$s.displayName;canonicalFileName=$s.canonicalFileName;present=($null -ne $f);byteLength=$(if($f){$f.Length}else{$null});fileCreationTime=$(if($f){$f.CreationTime.ToString('o')}else{$null});lastWriteTime=$(if($f){$f.LastWriteTime.ToString('o')}else{$null});importedUtc=$(if($me){$me.importedUtc}else{$null});rowCount=$(if($me){$me.rowCount}else{$null});sha256=$(if($me){$me.sha256}else{$null});indexState=$index.state;indexCount=$index.count;indexBuiltUtc=$index.builtUtc}
  };return $out
+}
+function Get-ProviderIndexState([string]$SourceKey,$File,[string]$CurrentSha){
+ if($script:IndexMemo.ContainsKey($SourceKey)){
+  $m=$script:IndexMemo[$SourceKey];$stamp=$(if($File){[string]$File.Length+'|'+$File.LastWriteTimeUtc.Ticks}else{''})
+  if($m.stamp -eq $stamp -or ($CurrentSha -and $m.hash -eq $CurrentSha)){return [ordered]@{state='Ready';count=$m.count;builtUtc=$m.builtUtc}}
+ }
+ if(!$CurrentSha){return [ordered]@{state='Unknown';count=$null;builtUtc=$null}}
+ $cached=Json (Join-Path $script:Paths.State ('provider-index-'+$SourceKey+'.json'))
+ if($cached){
+  $p=$cached.PSObject.Properties
+  $shaOk=($p['sha256'] -and [string]$p['sha256'].Value -eq $CurrentSha);$versionOk=($p['indexVersion'] -and [int]$p['indexVersion'].Value -eq $script:IndexVersion)
+  if($shaOk -and $versionOk){return [ordered]@{state='Ready';count=$(if($p['count']){[int]$p['count'].Value}else{$null});builtUtc=$(if($p['builtUtc']){[string]$p['builtUtc'].Value}else{$null})}}
+ }
+ return [ordered]@{state='Stale';count=$null;builtUtc=$null}
+}
+function Update-ProviderIndexAfterImport([string]$SourceKey,[switch]$Force){
+ try{$sw=[Diagnostics.Stopwatch]::StartNew();$items=@(Get-ProviderIndex $SourceKey -Force:$Force);return @{count=$items.Count;seconds=[Math]::Round($sw.Elapsed.TotalSeconds,1);error=$null}}
+ catch{Log 'PROVIDER_INDEX' 'FAILED' $_.Exception.Message $SourceKey;return @{count=$null;seconds=$null;error=$_.Exception.Message}}
+}
+function Initialize-ProviderIndexes{
+ $config=Json $script:ConfigPath;Write-Host 'Preparing provider indexes (only rebuilt when a source file changed)...' -ForegroundColor Cyan
+ foreach($s in $config.sources){
+  if(!(Test-Path -LiteralPath (Join-Path $script:Paths.CanonicalCurrent $s.canonicalFileName))){continue}
+  $r=Update-ProviderIndexAfterImport ([string]$s.sourceKey)
+  if($r.error){Write-Warning ($s.displayName+': provider index unavailable - '+$r.error)}else{Write-Host ('  '+$s.displayName+': '+$r.count+' providers ('+$r.seconds+'s)')}
+ }
 }
 
 
@@ -97,7 +131,7 @@ function Status{
 function Serve{
  $port=FreePort $PreferredPort;$url='http://127.0.0.1:'+$port+'/';$script:Listener=New-Object Net.HttpListener;$script:Listener.Prefixes.Add($url);$script:Listener.Start();Log 'SERVER_START' 'OK' ('Loopback port '+$port);Write-Host ('Provider Analysis Server: '+$url) -ForegroundColor Green
  if(!$NoBrowser){Start-Process $url}
- while(-not $script:Stop -and $script:Listener.IsListening){$a=$script:Listener.BeginGetContext($null,$null);while(-not $a.AsyncWaitHandle.WaitOne(250)){if($script:Stop){break}};if($script:Stop){break};Request ($script:Listener.EndGetContext($a));if($script:RunNext){$script:RunNext=$false;Invoke-NextPendingJob}}
+ while(-not $script:Stop -and $script:Listener.IsListening){$a=$script:Listener.BeginGetContext($null,$null);while(-not $a.AsyncWaitHandle.WaitOne(250)){if($script:Stop){break}};if($script:Stop){break};try{Request ($script:Listener.EndGetContext($a))}catch{Log 'HTTP_LOOP' 'FAILED' $_.Exception.Message};if($script:RunNext){$script:RunNext=$false;try{Invoke-NextPendingJob}catch{Log 'JOB_LAUNCH' 'FAILED' $_.Exception.Message}}}
 }
 function Save-JsonAtomic([string]$Path,[object]$Value){$tmp=$Path+'.tmp';$Value|ConvertTo-Json -Depth 15|Set-Content -LiteralPath $tmp -Encoding UTF8;Move-Item -LiteralPath $tmp -Destination $Path -Force}
 function Get-FileHash256([string]$Path){return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()}
@@ -120,115 +154,309 @@ function Publish-StagedFile([string]$Token){
 function Remove-ExpiredStaging{Get-ChildItem $script:Paths.Staging -File -ErrorAction SilentlyContinue|Where-Object{$_.LastWriteTimeUtc -lt [DateTime]::UtcNow.AddDays(-2)}|Remove-Item -Force -ErrorAction SilentlyContinue}
 function ConvertTo-HtmlSafe([object]$Value){if($null -eq $Value){''}else{[Net.WebUtility]::HtmlEncode([string]$Value)}}
 function Page{
- $rows='';foreach($r in (Status)){$state=$(if($r.present){'Present'}else{'Missing'});$size=$(if($r.byteLength){'{0:N1} MB' -f ($r.byteLength/1MB)}else{'-'});$hash=$(if($r.sha256){([string]$r.sha256).Substring(0,8)}else{'-'});$rows+='<tr><td>'+(ConvertTo-HtmlSafe $r.displayName)+'</td><td>'+$state+'</td><td>'+(ConvertTo-HtmlSafe $r.canonicalFileName)+'</td><td>'+$size+'</td><td>'+(ConvertTo-HtmlSafe $r.fileCreationTime)+'</td><td>'+(ConvertTo-HtmlSafe $r.lastWriteTime)+'</td><td>'+(ConvertTo-HtmlSafe $r.importedUtc)+'</td><td>'+(ConvertTo-HtmlSafe $r.rowCount)+'</td><td>'+$hash+'</td><td><button onclick="pickFile()">Refresh</button></td></tr>'}
- $html=@"
-<!doctype html><html><head><meta charset="utf-8"><title>Provider Analysis</title><style>body{font:14px Segoe UI;margin:0;background:#f4f7fb;color:#172033}header{background:#17365d;color:white;padding:22px}main{padding:22px}.card{background:white;border:1px solid #dce4ef;overflow:auto}table{border-collapse:collapse;width:100%;min-width:1150px}th,td{padding:9px;border-bottom:1px solid #dce4ef;text-align:left;white-space:nowrap}th{background:#eaf1f8}button{padding:7px 11px;cursor:pointer}.stop{background:#a61b1b;color:white}.modal{position:fixed;inset:0;background:#0008;display:none;align-items:center;justify-content:center}.box{background:white;padding:22px;border-radius:8px;max-width:650px;white-space:pre-wrap}</style></head><body><header><h1>Provider Analysis Automation</h1><p>Draft 3 - provider mapping, profiles, suggestions, and prepared jobs</p></header><main><button onclick="location.href='/providers'">Provider wizard</button> <button onclick="location.reload()">Reload</button> <button class="stop" onclick="stopServer()">Stop server</button><input id="file" type="file" accept=".xlsx" hidden><h2>Canonical sources</h2><div class="card"><table><thead><tr><th>Source</th><th>Status</th><th>File</th><th>Size</th><th>Export/File created</th><th>Last write</th><th>Imported UTC</th><th>Rows</th><th>SHA-256</th><th>Action</th></tr></thead><tbody>__ROWS__</tbody></table></div><p>Uploads are staged and fingerprinted before replacement. Nothing changes until you confirm.</p></main><div id="modal" class="modal"><div class="box"><div id="message"></div><p><button id="confirm" style="display:none">Confirm replacement</button> <button onclick="closeModal()">Close</button></p></div></div><script>let token='';const file=document.getElementById('file');function pickFile(){file.value='';file.click()}file.onchange=async()=>{if(!file.files.length)return;show('Uploading and validating '+file.files[0].name+' ...',false);try{const f=file.files[0];const r=await fetch('/api/stage',{method:'POST',headers:{'X-File-Name':encodeURIComponent(f.name),'X-File-Timestamp':String(f.lastModified)},body:f});const j=await r.json();if(!r.ok)throw new Error(j.error||'Validation failed');token=j.token;show('Recognized source: '+j.displayName+'\nWorksheet/header: '+j.worksheet+' / row '+j.headerRow+'\nData rows: '+j.rowCount+'\nSHA-256: '+j.sha256+'\n\nConfirm to archive the current canonical file and replace it.',true)}catch(e){show('Error: '+e.message,false)}};document.getElementById('confirm').onclick=async()=>{show('Replacing canonical file ...',false);try{const r=await fetch('/api/confirm?token='+encodeURIComponent(token),{method:'POST'});const j=await r.json();if(!r.ok)throw new Error(j.error||'Replacement failed');show('Replacement completed successfully.',false);setTimeout(()=>location.reload(),900)}catch(e){show('Error: '+e.message,false)}};function show(t,c){document.getElementById('message').textContent=t;document.getElementById('confirm').style.display=c?'inline-block':'none';document.getElementById('modal').style.display='flex'}function closeModal(){document.getElementById('modal').style.display='none'}async function stopServer(){if(confirm('Stop server?')){await fetch('/api/stop',{method:'POST'});document.body.innerHTML='<main><h2>Server stopped.</h2></main>'}}</script></body></html>
-"@
+ $rows='';foreach($r in (Status)){$state=$(if($r.present){'Present'}else{'Missing'});$size=$(if($r.byteLength){'{0:N1} MB' -f ($r.byteLength/1MB)}else{'-'});$hash=$(if($r.sha256){([string]$r.sha256).Substring(0,8)}else{'-'});$index=$(switch([string]$r.indexState){'Ready'{'Ready ('+$r.indexCount+' providers)'}'Stale'{'Needs rebuild'}'Unknown'{'Not built'}default{'-'}});$rows+='<tr><td>'+(ConvertTo-HtmlSafe $r.displayName)+'</td><td>'+$state+'</td><td>'+(ConvertTo-HtmlSafe $r.canonicalFileName)+'</td><td>'+$size+'</td><td>'+(ConvertTo-HtmlSafe $r.fileCreationTime)+'</td><td>'+(ConvertTo-HtmlSafe $r.lastWriteTime)+'</td><td>'+(ConvertTo-HtmlSafe $r.importedUtc)+'</td><td>'+(ConvertTo-HtmlSafe $r.rowCount)+'</td><td>'+$hash+'</td><td>'+(ConvertTo-HtmlSafe $index)+'</td><td><button onclick="pickFile()">Refresh</button></td></tr>'}
+ $html=@'
+<!doctype html><html><head><meta charset="utf-8"><title>Provider Analysis</title>
+<style>body{font:14px Segoe UI,Arial;margin:0;background:#f4f7fb;color:#172033}header{background:#17365d;color:white;padding:22px}main{padding:22px}.card{background:white;border:1px solid #dce4ef;overflow:auto}table{border-collapse:collapse;width:100%;min-width:1250px}th,td{padding:9px;border-bottom:1px solid #dce4ef;text-align:left;white-space:nowrap}th{background:#eaf1f8}button{padding:7px 11px;cursor:pointer}.stop{background:#a61b1b;color:white}.modal{position:fixed;inset:0;background:#0008;display:none;align-items:center;justify-content:center}.box{background:white;padding:22px;border-radius:8px;max-width:650px;white-space:pre-wrap}</style></head>
+<body><header><h1>Provider Analysis Automation</h1><p>Draft 4.6 - provider mapping, profiles, suggestions, and prepared jobs</p></header>
+<main><button onclick="location.href='/providers'">Provider wizard</button> <button onclick="location.reload()">Reload</button> <button onclick="reindex()">Rebuild provider indexes</button> <button class="stop" onclick="stopServer()">Stop server</button><input id="file" type="file" accept=".xlsx" hidden>
+<h2>Canonical sources</h2><div class="card"><table><thead><tr><th>Source</th><th>Status</th><th>File</th><th>Size</th><th>Export/File created</th><th>Last write</th><th>Imported UTC</th><th>Rows</th><th>SHA-256</th><th>Provider index</th><th>Action</th></tr></thead><tbody>__ROWS__</tbody></table></div>
+<p>Uploads are staged and fingerprinted before replacement. Nothing changes until you confirm. The provider index for a source is rebuilt automatically after each import, so the wizard opens its name lists instantly.</p></main>
+<div id="modal" class="modal"><div class="box"><div id="message"></div><p><button id="confirm" style="display:none">Confirm replacement</button> <button onclick="closeModal()">Close</button></p></div></div>
+<script>
+let token='';const file=document.getElementById('file');
+async function call(url,opts){const r=await fetch(url,opts);const text=await r.text();let j=null;try{j=text?JSON.parse(text):null}catch(e){throw new Error('Server returned an unreadable response: '+text.slice(0,200))}if(!r.ok)throw new Error((j&&j.error)||('Request failed ('+r.status+')'));return j}
+function pickFile(){file.value='';file.click()}
+file.onchange=async()=>{if(!file.files.length)return;const f=file.files[0];show('Uploading and validating '+f.name+' ...',false);try{const j=await call('/api/stage',{method:'POST',headers:{'X-File-Name':encodeURIComponent(f.name),'X-File-Timestamp':String(f.lastModified)},body:f});token=j.token;show('Recognized source: '+j.displayName+'\nWorksheet/header: '+j.worksheet+' / row '+j.headerRow+'\nData rows: '+j.rowCount+'\nSHA-256: '+j.sha256+'\n\nConfirm to archive the current canonical file and replace it.',true)}catch(e){show('Error: '+e.message,false)}};
+document.getElementById('confirm').onclick=async()=>{show('Replacing canonical file and building its provider index (large files can take a minute) ...',false);try{const j=await call('/api/confirm?token='+encodeURIComponent(token),{method:'POST'});show('Replacement completed.\nProvider index: '+(j.indexError?'ERROR - '+j.indexError:(j.providerCount+' providers')),false);setTimeout(()=>location.reload(),j.indexError?4000:1200)}catch(e){show('Error: '+e.message,false)}};
+async function reindex(){show('Rebuilding provider indexes for every imported source. Large files can take a minute each ...',false);try{const j=await call('/api/reindex',{method:'POST'});show((j.map(x=>x.displayName+': '+(x.error?'ERROR - '+x.error:(x.count+' providers in '+x.seconds+'s'))).join('\n'))||'No imported sources to index.',false);setTimeout(()=>location.reload(),3000)}catch(e){show('Error: '+e.message,false)}}
+function show(t,c){document.getElementById('message').textContent=t;document.getElementById('confirm').style.display=c?'inline-block':'none';document.getElementById('modal').style.display='flex'}
+function closeModal(){document.getElementById('modal').style.display='none'}
+async function stopServer(){if(confirm('Stop server?')){await fetch('/api/stop',{method:'POST'});document.body.innerHTML='<main><h2>Server stopped.</h2></main>'}}
+</script></body></html>
+'@
  return $html.Replace('__ROWS__',$rows)
 }
 function Send($Context,[int]$Code,[string]$Type,[string]$Body){$b=[Text.Encoding]::UTF8.GetBytes($Body);$Context.Response.StatusCode=$Code;$Context.Response.ContentType=$Type;$Context.Response.ContentLength64=$b.Length;$Context.Response.Headers['Cache-Control']='no-store';$Context.Response.OutputStream.Write($b,0,$b.Length);$Context.Response.Close()}
 function Request($Context){
- if(-not ([Net.IPAddress]::IsLoopback($Context.Request.RemoteEndPoint.Address))){Send $Context 403 'text/plain' 'Forbidden';return};$method=$Context.Request.HttpMethod;$path=$Context.Request.Url.AbsolutePath.TrimEnd('/');if(!$path){$path='/'}
- try{if($method -eq 'GET' -and $path -eq '/'){Send $Context 200 'text/html; charset=utf-8' (Page);return};if($method -eq 'GET' -and $path -eq '/providers'){Send $Context 200 'text/html; charset=utf-8' (ProviderPage);return};if($method -eq 'GET' -and $path -eq '/api/health'){Send $Context 200 'application/json' '{"status":"ok","draft":4}';return};if($method -eq 'GET' -and $path -eq '/api/status'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Status) -Depth 6);return};if($method -eq 'GET' -and $path -eq '/api/provider-sources'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @((Json $script:ConfigPath).sources|Select-Object sourceKey,displayName,providerColumns) -Depth 5);return};if($method -eq 'GET' -and $path -eq '/api/providers'){$result=@(Get-ProviderIndexForPool ([string]$Context.Request.QueryString['sourceKey']) ([string]$Context.Request.QueryString['riskPool']));Send $Context 200 'application/json' (ConvertTo-Json -InputObject $result -Depth 6);return};if($method -eq 'GET' -and $path -eq '/api/suggest'){$result=@(Get-ProviderSuggestions ([string]$Context.Request.QueryString['sourceKey']) ([string]$Context.Request.QueryString['name']) ([string]$Context.Request.QueryString['riskPool']));Send $Context 200 'application/json' (ConvertTo-Json -InputObject $result -Depth 6);return};if($method -eq 'GET' -and $path -eq '/api/profiles'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-ProviderProfiles) -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/profile'){$result=Save-ProviderProfile (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/html'){Send-JobOutput $Context ([string]$Context.Request.QueryString['jobId']) 'html';return};if($method -eq 'GET' -and $path -eq '/pdf'){Send-JobOutput $Context ([string]$Context.Request.QueryString['jobId']) 'pdf';return};if($method -eq 'POST' -and $path -eq '/api/run-next'){$script:RunNext=$true;Send $Context 202 'application/json' '{"status":"scheduled"}';return};if($method -eq 'GET' -and $path -eq '/api/jobs'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-Jobs) -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/job'){$result=New-PreparedJob (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/stage'){$result=Receive-Upload $Context;Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/confirm'){$result=Publish-StagedFile ([string]$Context.Request.QueryString['token']);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/stop'){$script:Stop=$true;Send $Context 202 'application/json' '{"status":"stopping"}';return};Send $Context 404 'application/json' '{"error":"not found"}'}catch{$msg=Safe $_.Exception.Message;Log 'HTTP_REQUEST' 'FAILED' $msg;try{Send $Context 400 'application/json' (([ordered]@{error=$msg}|ConvertTo-Json -Compress))}catch{}}
+ $remote=$null;try{$remote=$Context.Request.RemoteEndPoint}catch{}
+ if($null -eq $remote -or -not ([Net.IPAddress]::IsLoopback($remote.Address))){try{Send $Context 403 'text/plain' 'Forbidden'}catch{};return}
+ $method=$Context.Request.HttpMethod;$path=$Context.Request.Url.AbsolutePath.TrimEnd('/');if(!$path){$path='/'}
+ try{if($method -eq 'GET' -and $path -eq '/'){Send $Context 200 'text/html; charset=utf-8' (Page);return};if($method -eq 'GET' -and $path -eq '/providers'){Send $Context 200 'text/html; charset=utf-8' (ProviderPage);return};if($method -eq 'GET' -and $path -eq '/api/health'){Send $Context 200 'application/json' '{"status":"ok","draft":4}';return};if($method -eq 'GET' -and $path -eq '/api/status'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Status) -Depth 6);return};if($method -eq 'GET' -and $path -eq '/api/provider-sources'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @((Json $script:ConfigPath).sources|Select-Object sourceKey,displayName,providerColumns) -Depth 5);return};if($method -eq 'GET' -and $path -eq '/api/providers'){$sourceKey=[string]$Context.Request.QueryString['sourceKey'];$sw=[Diagnostics.Stopwatch]::StartNew();$result=@(Get-ProviderIndexForPool $sourceKey ([string]$Context.Request.QueryString['riskPool']));Log 'PROVIDER_LIST' 'OK' ($result.Count.ToString()+' names in '+[Math]::Round($sw.Elapsed.TotalSeconds,2)+'s') $sourceKey;Send $Context 200 'application/json' (ConvertTo-Json -InputObject $result -Depth 6);return};if($method -eq 'GET' -and $path -eq '/api/suggest'){$names=@($Context.Request.QueryString.GetValues('name')|Where-Object{$_});$result=@(Get-ProviderSuggestions ([string]$Context.Request.QueryString['sourceKey']) $names ([string]$Context.Request.QueryString['riskPool']));Send $Context 200 'application/json' (ConvertTo-Json -InputObject $result -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/reindex'){$out=@();foreach($s in (Json $script:ConfigPath).sources){if(!(Test-Path -LiteralPath (Join-Path $script:Paths.CanonicalCurrent $s.canonicalFileName))){continue};$r=Update-ProviderIndexAfterImport ([string]$s.sourceKey) -Force;$out+=[ordered]@{sourceKey=$s.sourceKey;displayName=$s.displayName;count=$r.count;seconds=$r.seconds;error=$r.error}};Send $Context 200 'application/json' (ConvertTo-Json -InputObject @($out) -Depth 5);return};if($method -eq 'GET' -and $path -eq '/api/profiles'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-ProviderProfiles) -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/profile'){$result=Save-ProviderProfile (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/html'){Send-JobOutput $Context ([string]$Context.Request.QueryString['jobId']) 'html';return};if($method -eq 'GET' -and $path -eq '/pdf'){Send-JobOutput $Context ([string]$Context.Request.QueryString['jobId']) 'pdf';return};if($method -eq 'POST' -and $path -eq '/api/run-next'){$script:RunNext=$true;Send $Context 202 'application/json' '{"status":"scheduled"}';return};if($method -eq 'GET' -and $path -eq '/api/jobs'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-Jobs) -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/job'){$result=New-PreparedJob (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/stage'){$result=Receive-Upload $Context;Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/confirm'){$result=Publish-StagedFile ([string]$Context.Request.QueryString['token']);$index=Update-ProviderIndexAfterImport ([string]$result.sourceKey) -Force;$result['providerCount']=$index.count;$result['indexSeconds']=$index.seconds;$result['indexError']=$index.error;Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/stop'){$script:Stop=$true;Send $Context 202 'application/json' '{"status":"stopping"}';return};Send $Context 404 'application/json' '{"error":"not found"}'}catch{$msg=Safe $_.Exception.Message;Log 'HTTP_REQUEST' 'FAILED' $msg;try{Send $Context 400 'application/json' (([ordered]@{error=$msg}|ConvertTo-Json -Compress))}catch{}}
 }
 
 
 # --- Draft 3: provider indexes, profiles, guided mapping, suggestions, and prepared jobs ---
 function Read-BodyJson($Context){$reader=New-Object IO.StreamReader($Context.Request.InputStream,$Context.Request.ContentEncoding);try{$raw=$reader.ReadToEnd()}finally{$reader.Dispose()};if([string]::IsNullOrWhiteSpace($raw)){return $null};return $raw|ConvertFrom-Json}
 function Get-SourceConfig([string]$Key){$config=Json $script:ConfigPath;return @($config.sources|Where-Object{$_.sourceKey -eq $Key})[0]}
-function Get-ProviderIndex([string]$ProviderSourceKey){
+$script:PoolAliases=@{CRH='CRYSTAL RUN';CMM='CAREMOUNT';PHNY='PROHEALTH';RIV='RIVERSIDE'}
+function ConvertTo-RiskPoolName([string]$Value){
+ $v=([string]$Value).Trim().ToUpperInvariant()
+ if($script:PoolAliases.ContainsKey($v)){return $script:PoolAliases[$v]}
+ return $v
+}
+function Find-IdentityHeader($Source,$Worksheet){
+ # Returns @{row=<header row>;map=@{header=column}} for the first row (within the first 25) that carries the provider/NPI/pool identity columns, else $null.
+ if($null -eq $Worksheet.Dimension){return $null}
+ $limit=[Math]::Min(25,$Worksheet.Dimension.End.Row);$maxCol=$Worksheet.Dimension.End.Column
+ $required=@($Source.providerColumns);if($Source.npiColumn){$required+=@([string]$Source.npiColumn)}
+ $needsPool=([string]$Source.sourceKey -notlike 'HR-*')
+ for($hr=1;$hr -le $limit;$hr++){
+  $map=@{}
+  for($c=1;$c -le $maxCol;$c++){$t=([string]$Worksheet.Cells[$hr,$c].Text).Trim();if($t -and !$map.ContainsKey($t)){$map[$t]=$c}}
+  if($map.Count -eq 0){continue}
+  $missing=@($required|Where-Object{!$map.ContainsKey([string]$_)})
+  if($missing.Count -gt 0){continue}
+  if($needsPool -and !($map.ContainsKey('Risk Pool') -or $map.ContainsKey('Cdo'))){continue}
+  return @{row=$hr;map=$map}
+ }
+ return $null
+}
+function Get-ColumnText($Worksheet,[int]$Column,[int]$FromRow,[int]$ToRow){
+ # One EPPlus range read per column instead of one indexer call per cell; returns a trimmed string per row (index 0 = FromRow).
+ $count=$ToRow-$FromRow+1;if($count -le 0){return ,@()}
+ $out=New-Object string[] $count;$inv=[Globalization.CultureInfo]::InvariantCulture
+ $raw=$Worksheet.Cells[$FromRow,$Column,$ToRow,$Column].Value
+ if($raw -is [Array] -and $raw.Rank -eq 2){
+  for($i=0;$i -lt $count;$i++){
+   $v=$raw[$i,0]
+   if($null -eq $v){$out[$i]=''}
+   elseif($v -is [string]){$out[$i]=$v.Trim()}
+   elseif($v -is [DateTime]){$out[$i]=$v.ToString('o')}
+   elseif($v -is [double]){$out[$i]=$v.ToString('0.###############',$inv)}
+   else{$out[$i]=([string]$v).Trim()}
+  }
+ }else{
+  $v=$raw
+  if($null -eq $v){$out[0]=''}elseif($v -is [DateTime]){$out[0]=$v.ToString('o')}elseif($v -is [double]){$out[0]=$v.ToString('0.###############',$inv)}else{$out[0]=([string]$v).Trim()}
+ }
+ return ,$out
+}
+function Get-ProviderIndex([string]$ProviderSourceKey,[switch]$Force){
  $source=Get-SourceConfig $ProviderSourceKey
  if($null -eq $source){throw 'Unknown source key.'}
  $path=Join-Path $script:Paths.CanonicalCurrent $source.canonicalFileName
- if(!(Test-Path $path)){throw ('Canonical file is missing: '+$source.canonicalFileName)}
+ $file=Get-Item -LiteralPath $path -ErrorAction SilentlyContinue
+ if($null -eq $file){throw ('Canonical file is missing: '+$source.canonicalFileName+'. Import it from the dashboard first.')}
+ $stamp=[string]$file.Length+'|'+$file.LastWriteTimeUtc.Ticks
+ if(!$Force -and $script:IndexMemo.ContainsKey($ProviderSourceKey) -and $script:IndexMemo[$ProviderSourceKey].stamp -eq $stamp){return $script:IndexMemo[$ProviderSourceKey].items}
  $hash=Get-FileHash256 $path
- $indexVersion=6
  $columnSignature=(@($source.providerColumns)-join '|')+'|NPI='+[string]$source.npiColumn+'|POOL=STRICT_FORWARD_FILL|IDENTITY_SCHEMA=1'
  $cache=Join-Path $script:Paths.State ('provider-index-'+$ProviderSourceKey+'.json')
- $cached=Json $cache
- $cacheHash=$null;$cacheVersion=$null;$cacheSignature=$null;$cacheCount=$null;$cacheItems=@()
- if($cached){
-  $properties=$cached.PSObject.Properties
-  if($properties['sha256']){$cacheHash=[string]$properties['sha256'].Value}
-  if($properties['indexVersion']){$cacheVersion=[int]$properties['indexVersion'].Value}
-  if($properties['columnSignature']){$cacheSignature=[string]$properties['columnSignature'].Value}
-  if($properties['count']){$cacheCount=[int]$properties['count'].Value}
-  if($properties['items']){$cacheItems=@($properties['items'].Value)}
+ if(!$Force){
+  $cached=Json $cache
+  if($cached){
+   $p=$cached.PSObject.Properties
+   $cacheItems=@($(if($p['items']){$p['items'].Value}else{@()}))
+   $valid=($p['sha256'] -and [string]$p['sha256'].Value -eq $hash) -and ($p['indexVersion'] -and [int]$p['indexVersion'].Value -eq $script:IndexVersion) -and ($p['columnSignature'] -and [string]$p['columnSignature'].Value -eq $columnSignature) -and ($p['count'] -and [int]$p['count'].Value -eq $cacheItems.Count)
+   if($valid){
+    $script:IndexMemo[$ProviderSourceKey]=@{stamp=$stamp;hash=$hash;items=$cacheItems;count=$cacheItems.Count;builtUtc=$(if($p['builtUtc']){[string]$p['builtUtc'].Value}else{''})}
+    return $cacheItems
+   }
+  }
  }
- if($cacheHash -eq $hash -and $cacheVersion -eq $indexVersion -and $cacheSignature -eq $columnSignature -and $cacheCount -eq $cacheItems.Count){return $cacheItems}
- $package=$null
- $items=@{}
+ $sw=[Diagnostics.Stopwatch]::StartNew();$package=$null;$items=@{};$found=$false
  try{
   $package=Open-ExcelPackage -Path $path -ErrorAction Stop
-  $found=$false
   foreach($worksheet in $package.Workbook.Worksheets){
-   if($null -eq $worksheet.Dimension){continue}
-   $limit=[Math]::Min(25,$worksheet.Dimension.End.Row)
-   for($headerRow=1;$headerRow -le $limit;$headerRow++){
-    $headers=@();$columns=@()
-    for($column=1;$column -le $worksheet.Dimension.End.Column;$column++){
-     $headerText=([string]$worksheet.Cells[$headerRow,$column].Text).Trim()
-     if($headerText){$headers+=$headerText;$columns+=$column}
+   $header=Find-IdentityHeader $source $worksheet
+   if($null -eq $header){continue}
+   $found=$true;$map=$header.map;$first=$header.row+1;$last=$worksheet.Dimension.End.Row
+   if($last -lt $first){break}
+   $count=$last-$first+1
+   $providerValues=@()
+   foreach($providerHeader in @($source.providerColumns)){if($map.ContainsKey([string]$providerHeader)){$providerValues+=,(Get-ColumnText $worksheet $map[[string]$providerHeader] $first $last)}}
+   $npiValues=$null
+   if($source.npiColumn -and $map.ContainsKey([string]$source.npiColumn)){$npiValues=Get-ColumnText $worksheet $map[[string]$source.npiColumn] $first $last}
+   $poolValues=$null
+   foreach($poolHeader in @('Risk Pool','Cdo')){if($map.ContainsKey($poolHeader)){$poolValues=Get-ColumnText $worksheet $map[$poolHeader] $first $last;break}}
+   $currentRiskPool='';$poolAliases=$script:PoolAliases
+   for($i=0;$i -lt $count;$i++){
+    $npi=$(if($null -ne $npiValues){$npiValues[$i]}else{''})
+    if($null -ne $poolValues){$rowRiskPool=$poolValues[$i].ToUpperInvariant();if($poolAliases.ContainsKey($rowRiskPool)){$rowRiskPool=$poolAliases[$rowRiskPool]};if($rowRiskPool){$currentRiskPool=$rowRiskPool}}
+    foreach($values in $providerValues){
+     $providerName=$values[$i]
+     if(!$providerName){continue}
+     if(!$items.ContainsKey($providerName)){$items[$providerName]=@{name=$providerName;npi=$npi;pools=New-Object Collections.Generic.List[string]}}
+     $entry=$items[$providerName]
+     if(!$entry.npi -and $npi){$entry.npi=$npi}
+     if($currentRiskPool -and !$entry.pools.Contains($currentRiskPool)){$entry.pools.Add($currentRiskPool)}
     }
-    $required=@($source.providerColumns);if($source.npiColumn){$required+=@([string]$source.npiColumn)};$missing=@($required|Where-Object{[Array]::IndexOf($headers,[string]$_) -lt 0});$hasPool=([Array]::IndexOf($headers,'Risk Pool') -ge 0 -or [Array]::IndexOf($headers,'Cdo') -ge 0);if($missing.Count -gt 0 -or ($source.sourceKey -notlike 'HR-*' -and !$hasPool)){continue}
-    $found=$true
-    $providerColumns=@()
-    foreach($providerHeader in $source.providerColumns){
-     $index=[Array]::IndexOf($headers,[string]$providerHeader)
-     if($index -ge 0){$providerColumns+=$columns[$index]}
-    }
-    $npiColumn=$null
-    if($source.npiColumn){
-     $index=[Array]::IndexOf($headers,[string]$source.npiColumn)
-     if($index -ge 0){$npiColumn=$columns[$index]}
-    }
-    $poolColumn=$null
-    foreach($poolHeader in @('Risk Pool','Cdo')){
-     $index=[Array]::IndexOf($headers,$poolHeader)
-     if($index -ge 0){$poolColumn=$columns[$index];break}
-    }
-    $currentRiskPool='';for($dataRow=$headerRow+1;$dataRow -le $worksheet.Dimension.End.Row;$dataRow++){
-     $npi=$(if($npiColumn){([string]$worksheet.Cells[$dataRow,$npiColumn].Text).Trim()}else{''})
-     $rowRiskPool=$(if($poolColumn){([string]$worksheet.Cells[$dataRow,$poolColumn].Text).Trim().ToUpperInvariant()}else{''})
-     $rowRiskPool=$(switch($rowRiskPool){'CRH'{'CRYSTAL RUN'};'CMM'{'CAREMOUNT'};'PHNY'{'PROHEALTH'};'RIV'{'RIVERSIDE'};default{$rowRiskPool}});if($rowRiskPool){$currentRiskPool=$rowRiskPool};$riskPool=$currentRiskPool
-     foreach($providerColumn in $providerColumns){
-      $providerName=([string]$worksheet.Cells[$dataRow,$providerColumn].Text).Trim()
-      if(!$providerName){continue}
-      if(!$items.ContainsKey($providerName)){$items[$providerName]=[ordered]@{name=$providerName;npi=$npi;riskPools=@()}}
-      $entry=$items[$providerName]
-      if(!$entry.npi -and $npi){$entry.npi=$npi}
-      if($riskPool -and @($entry.riskPools) -notcontains $riskPool){$entry.riskPools=@($entry.riskPools)+$riskPool}
-     }
-    }
-    break
    }
-   if($found){break}
+   break
   }
   if(!$found){throw ('Provider identity schema was not found for '+$source.displayName+'. Required provider/NPI and risk-pool columns are missing from the canonical file. Re-import that source.')}
  }finally{
   if($package){Close-ExcelPackage $package -NoSave}
  }
- $sorted=@($items.Values|Sort-Object -Property @{Expression={[string]$_.name};Ascending=$true})
- Save-JsonAtomic $cache ([ordered]@{indexVersion=$indexVersion;columnSignature=$columnSignature;sourceKey=$ProviderSourceKey;sha256=$hash;builtUtc=[DateTime]::UtcNow.ToString('o');count=$sorted.Count;items=$sorted})
+ $sorted=@($items.Values|ForEach-Object{[pscustomobject][ordered]@{name=[string]$_.name;npi=[string]$_.npi;riskPools=@($_.pools.ToArray())}}|Sort-Object -Property name)
+ $builtUtc=[DateTime]::UtcNow.ToString('o')
+ Save-JsonAtomic $cache ([ordered]@{indexVersion=$script:IndexVersion;columnSignature=$columnSignature;sourceKey=$ProviderSourceKey;sha256=$hash;builtUtc=$builtUtc;count=$sorted.Count;items=$sorted})
+ $script:IndexMemo[$ProviderSourceKey]=@{stamp=$stamp;hash=$hash;items=$sorted;count=$sorted.Count;builtUtc=$builtUtc}
+ Log 'PROVIDER_INDEX_BUILT' 'OK' ($sorted.Count.ToString()+' providers in '+[Math]::Round($sw.Elapsed.TotalSeconds,1)+'s') $ProviderSourceKey
  return $sorted
 }
 function Get-ProviderIndexForPool([string]$ProviderSourceKey,[string]$RiskPool){
  $all=@(Get-ProviderIndex $ProviderSourceKey)
- if(!$RiskPool -or $ProviderSourceKey -like 'HR-*'){return @($all|Sort-Object -Property @{Expression={[string]$_.name};Ascending=$true})}
- $normalized=$RiskPool.Trim().ToUpperInvariant();$normalized=$(switch($normalized){'CRH'{'CRYSTAL RUN'};'CMM'{'CAREMOUNT'};'PHNY'{'PROHEALTH'};'RIV'{'RIVERSIDE'};default{$normalized}});return @($all|Where-Object{$p=$_.PSObject.Properties['riskPools'];$null -ne $p -and @($p.Value) -contains $normalized}|Sort-Object -Property @{Expression={[string]$_.name};Ascending=$true})
+ if(!$RiskPool -or $ProviderSourceKey -like 'HR-*'){return $all}
+ $normalized=ConvertTo-RiskPoolName $RiskPool
+ return @($all|Where-Object{$p=$_.PSObject.Properties['riskPools'];$null -ne $p -and @($p.Value) -contains $normalized})
 }
 function ConvertTo-NormalProvider([string]$Name){return (($Name.ToUpperInvariant() -replace '[^A-Z0-9 ]',' ' -replace '\s+',' ').Trim())}
-function Get-ProviderScore([string]$A,[string]$B){$a1=ConvertTo-NormalProvider $A;$b1=ConvertTo-NormalProvider $B;if(!$a1 -or !$b1){return 0};if($a1 -eq $b1){return 100};$at=@($a1.Split(' ')|Where-Object{$_});$bt=@($b1.Split(' ')|Where-Object{$_});$common=@($at|Where-Object{$bt -contains $_}|Select-Object -Unique).Count;$den=[Math]::Max(1,$at.Count+$bt.Count);return [Math]::Round((200*$common/$den),1)}
-function Get-ProviderSuggestions([string]$ProviderSourceKey,[string]$Name,[string]$RiskPool){return @(Get-ProviderIndexForPool $ProviderSourceKey $RiskPool|ForEach-Object{[ordered]@{name=$_.name;npi=$_.npi;score=Get-ProviderScore $Name $_.name}}|Where-Object{$_.score -gt 0}|Sort-Object score,name -Descending|Select-Object -First 10)}
+$script:CredentialTokens=@('MD','DO','NP','PA','PAC','APRN','APN','FNP','ANP','AGNP','AGPCNP','CNP','DNP','ARNP','CRNP','NPC','PHD','DPM','MBBS','RN','RPA','DR','JR','SR','II','III','FACP','FAAFP','FACOG','BC')
+function Get-ProviderTokens([string]$Name){
+ if($script:TokenCache.ContainsKey($Name)){return ,$script:TokenCache[$Name]}
+ $out=New-Object Collections.Generic.List[string];$previousWasCredential=$false
+ foreach($t in (ConvertTo-NormalProvider $Name).Split(' ')){
+  if(!$t){continue}
+  $isCredential=($script:CredentialTokens -contains $t) -or ($t -eq 'C' -and $previousWasCredential)   # FNP-C / PA-C / NP-C
+  if(!$isCredential){$out.Add($t)}
+  $previousWasCredential=$isCredential
+ }
+ $arr=$out.ToArray();$script:TokenCache[$Name]=$arr;return ,$arr
+}
+function Get-TokenScore([string[]]$At,[string[]]$Bt){
+ # Token overlap after credential stripping: full-token matches count 1, an initial matching the first letter of an unmatched token counts 0.5. 100 = same name tokens in any order.
+ if($At.Count -eq 0 -or $Bt.Count -eq 0){return 0}
+ $sa=[string[]]$At.Clone();$sb=[string[]]$Bt.Clone();[Array]::Sort($sa);[Array]::Sort($sb)
+ if(($sa -join ' ') -eq ($sb -join ' ')){return 100}
+ $credit=0.0;$usedA=New-Object Collections.Generic.HashSet[int];$usedB=New-Object Collections.Generic.HashSet[int]
+ for($x=0;$x -lt $At.Count;$x++){if($At[$x].Length -le 1){continue};for($y=0;$y -lt $Bt.Count;$y++){if($Bt[$y].Length -gt 1 -and !$usedB.Contains($y) -and $Bt[$y] -eq $At[$x]){$credit+=1;[void]$usedA.Add($x);[void]$usedB.Add($y);break}}}
+ for($x=0;$x -lt $At.Count;$x++){if($At[$x].Length -ne 1){continue};for($y=0;$y -lt $Bt.Count;$y++){if($Bt[$y].Length -gt 1 -and !$usedB.Contains($y) -and $Bt[$y].StartsWith($At[$x])){$credit+=0.5;[void]$usedB.Add($y);break}}}
+ for($y=0;$y -lt $Bt.Count;$y++){if($Bt[$y].Length -ne 1){continue};for($x=0;$x -lt $At.Count;$x++){if($At[$x].Length -gt 1 -and !$usedA.Contains($x) -and $At[$x].StartsWith($Bt[$y])){$credit+=0.5;[void]$usedA.Add($x);break}}}
+ return [Math]::Round((200*$credit/[Math]::Max(1,$At.Count+$Bt.Count)),1)
+}
+function Get-ProviderScore([string]$A,[string]$B){return Get-TokenScore (Get-ProviderTokens $A) (Get-ProviderTokens $B)}
+function Get-ProviderSuggestions([string]$ProviderSourceKey,[string[]]$Names,[string]$RiskPool){
+ # Each candidate is scored against every seed name (aliases already confirmed in other sources) and keeps its best score.
+ $seeds=@();foreach($n in @($Names)){if(!$n){continue};$t=Get-ProviderTokens ([string]$n);if($t.Count -gt 0){$seeds+=,$t}}
+ if($seeds.Count -eq 0){return @()}
+ $scored=New-Object Collections.Generic.List[object]
+ foreach($item in @(Get-ProviderIndexForPool $ProviderSourceKey $RiskPool)){
+  $candidate=Get-ProviderTokens ([string]$item.name);if($candidate.Count -eq 0){continue}
+  $best=0.0;foreach($seed in $seeds){$s=Get-TokenScore $seed $candidate;if($s -gt $best){$best=$s}}
+  if($best -gt 0){$scored.Add([ordered]@{name=[string]$item.name;npi=[string]$item.npi;score=$best})}
+ }
+ return @($scored|Sort-Object -Property @{Expression='score';Descending=$true},@{Expression='name';Ascending=$true}|Select-Object -First 10)
+}
 function Get-NpiForAlias([string]$ProviderSourceKey,[string]$Alias){if(!$Alias){return $null};$item=@(Get-ProviderIndex $ProviderSourceKey|Where-Object{$_.name -eq $Alias})[0];if($item){return [string]$item.npi};return $null}
 function Save-ProviderProfile($Body){if($null -eq $Body -or $null -eq $Body.aliases){throw 'Profile aliases are required.'};$exportNpi=Get-NpiForAlias 'Export' ([string]$Body.aliases.Export);$qualityNpi=Get-NpiForAlias 'PtListQuality' ([string]$Body.aliases.PtListQuality);if(!$exportNpi -or !$qualityNpi){throw 'Export and PtListQuality selections must both contain an NPI.'};if($exportNpi -ne $qualityNpi){throw ('NPI conflict: Export '+$exportNpi+' versus PtListQuality '+$qualityNpi)};$path=Join-Path $script:Paths.Profiles ($exportNpi+'.json');$old=Json $path;$providerProfile=[ordered]@{profileVersion=1;profileId=$exportNpi;npi=$exportNpi;displayName=$(if($Body.displayName){[string]$Body.displayName}else{[string]$Body.aliases.Export});riskPool=[string]$Body.riskPool;aliases=$Body.aliases;createdUtc=$(if($old){$old.createdUtc}else{[DateTime]::UtcNow.ToString('o')});updatedUtc=[DateTime]::UtcNow.ToString('o')};if(Test-Path $path){Copy-Item $path ($path+'.'+(Get-Date -Format 'yyyyMMdd-HHmmss')+'.bak')};Save-JsonAtomic $path $providerProfile;Log 'PROFILE_SAVED' 'OK' ('NPI '+$exportNpi);return $providerProfile}
 function Get-ProviderProfiles{return @(Get-ChildItem $script:Paths.Profiles -Filter '*.json' -File -ErrorAction SilentlyContinue|Where-Object{$_.Name -notlike '*.bak'}|ForEach-Object{Json $_.FullName}|Sort-Object displayName)}
 function New-PreparedJob($Body){if($null -eq $Body.aliases){throw 'Confirmed aliases are required.'};$exportNpi=Get-NpiForAlias 'Export' ([string]$Body.aliases.Export);$qualityNpi=Get-NpiForAlias 'PtListQuality' ([string]$Body.aliases.PtListQuality);if(!$exportNpi -or !$qualityNpi -or $exportNpi -ne $qualityNpi){throw 'Export/PtListQuality NPI is missing or conflicting; job blocked.'};$job=[ordered]@{jobId=[Guid]::NewGuid().ToString('N');providerKey=$exportNpi;displayName=$(if($Body.displayName){[string]$Body.displayName}else{[string]$Body.aliases.Export});riskPool=[string]$Body.riskPool;aliases=$Body.aliases;queuedUtc=[DateTime]::UtcNow.ToString('o');state='Prepared';percent=0;stage='Queued for Draft 4 analysis'};$jobPath=Join-Path $script:Paths.State ('job-'+$job.jobId+'.json');Save-JsonAtomic $jobPath $job;Log 'JOB_PREPARED' 'OK' ('NPI '+$exportNpi);return $job}
 function Get-Jobs{return @(Get-ChildItem $script:Paths.State -Filter 'job-*.json' -File -ErrorAction SilentlyContinue|ForEach-Object{Json $_.FullName}|Sort-Object queuedUtc -Descending)}
 function ProviderPage{
- $html=@"
-<!doctype html><html><head><meta charset="utf-8"><title>Provider Wizard</title><style>body{font:14px Segoe UI;margin:0;background:#f4f7fb;color:#172033}header{background:#17365d;color:white;padding:22px}main{padding:22px;max-width:900px}.card{background:white;border:1px solid #dce4ef;border-radius:8px;padding:18px;margin:14px 0}select,input{padding:8px;width:100%;box-sizing:border-box;margin:6px 0}button{padding:8px 12px;margin:6px 6px 6px 0}.map{display:grid;grid-template-columns:220px 1fr;gap:5px}.muted{color:#667085}.progress{height:10px;background:#e4e9f0;border-radius:6px;overflow:hidden;margin:7px 0}.progress span{display:block;height:100%;background:#1769aa;transition:width .3s}.job{padding:8px 0;border-bottom:1px solid #e5e9f0}</style></head><body><header><h1>Provider Analysis Wizard</h1><p>Draft 4 - provider analysis, HTML/PDF outputs, and saved profiles</p></header><main><p><a href="/">Back to source dashboard</a></p><div id="startCard" class="card"><h2>Select risk pool</h2><select id="riskPoolSelect"><option value="">Choose risk pool...</option><option>CRYSTAL RUN</option><option>PROHEALTH</option><option>CAREMOUNT</option><option>RIVERSIDE</option></select><button id="startWizard">Start provider mapping</button><p class="muted">Provider lists will be limited to the selected risk pool. Crystal Run uses HR-CRH; the other pools use HR-RIVPHNYCMM.</p></div><div id="wizardCard" class="card" style="display:none"><label>Saved profile</label><select id="profile"><option value="">New mapping</option></select><h2 id="step">Loading sources...</h2><div id="fieldNote" class="muted"></div><label>Provider name from this source</label><select id="names"></select><label>Suggested matches (optional — selecting one changes the provider above)</label><select id="suggest"><option value="">Choose a suggestion...</option></select><p class="muted">Only configured provider fields are listed; patient-name fields are excluded. Suggestions are possible provider matches, never automatic selections.</p><button id="ok">Confirm selected provider for this source</button><button id="blank">Blank / skip</button><div id="mapping" class="map"></div></div><div id="finish" class="card" style="display:none"><label>Display name</label><input id="displayName"><label><input id="save" type="checkbox" style="width:auto"> Save/update provider profile</label><br><button id="queue">Validate mapping and prepare job</button><button id="another" style="display:none">Select another provider</button><div id="result"></div></div><div class="card"><h2>Prepared jobs</h2><div id="jobs"></div></div></main><script>let allSources=[],sources=[],riskPool='',i=0,aliases={},items=[],profiles=[],runner=false;async function api(u,o){const r=await fetch(u,o);const text=await r.text();let j;try{j=text?JSON.parse(text):null}catch(e){throw Error('Server returned invalid JSON for '+u+': '+(text||'<empty response>'))}if(!r.ok)throw Error((j&&j.error)||'Request failed');if(j===null)throw Error('Server returned an empty response for '+u);return j}async function init(){allSources=await api('/api/provider-sources');profiles=await api('/api/profiles');profile.innerHTML='<option value="">New mapping</option>'+profiles.map((p,n)=>'<option value="'+n+'">'+p.displayName+' ('+p.npi+')</option>').join('');profile.onchange=()=>{if(profile.value!==''){const p=profiles[+profile.value];aliases=p.aliases;displayName.value=p.displayName;i=0}load()};startWizard.onclick=()=>{riskPool=riskPoolSelect.value;if(!riskPool)return;sources=allSources.filter(s=>riskPool==='CRYSTAL RUN'?s.sourceKey!=='HR-RIVPHNYCMM':s.sourceKey!=='HR-CRH');aliases={};aliases[riskPool==='CRYSTAL RUN'?'HR-RIVPHNYCMM':'HR-CRH']='';i=0;startCard.style.display='none';wizardCard.style.display='block';load();jobs()}}async function load(){if(i>=sources.length){finish.style.display='block';step.textContent='Mapping complete';names.style.display=ok.style.display=blank.style.display='none';render();return}const s=sources[i];step.textContent=(i+1)+' of '+sources.length+': '+s.displayName;fieldNote.textContent='Provider field'+(s.providerColumns.length>1?'s':'')+': '+s.providerColumns.join(' / ')+' — loading distinct names...';items=await api('/api/providers?sourceKey='+encodeURIComponent(s.sourceKey)+'&riskPool='+encodeURIComponent(riskPool));items.sort((a,b)=>a.name.localeCompare(b.name,undefined,{sensitivity:'base'}));fieldNote.textContent='Provider field'+(s.providerColumns.length>1?'s':'')+': '+s.providerColumns.join(' / ')+' — loaded '+items.length+' distinct provider names';names.innerHTML='';names.add(new Option('Select provider...',''));items.forEach(x=>names.add(new Option(x.name,x.name)));if(aliases[s.sourceKey])names.value=aliases[s.sourceKey];suggest.innerHTML='';suggest.add(new Option('Choose a suggestion...',''));const refreshSuggestions=async()=>{const seed=Object.values(aliases).find(v=>v)||names.value;if(!seed)return;const q=await api('/api/suggest?sourceKey='+encodeURIComponent(s.sourceKey)+'&name='+encodeURIComponent(seed)+'&riskPool='+encodeURIComponent(riskPool));q.slice(0,5).forEach(x=>suggest.add(new Option(x.name+' — match score '+x.score,x.name)))};names.onchange=async()=>{suggest.innerHTML='';suggest.add(new Option('Choose a suggestion...',''));await refreshSuggestions()};suggest.onchange=()=>{if(suggest.value){names.value=suggest.value;suggest.value=''}};await refreshSuggestions();render()}function render(){mapping.innerHTML=sources.map(s=>'<b>'+s.displayName+'</b><span>'+(aliases[s.sourceKey]||'<em>Blank</em>')+'</span>').join('')}ok.onclick=()=>{if(!names.value)return;aliases[sources[i].sourceKey]=names.value;i++;load()};blank.onclick=()=>{aliases[sources[i].sourceKey]='';i++;load()};queue.onclick=async()=>{try{const body={displayName:displayName.value,aliases,riskPool};if(save.checked&&profile.value!==''&&!confirm('Overwrite this saved provider profile?'))return;if(save.checked)await api('/api/profile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const j=await api('/api/job',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});result.textContent=(j.state==='Completed'?'Analysis completed':'Job '+j.state)+': '+j.displayName;another.style.display='inline-block';await jobs()}catch(e){result.textContent='Error: '+e.message}};another.onclick=()=>{i=0;aliases={};items=[];sources=[];riskPool='';riskPoolSelect.value='';profile.value='';displayName.value='';save.checked=false;finish.style.display='none';names.style.display=ok.style.display=blank.style.display='';another.style.display='none';result.textContent='';wizardCard.style.display='none';startCard.style.display='block'};async function jobs(){const j=await api('/api/jobs');document.getElementById('jobs').innerHTML=j.map(x=>'<div class="job"><b>'+x.displayName+'</b> — '+x.state+' '+x.percent+'%<div class="progress"><span style="width:'+Math.max(0,Math.min(100,x.percent||0))+'%"></span></div><span class="muted">'+x.stage+'</span>'+(x.state==='Completed'?' · <a target="_blank" href="/html?jobId='+x.jobId+'">Open HTML</a> · <a target="_blank" href="/pdf?jobId='+x.jobId+'">Open PDF</a>':'')+(x.errorSummary?'<br><span style="color:#a61b1b">'+x.errorSummary+'</span>':'')+'</div>').join('')||'No jobs yet.';if(!runner&&!j.some(x=>(x.state==='Starting'||x.state==='Running'))&&j.some(x=>x.state==='Prepared'||x.state==='Queued')){runner=true;try{await fetch('/api/run-next',{method:'POST'})}finally{runner=false}}}init().then(()=>{jobs();setInterval(jobs,2000)}).catch(e=>document.body.innerHTML+='<p>Error: '+e.message+'</p>')</script></body></html>
-"@
+ $html=@'
+<!doctype html><html><head><meta charset="utf-8"><title>Provider Wizard</title>
+<style>
+body{font:14px Segoe UI,Arial;margin:0;background:#f4f7fb;color:#172033}header{background:#17365d;color:white;padding:22px}main{padding:22px;max-width:960px}
+.card{background:white;border:1px solid #dce4ef;border-radius:8px;padding:18px;margin:14px 0}
+select,input[type=text],input:not([type]){padding:8px;width:100%;box-sizing:border-box;margin:6px 0}select[size]{height:auto}
+button{padding:8px 12px;margin:6px 6px 6px 0;cursor:pointer}button:disabled{opacity:.5;cursor:default}
+.map{display:grid;grid-template-columns:220px 1fr auto;gap:5px 12px;align-items:center;margin-top:12px}.map .current{font-weight:600}
+.muted{color:#667085}.error{color:#a61b1b}label{display:block;margin-top:8px;font-weight:600}label.inline{display:inline;font-weight:normal}
+.progress{height:10px;background:#e4e9f0;border-radius:6px;overflow:hidden;margin:7px 0}.progress span{display:block;height:100%;background:#1769aa;transition:width .3s}
+.job{padding:8px 0;border-bottom:1px solid #e5e9f0}
+</style></head><body>
+<header><h1>Provider Analysis Wizard</h1><p>Draft 4.6 - provider analysis, HTML/PDF outputs, and saved profiles</p></header>
+<main><p><a href="/">Back to source dashboard</a></p>
+<div id="startCard" class="card"><h2>Select risk pool</h2><select id="riskPoolSelect"><option value="">Choose risk pool...</option><option>CRYSTAL RUN</option><option>PROHEALTH</option><option>CAREMOUNT</option><option>RIVERSIDE</option></select><button id="startWizard">Start provider mapping</button><p class="muted">Provider lists will be limited to the selected risk pool. Crystal Run uses HR-CRH; the other pools use HR-RIVPHNYCMM.</p></div>
+<div id="wizardCard" class="card" style="display:none">
+<label>Saved profile</label><select id="profile"><option value="">New mapping</option></select>
+<h2 id="step">Loading sources...</h2><div id="fieldNote" class="muted"></div>
+<div id="pickCard">
+<label>Filter names</label><input id="filter" type="text" placeholder="Type part of a name to narrow the list..." autocomplete="off">
+<label>Provider name from this source <span id="nameCount" class="muted"></span></label><select id="names" size="10"></select>
+<label>Suggested matches (optional; selecting one changes the provider above)</label><select id="suggest"><option value="">Choose a suggestion...</option></select>
+<p class="muted">Only configured provider fields are listed; patient-name fields are excluded. Suggestions are scored against the names you have already confirmed for other sources. Nothing is confirmed until you click the button, although an exact match is preselected for you.</p>
+<button id="ok">Confirm selected provider for this source</button><button id="blank">Blank / skip</button><button id="retry" style="display:none">Retry loading</button>
+</div>
+<div id="mapping" class="map"></div>
+</div>
+<div id="finish" class="card" style="display:none"><label>Display name</label><input id="displayName" type="text"><label class="inline"><input id="save" type="checkbox" style="width:auto"> Save/update provider profile</label><br><button id="queue">Validate mapping and prepare job</button><button id="another" style="display:none">Select another provider</button><div id="result"></div></div>
+<div class="card"><h2>Prepared jobs</h2><div id="jobs"></div></div>
+</main>
+<script>
+let allSources=[],sources=[],riskPool='',i=0,aliases={},items=[],profiles=[],runner=false,jobsBusy=false,loadToken=0,complete=false;
+const el=id=>document.getElementById(id);
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+async function api(u,o){const r=await fetch(u,o);const text=await r.text();let j=null;try{j=text?JSON.parse(text):null}catch(e){throw Error('Server returned invalid JSON for '+u+': '+text.slice(0,200))}if(!r.ok)throw Error((j&&j.error)||('Request failed ('+r.status+')'));if(j===null)throw Error('Server returned an empty response for '+u);return j}
+function poolSources(){return allSources.filter(s=>riskPool==='CRYSTAL RUN'?s.sourceKey!=='HR-RIVPHNYCMM':s.sourceKey!=='HR-CRH')}
+function otherHrKey(){return riskPool==='CRYSTAL RUN'?'HR-RIVPHNYCMM':'HR-CRH'}
+function setNote(t,isError){const n=el('fieldNote');n.textContent=t;n.className=isError?'error':'muted'}
+function fillNames(){const q=el('filter').value.trim().toLowerCase();const names=el('names');const keep=names.value;names.innerHTML='';let shown=0;items.forEach(x=>{if(!q||x.name.toLowerCase().includes(q)){names.add(new Option(x.name+(x.npi?'   ('+x.npi+')':''),x.name));shown++}});if(keep&&[...names.options].some(o=>o.value===keep))names.value=keep;el('nameCount').textContent=items.length?'('+shown+' of '+items.length+')':''}
+function selectName(v){el('filter').value='';fillNames();el('names').value=v}
+async function init(){
+ allSources=await api('/api/provider-sources');profiles=await api('/api/profiles');
+ const profile=el('profile');profile.innerHTML='<option value="">New mapping</option>'+profiles.map((p,n)=>'<option value="'+n+'">'+esc(p.displayName)+' ('+esc(p.npi)+')</option>').join('');
+ profile.onchange=()=>{if(profile.value!==''){const p=profiles[+profile.value];if(p.riskPool&&p.riskPool!==riskPool){riskPool=p.riskPool;el('riskPoolSelect').value=riskPool;sources=poolSources()}aliases=Object.assign({},p.aliases||{});el('displayName').value=p.displayName||'';i=0;complete=false}load()};
+ el('startWizard').onclick=()=>{riskPool=el('riskPoolSelect').value;if(!riskPool)return;sources=poolSources();aliases={};aliases[otherHrKey()]='';i=0;complete=false;el('startCard').style.display='none';el('wizardCard').style.display='block';load()};
+ el('filter').oninput=fillNames;
+ el('names').onchange=()=>refreshSuggestions(false);
+ el('suggest').onchange=()=>{const s=el('suggest');if(s.value){selectName(s.value);s.value=''}};
+ el('ok').onclick=()=>{const v=el('names').value;if(!v)return;aliases[sources[i].sourceKey]=v;advance()};
+ el('blank').onclick=()=>{aliases[sources[i].sourceKey]='';advance()};
+ el('retry').onclick=()=>load();
+ el('queue').onclick=queue;el('another').onclick=reset;
+}
+function advance(){loadToken++;if(complete){i=sources.length}else{i++}load()}
+async function load(){
+ const my=++loadToken;
+ if(i>=sources.length){complete=true;el('finish').style.display='block';el('pickCard').style.display='none';el('step').textContent='Mapping complete';setNote('Review the mapping below (use edit to change a source), then validate and prepare the job.');if(!el('displayName').value)el('displayName').value=aliases.Export||'';render();return}
+ el('finish').style.display=complete?'block':'none';el('pickCard').style.display='';
+ const s=sources[i];el('step').textContent=(i+1)+' of '+sources.length+': '+s.displayName;
+ const fields='Provider field'+(s.providerColumns.length>1?'s':'')+': '+s.providerColumns.join(' / ');
+ setNote(fields+' - loading distinct names (the first load after importing a large file can take a minute)...');
+ items=[];el('filter').value='';fillNames();el('suggest').innerHTML='<option value="">Choose a suggestion...</option>';el('ok').disabled=true;el('retry').style.display='none';render();
+ try{const list=await api('/api/providers?sourceKey='+encodeURIComponent(s.sourceKey)+'&riskPool='+encodeURIComponent(riskPool));if(my!==loadToken)return;items=list}
+ catch(e){if(my!==loadToken)return;setNote('Could not load provider names for '+s.displayName+': '+e.message+'  You can retry, or skip this source with Blank / skip.',true);el('retry').style.display='inline-block';return}
+ items.sort((a,b)=>a.name.localeCompare(b.name,undefined,{sensitivity:'base'}));
+ el('ok').disabled=false;
+ if(!items.length){setNote(fields+' - no provider names found'+(riskPool&&!s.sourceKey.startsWith('HR-')?' for '+riskPool:'')+' in this source. Skip it, or check the imported file on the dashboard.',true)}
+ else{setNote(fields+' - '+items.length+' distinct provider names'+(riskPool&&!s.sourceKey.startsWith('HR-')?' in '+riskPool:''))}
+ fillNames();if(aliases[s.sourceKey])selectName(aliases[s.sourceKey]);
+ await refreshSuggestions(true);
+}
+async function refreshSuggestions(preselect){
+ const s=sources[i];if(!s||!items.length)return;const my=loadToken;const sug=el('suggest');sug.innerHTML='<option value="">Choose a suggestion...</option>';
+ const seeds=Object.values(aliases).filter(v=>v);const dn=el('displayName').value.trim();if(dn)seeds.push(dn);if(!seeds.length&&el('names').value)seeds.push(el('names').value);if(!seeds.length)return;
+ try{
+  const q=await api('/api/suggest?sourceKey='+encodeURIComponent(s.sourceKey)+'&riskPool='+encodeURIComponent(riskPool)+seeds.map(x=>'&name='+encodeURIComponent(x)).join(''));
+  if(my!==loadToken)return;
+  q.slice(0,8).forEach(x=>sug.add(new Option(x.name+' - match '+x.score,x.name)));
+  if(preselect&&!el('names').value&&q.length&&q[0].score>=100){selectName(q[0].name);setNote(el('fieldNote').textContent+' - exact match preselected; confirm it or choose another.',false)}
+ }catch(e){}
+}
+function render(){
+ const m=el('mapping');
+ m.innerHTML=sources.map((s,n)=>{const v=aliases[s.sourceKey];const txt=v?esc(v):(s.sourceKey in aliases?'<em>Blank</em>':'<em class="muted">Pending</em>');return '<b'+(n===i&&!complete?' class="current"':'')+'>'+esc(s.displayName)+'</b><span>'+txt+'</span><a href="#" data-n="'+n+'">edit</a>'}).join('');
+ [...m.querySelectorAll('a[data-n]')].forEach(a=>a.onclick=e=>{e.preventDefault();i=+a.dataset.n;load()});
+}
+async function queue(){
+ const result=el('result');
+ try{
+  const body={displayName:el('displayName').value,aliases,riskPool};
+  if(el('save').checked&&el('profile').value!==''&&!confirm('Overwrite this saved provider profile?'))return;
+  el('queue').disabled=true;result.textContent='Validating mapping...';
+  if(el('save').checked)await api('/api/profile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const j=await api('/api/job',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  result.textContent='Job '+j.state+': '+j.displayName+'. The analysis runs in the background; progress appears under Prepared jobs.';
+  el('another').style.display='inline-block';await jobs();
+ }catch(e){result.textContent='Error: '+e.message}
+ finally{el('queue').disabled=false}
+}
+function reset(){loadToken++;i=0;aliases={};items=[];sources=[];riskPool='';complete=false;el('riskPoolSelect').value='';el('profile').value='';el('displayName').value='';el('save').checked=false;el('finish').style.display='none';el('pickCard').style.display='';el('another').style.display='none';el('result').textContent='';el('mapping').innerHTML='';el('wizardCard').style.display='none';el('startCard').style.display='block'}
+async function jobs(){
+ if(jobsBusy)return;jobsBusy=true;
+ try{
+  const j=await api('/api/jobs');
+  el('jobs').innerHTML=j.map(x=>'<div class="job"><b>'+esc(x.displayName)+'</b> - '+esc(x.state)+' '+(x.percent||0)+'%<div class="progress"><span style="width:'+Math.max(0,Math.min(100,x.percent||0))+'%"></span></div><span class="muted">'+esc(x.stage)+'</span>'+(x.state==='Completed'?' &middot; <a target="_blank" href="/html?jobId='+esc(x.jobId)+'">Open HTML</a> &middot; <a target="_blank" href="/pdf?jobId='+esc(x.jobId)+'">Open PDF</a>':'')+(x.errorSummary?'<br><span class="error">'+esc(x.errorSummary)+'</span>':'')+'</div>').join('')||'No jobs yet.';
+  if(!runner&&!j.some(x=>x.state==='Starting'||x.state==='Running')&&j.some(x=>x.state==='Prepared'||x.state==='Queued')){runner=true;try{await fetch('/api/run-next',{method:'POST'})}finally{runner=false}}
+ }catch(e){}
+ finally{jobsBusy=false}
+}
+init().then(()=>{jobs();setInterval(jobs,2000)}).catch(e=>{document.body.insertAdjacentHTML('beforeend','<p class="error" style="padding:22px">Error: '+esc(e.message)+'</p>')});
+</script></body></html>
+'@
  return $html
 }
 # --- Draft 4: analysis transformation, HTML/PDF publishing, and persisted execution ---
@@ -241,18 +469,40 @@ function Test-TrueValue($Value){return ([string]$Value).Trim() -match '^(1|Y|YES
 function ConvertTo-ProviderKey([string]$Name){if(!$Name){return ''};$n=($Name.ToUpperInvariant() -replace '[^A-Z0-9, ]',' ' -replace '\s+',' ').Trim();if($n -match '^([^,]+),\s*([^ ]+)'){return (($matches[1] -replace '[- ]','')+'|'+($matches[2] -replace '[- ]',''))};return ($n -replace '[- ,]','')}
 function ConvertTo-NumberValue($Value){$n=0.0;$s=([string]$Value).Trim().TrimEnd('%');if([double]::TryParse($s,[ref]$n)){return $n};return 0};function Set-JobProgress($Job,[int]$Percent,[string]$Stage){$Job.state='Running';$Job.percent=$Percent;$Job.stage=$Stage;Save-JsonAtomic (Join-Path $script:Paths.State ('job-'+$Job.jobId+'.json')) $Job}
 function Get-SourceRows([string]$Key,[string[]]$Wanted,[string]$FilterHeader,[string]$FilterValue){
+ # The filter column (and the forward-filled Cdo/Provider columns) are read in bulk; the remaining fields are read only for rows that pass the filter.
  $source=Get-SourceConfig $Key;$path=Join-Path $script:Paths.CanonicalCurrent $source.canonicalFileName;if(!(Test-Path $path)){throw ('Canonical source missing: '+$source.displayName)}
- $package=$null;$rows=@();try{$package=Open-ExcelPackage -Path $path -ErrorAction Stop;$found=$false
-  foreach($sheet in $package.Workbook.Worksheets){if($null -eq $sheet.Dimension){continue};$limit=[Math]::Min(25,$sheet.Dimension.End.Row)
-   for($hr=1;$hr -le $limit;$hr++){$map=@{};for($c=1;$c -le $sheet.Dimension.End.Column;$c++){$t=([string]$sheet.Cells[$hr,$c].Text).Trim();if($t){$map[$t]=$c}}
-    $required=@($source.providerColumns);if($source.npiColumn){$required+=@([string]$source.npiColumn)};$missing=@($required|Where-Object{!$map.ContainsKey([string]$_)});$hasPool=$map.ContainsKey('Risk Pool') -or $map.ContainsKey('Cdo');if($missing.Count -gt 0 -or ($Key -notlike 'HR-*' -and !$hasPool)){continue};$found=$true;$carry=@{}
-    for($r=$hr+1;$r -le $sheet.Dimension.End.Row;$r++){$o=[ordered]@{}
-     foreach($name in $Wanted){$v='';if($map.ContainsKey($name)){$cell=$sheet.Cells[$r,$map[$name]];$v=$(if($cell.Value -is [DateTime]){([DateTime]$cell.Value).ToString('o')}else{[string]$cell.Text})};if($name -in @('Cdo','Provider') -and $v){$carry[$name]=$v};if($name -in @('Cdo','Provider') -and !$v -and $carry.ContainsKey($name)){$v=$carry[$name]};$o[$name]=$v}
-     if($FilterHeader -and $FilterValue){if(([string]$o[$FilterHeader]).Trim() -ne $FilterValue.Trim()){continue}};$rows+=[pscustomobject]$o
-    };break
-   };if($found){break}
-  };if(!$found){throw ('Provider identity schema was not found for '+$source.displayName)}
- }finally{if($package){Close-ExcelPackage $package -NoSave}};return @($rows)
+ $carryHeaders=@('Cdo','Provider');$package=$null;$rows=New-Object Collections.Generic.List[object];$found=$false
+ try{
+  $package=Open-ExcelPackage -Path $path -ErrorAction Stop
+  foreach($sheet in $package.Workbook.Worksheets){
+   $header=Find-IdentityHeader $source $sheet;if($null -eq $header){continue}
+   $found=$true;$map=$header.map;$first=$header.row+1;$last=$sheet.Dimension.End.Row
+   if($last -lt $first){break}
+   $count=$last-$first+1;$bulk=@{}
+   $bulkHeaders=@($Wanted|Where-Object{$carryHeaders -contains $_});if($FilterHeader){$bulkHeaders+=$FilterHeader}
+   foreach($hdr in @($bulkHeaders|Select-Object -Unique)){
+    if(!$map.ContainsKey($hdr)){continue}
+    $vals=Get-ColumnText $sheet $map[$hdr] $first $last
+    if($carryHeaders -contains $hdr){$carry='';for($i=0;$i -lt $count;$i++){if($vals[$i]){$carry=$vals[$i]}elseif($carry){$vals[$i]=$carry}}}
+    $bulk[$hdr]=$vals
+   }
+   $filtering=[bool]($FilterHeader -and $FilterValue);$target=$(if($filtering){$FilterValue.Trim()}else{''})
+   $filterVals=$(if($filtering -and $bulk.ContainsKey($FilterHeader)){$bulk[$FilterHeader]}else{$null})
+   for($i=0;$i -lt $count;$i++){
+    if($filtering){$fv=$(if($null -ne $filterVals){$filterVals[$i]}else{''});if($fv -ne $target){continue}}
+    $r=$first+$i;$o=[ordered]@{}
+    foreach($name in $Wanted){
+     if($bulk.ContainsKey($name)){$o[$name]=$bulk[$name][$i];continue}
+     $v='';if($map.ContainsKey($name)){$cell=$sheet.Cells[$r,$map[$name]];$v=$(if($cell.Value -is [DateTime]){([DateTime]$cell.Value).ToString('o')}else{[string]$cell.Text})}
+     $o[$name]=$v
+    }
+    $rows.Add([pscustomobject]$o)
+   }
+   break
+  }
+  if(!$found){throw ('Provider identity schema was not found for '+$source.displayName)}
+ }finally{if($package){Close-ExcelPackage $package -NoSave}}
+ return @($rows.ToArray())
 }
 function New-UniqueIndex([object[]]$Rows,[string]$Key){$counts=@{};$first=@{};foreach($r in $Rows){$id=([string]$r.$Key).Trim();if(!$id){continue};$counts[$id]=1+[int]$counts[$id];if(!$first.ContainsKey($id)){$first[$id]=$r}};$out=@{};foreach($id in $first.Keys){if($counts[$id] -eq 1){$out[$id]=$first[$id]}};return $out}
 function Get-LatestDateFromText([string]$Text){$best=$null;foreach($part in @($Text -split ',')){$d=ConvertTo-DateValue $part;if($d -and $d -le (Get-Date) -and (!$best -or $d -gt $best)){$best=$d}};return $best}
@@ -263,7 +513,7 @@ function New-ProviderAnalysis($Job){
  $dscFields=@('Provider','Cdo','Patient','Member ID','KED','EED','Eye Exam Gap Status','Eye Exam Date','Next Appt Date','Next Appt Specialty','Next Appt Location','Risk','GSD','Med Adherence DM','MAD Days Supply','Dx Date','Avg Last A1c','% eGFR last 12 mo.','% uACR last 12 mo.')
  $serialFields=@('Provider Name','Risk Pool','Member ID','Future PCP Visits 2026','PCP Visit Dates');$hrFields=@('PCP Name','Patient First Name','Patient Last Name','DOB','Patient Insurance ID');$rpoFields=@('Epic Pcp','Cdo','Member ID','Next Acv')
  $exports=@(Get-SourceRows 'Export' $exportFields 'Provider Name' $exportAlias);Set-JobProgress $Job 15 'Loaded Export source';$quality=@(Get-SourceRows 'PtListQuality' $qualityFields 'Provider Name' $qualityAlias);Set-JobProgress $Job 28 'Loaded PtListQuality source';$dsc=@();if($dscAlias){$dsc=@(Get-SourceRows 'DiabetesScorecard' $dscFields 'Provider' $dscAlias)};Set-JobProgress $Job 40 'Loaded Diabetes Scorecard source';$serial=@();if($serialAlias){$serial=@(Get-SourceRows 'SerialScheduling' $serialFields 'Provider Name' $serialAlias)};Set-JobProgress $Job 50 'Loaded Serial Scheduling source';$rpo=@();if($rpoAlias){$rpo=@(Get-SourceRows 'RiskPopulationOutreach' $rpoFields 'Epic Pcp' $rpoAlias)};Set-JobProgress $Job 54 'Loaded Risk Population Outreach source';$hr=@();if($hrKey -and $hrAlias){$hr=@(Get-SourceRows $hrKey $hrFields 'PCP Name' $hrAlias)};Set-JobProgress $Job 58 'Loaded HR source'
- $qIndex=New-UniqueIndex $quality 'MemberID';$dIndex=New-UniqueIndex $dsc 'Member ID';$sIndex=New-UniqueIndex $serial 'Member ID';$rpoIndex=New-UniqueIndex $rpo 'Member ID';$hrIds=@{};foreach($x in $hr){$id=([string]$x.'Patient Insurance ID').Trim();if($id){$hrIds[$id]=$x}};$highIds=@{};$unmatchedHr=@{};foreach($hid in $hrIds.Keys){$hrMatches=@($exports|Where-Object{$eid=([string]$_.MemberID).Trim();$eid -eq $hid -or $eid.StartsWith($hid)});if($hrMatches.Count -eq 1){$highIds[([string]$hrMatches[0].MemberID).Trim()]=$true}elseif($hrMatches.Count -eq 0){$unmatchedHr[$hid]=$hrIds[$hid]}}
+ $qIndex=New-UniqueIndex $quality 'MemberID';$dIndex=New-UniqueIndex $dsc 'Member ID';$sIndex=New-UniqueIndex $serial 'Member ID';$rpoIndex=New-UniqueIndex $rpo 'Member ID';$hrIds=@{};foreach($x in $hr){$id=([string]$x.'Patient Insurance ID').Trim();if($id){$hrIds[$id]=$x}};$exportIds=New-Object Collections.Generic.List[string];foreach($x in $exports){$exportIds.Add(([string]$x.MemberID).Trim())};$highIds=@{};$unmatchedHr=@{};foreach($hid in $hrIds.Keys){$matchCount=0;$matchId='';foreach($eid in $exportIds){if($eid -eq $hid -or $eid.StartsWith($hid)){$matchCount++;if($matchCount -eq 1){$matchId=$eid}}};if($matchCount -eq 1){$highIds[$matchId]=$true}elseif($matchCount -eq 0){$unmatchedHr[$hid]=$hrIds[$hid]}}
  $hedis=@('BCS','COLO','EED','GSD','CBP','OMW','KED','SPC','MAD','MAC','MAH','SUPD','COB','POLY');$patients=@();$seen=@{}
  foreach($e in $exports){$id=([string]$e.MemberID).Trim();if(!$id){continue};$seen[$id]=$true;$q=$(if($qIndex.ContainsKey($id)){$qIndex[$id]}else{$null});$d=$(if($dIndex.ContainsKey($id)){$dIndex[$id]}else{$null});$s=$(if($sIndex.ContainsKey($id)){$sIndex[$id]}else{$null})
   $open=@();$closed=@();if($q){foreach($m in $hedis){$v=([string]$q.$m).Trim();if($v -in @('Needed','Non-compliant')){$open+=$m}elseif($v -in @('Completed','Compliant')){$closed+=$m}}}
@@ -290,4 +540,4 @@ function Invoke-AnalysisJob([string]$JobId){$path=Join-Path $script:Paths.State 
 function Invoke-NextPendingJob{$jobs=@(Get-Jobs);if(@($jobs|Where-Object{$_.state -in @('Starting','Running')}).Count -gt 0){return};$j=@($jobs|Where-Object{$_.state -eq 'Prepared' -or $_.state -eq 'Queued'}|Sort-Object queuedUtc|Select-Object -First 1);if($j.Count -ne 1){return};$job=$j[0];$job.state='Starting';$job.percent=1;$job.stage='Launching background analysis worker';$jobPath=Join-Path $script:Paths.State ('job-'+$job.jobId+'.json');Save-JsonAtomic $jobPath $job;$exe=(Get-Process -Id $PID).Path;$out=Join-Path $script:Paths.Logs ('worker-'+$job.jobId+'.out.log');$err=Join-Path $script:Paths.Logs ('worker-'+$job.jobId+'.err.log');try{$quotedScript='"'+$PSCommandPath+'"';$p=Start-Process -FilePath $exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$quotedScript,'-RunJobId',$job.jobId,'-NoBrowser') -RedirectStandardOutput $out -RedirectStandardError $err -WindowStyle Hidden -PassThru;Set-P $job 'workerPid' $p.Id;Save-JsonAtomic $jobPath $job}catch{$job.state='Failed';$job.stage='Worker launch failed';Set-P $job 'errorSummary' $_.Exception.Message;Save-JsonAtomic $jobPath $job}};function Invoke-PendingJobs{while(@(Get-Jobs|Where-Object{$_.state -eq 'Prepared' -or $_.state -eq 'Queued'}).Count -gt 0){Invoke-NextPendingJob;Start-Sleep -Milliseconds 500}}
 function Send-JobOutput($Context,[string]$JobId,[string]$Type){if($JobId -notmatch '^[a-f0-9]{32}$'){throw 'Invalid job ID.'};$job=Json (Join-Path $script:Paths.State ('job-'+$JobId+'.json'));if(!$job){throw 'Job not found.'};$path=$(if($Type -eq 'pdf'){Get-P $job 'pdfPath' ''}else{Get-P $job 'htmlPath' ''});if(!$path -or !(Test-Path $path)){throw 'Output is not available.'};$bytes=[IO.File]::ReadAllBytes($path);$Context.Response.StatusCode=200;$Context.Response.ContentType=$(if($Type -eq 'pdf'){'application/pdf'}else{'text/html; charset=utf-8'});$Context.Response.Headers['Content-Disposition']='inline; filename="'+[IO.Path]::GetFileName($path)+'"';$Context.Response.ContentLength64=$bytes.Length;$Context.Response.Headers['Cache-Control']='no-store';$Context.Response.OutputStream.Write($bytes,0,$bytes.Length);$Context.Response.Close()}
 function Initialize-AnalysisJobRecovery{$script:RunNext=$false;foreach($f in Get-ChildItem $script:Paths.State -Filter 'job-*.json' -File -ErrorAction SilentlyContinue){$j=Json $f.FullName;if(!$j){continue};$state=[string](Get-P $j 'state' '');$err=[string](Get-P $j 'errorSummary' '');if($state -in @('Starting','Running') -or ($state -eq 'Failed' -and $err -like '*ConvertTo-NumberValue*')){$j.state='Prepared';$j.percent=0;$j.stage='Recovered after Draft 4.2 helper/queue repair';Set-P $j 'errorSummary' '';Save-JsonAtomic $f.FullName $j}}}
-if($RunJobId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-AnalysisJob $RunJobId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};try{Initialize-AppFolders;Lock;Initialize-AppConfiguration;Test-ImportExcelModule;Initialize-AnalysisJobRecovery;Serve}catch{$detail=$_.Exception.Message+' | '+$_.ScriptStackTrace;try{Log 'APPLICATION' 'FAILED' $detail}catch{};Write-Error $detail;exit 1}finally{if($script:Listener){try{$script:Listener.Stop();$script:Listener.Close()}catch{}};if($script:Mutex){try{$script:Mutex.ReleaseMutex()}catch{};$script:Mutex.Dispose()};try{Log 'SERVER_STOP'}catch{}}
+if($RunJobId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-AnalysisJob $RunJobId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};try{Initialize-AppFolders;Lock;Initialize-AppConfiguration;Test-ImportExcelModule;Initialize-AnalysisJobRecovery;Initialize-ProviderIndexes;Serve}catch{$detail=$_.Exception.Message+' | '+$_.ScriptStackTrace;try{Log 'APPLICATION' 'FAILED' $detail}catch{};Write-Error $detail;exit 1}finally{if($script:Listener){try{$script:Listener.Stop();$script:Listener.Close()}catch{}};if($script:Mutex){try{$script:Mutex.ReleaseMutex()}catch{};$script:Mutex.Dispose()};try{Log 'SERVER_STOP'}catch{}}
