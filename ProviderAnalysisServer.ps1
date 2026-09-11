@@ -693,24 +693,25 @@ $script:HedisMeasures=[ordered]@{
  COB=@{label='Concurrent opioid and benzodiazepine (COB)';group='medsafety'};POLY=@{label='Polypharmacy (POLY)';group='medsafety'}
 }
 # group = the bundle a need qualifies a patient for; 'booster' needs never qualify on their own but add urgency to every list; boost=$true qualifies for its group and boosts the others.
+# short = abbreviation used in table cells; label = full wording used in the reason block. KED weight is per missing lab (max 2).
 $script:NeedCatalog=[ordered]@{
- 'a1c:very-high'=@{label='A1c 10 or higher';weight=3;group='diabetes'}
- 'a1c:high'=@{label='A1c 9 to 9.9';weight=2;group='diabetes'}
- 'a1c:overdue'=@{label='A1c older than 12 months';weight=1;group='diabetes'}
- 'ked:egfr'=@{label='eGFR needed';weight=1;group='diabetes'}
- 'ked:uacr'=@{label='uACR needed';weight=1;group='diabetes'}
- 'eye:open'=@{label='Eye exam gap open (scorecard)';weight=1;group='diabetes'}
- 'awv:due'=@{label='Annual wellness visit due';weight=1;group='engagement'}
- 'new:unseen'=@{label='New patient, never seen';weight=1;group='engagement'}
- 'attest:incomplete'=@{label='Incomplete attestations';weight=1;group='engagement'}
- 'hcc:open-icds'=@{label='Open ICDs to recapture';weight=1;group='engagement'}
- 'visit:none-12mo'=@{label='No visit in 12 months';weight=2;group='engagement';boost=$true}
- 'visit:none-3mo'=@{label='No visit in 3 months';weight=1;group='booster'}
- 'appt:none-3mo'=@{label='No appointment within 3 months';weight=1;group='booster'}
- 'appt:none-1mo'=@{label='No appointment within 1 month';weight=2;group='booster'}
- 'risk:high'=@{label='On the high-risk list';weight=2;group='booster'}
- 'gaps:many'=@{label='3 or more total care gaps';weight=1;group='booster'}
- 'tcm'=@{label='Transitional care (TCM) flag';weight=2;group='booster'}
+ 'a1c:very-high'=@{label='A1c 10 or higher';short='A1c 10+';weight=3;group='diabetes'}
+ 'a1c:high'=@{label='A1c 9 to 9.9';short='A1c 9-9.9';weight=2;group='diabetes'}
+ 'a1c:overdue'=@{label='A1c older than 12 months';short='A1c >12 mo';weight=1;group='diabetes'}
+ 'ked:needed'=@{label='Kidney evaluation needed (scorecard: 1 point per missing lab)';short='KED';weight=1;group='diabetes'}
+ 'eye:open'=@{label='Eye exam gap open (scorecard)';short='Eye gap';weight=1;group='diabetes'}
+ 'awv:due'=@{label='Annual wellness visit due';short='AWV due';weight=1;group='engagement'}
+ 'new:unseen'=@{label='New patient, never seen';short='Never seen';weight=1;group='engagement'}
+ 'attest:incomplete'=@{label='Incomplete attestations';short='Attestations';weight=1;group='engagement'}
+ 'hcc:open-icds'=@{label='Open ICDs to recapture';short='Open ICDs';weight=1;group='engagement'}
+ 'visit:none-record'=@{label='No visit on record in any source (assumed overdue)';short='No visit on record';weight=2;group='engagement';boost=$true}
+ 'visit:none-12mo'=@{label='No visit in 12 months';short='No visit 12 mo';weight=2;group='engagement';boost=$true}
+ 'visit:none-3mo'=@{label='No visit in 3 months';short='No visit 3 mo';weight=1;group='booster'}
+ 'appt:none-3mo'=@{label='No appointment within 3 months';short='No appt 3 mo';weight=1;group='booster'}
+ 'appt:none-1mo'=@{label='No appointment within 1 month';short='No appt 1 mo';weight=2;group='booster'}
+ 'risk:high'=@{label='On the high-risk list';short='High risk';weight=2;group='booster'}
+ 'gaps:many'=@{label='3 or more total care gaps (gentle intensifier)';short='Care gaps 3+';weight=1;group='booster'}
+ 'tcm'=@{label='Had a transitional care (TCM) visit (gentle intensifier)';short='TCM';weight=1;group='booster'}
 }
 $script:OutreachBundles=@(
  [ordered]@{key='diabetes';title='Diabetes Care Bundle';ask='Bring these patients in, or reach out, to close their diabetes measures in one contact: order or review the A1c, arrange the eye exam, order eGFR and uACR, and confirm diabetes medication adherence.';sources='PtListQuality (HEDIS status), Diabetes Scorecard (A1c, eye exam, eGFR/uACR, next appointment), Serial Scheduling (A1c date, future visits), Export (visits, AWV), HR list';columns=@('Avg Last A1c','Last A1c Date','Eye Exam','KED Needs','Med Adherence DM','Next Appt','Last Visit')}
@@ -731,27 +732,34 @@ $script:OutreachText=[ordered]@{
 $script:OutreachProtectedColumns=@('First Name','Last Name','DOB','Urgency','Open Measures')
 $script:OutreachBlankValues=@('','No','None','0','Closed')
 function ConvertTo-NumberOrNull($Value){$n=0.0;$s=([string]$Value).Trim().TrimEnd('%');if($s -and [double]::TryParse($s,[ref]$n)){return $n};return $null}
-function New-Need([string]$Key,[string]$Detail){
+function New-Need([string]$Key,[string]$Detail,[int]$Weight=-1){
  $c=$script:NeedCatalog[$Key];if($null -eq $c){throw ('Unknown need key '+$Key)}
- return [ordered]@{key=$Key;label=[string]$c.label;weight=[int]$c.weight;group=[string]$c.group;boost=[bool]($c.ContainsKey('boost') -and $c.boost);detail=$Detail}
+ return [ordered]@{key=$Key;label=[string]$c.label;short=[string]$c.short;weight=$(if($Weight -ge 0){$Weight}else{[int]$c.weight});group=[string]$c.group;boost=[bool]($c.ContainsKey('boost') -and $c.boost);detail=$Detail}
 }
 function New-HedisNeed([string]$Metric){
- $m=$script:HedisMeasures[$Metric];if($null -eq $m){return [ordered]@{key='hedis:'+$Metric;label=$Metric+' open';weight=1;group='other';boost=$false;detail=''}}
- return [ordered]@{key='hedis:'+$Metric;label=[string]$m.label;weight=1;group=[string]$m.group;boost=$false;detail=''}
+ $m=$script:HedisMeasures[$Metric];if($null -eq $m){return [ordered]@{key='hedis:'+$Metric;label=$Metric+' open';short=$Metric;weight=1;group='other';boost=$false;detail=''}}
+ return [ordered]@{key='hedis:'+$Metric;label=[string]$m.label;short=$Metric;weight=1;group=[string]$m.group;boost=$false;detail=''}
 }
 function Get-PatientLastVisit($p){$dates=@(@($p.LastVisit,$p.SerialLast)|Where-Object{$_});if($dates.Count -eq 0){return $null};return ($dates|Sort-Object -Descending|Select-Object -First 1)}
 function Get-PatientNeeds($p){
  $r=$script:OutreachRules;$today=(Get-Date).Date;$needs=New-Object Collections.Generic.List[object]
  $open=@(([string]$p.OpenHedis) -split ',\s*'|Where-Object{$_})
- foreach($metric in $open){$needs.Add((New-HedisNeed $metric))}
+ # For scorecard patients the lab detail is fresher than the KED designation, so the HEDIS KED flag is replaced by one KED need worth 1 point per missing lab.
+ foreach($metric in $open){if($metric -eq 'KED' -and $p.Diabetic){continue};$needs.Add((New-HedisNeed $metric))}
  if($null -ne $p.A1c){if($p.A1c -ge $r.A1cVeryHigh){$needs.Add((New-Need 'a1c:very-high' ('A1c '+$p.A1cText)))}elseif($p.A1c -ge $r.A1cHigh){$needs.Add((New-Need 'a1c:high' ('A1c '+$p.A1cText)))}}
  if($p.A1cDate -and $p.A1cDate -lt $today.AddMonths(-$r.A1cStaleMonths)){$needs.Add((New-Need 'a1c:overdue' ('last '+(ConvertTo-DateText $p.A1cDate))))}
- if($p.Diabetic){if($p.EgfrNeeded){$needs.Add((New-Need 'ked:egfr' ''))};if($p.UacrNeeded){$needs.Add((New-Need 'ked:uacr' ''))};if($p.EyeOpen -and $open -notcontains 'EED'){$needs.Add((New-Need 'eye:open' ''))}}
+ if($p.Diabetic){
+  $labs=@();if($p.EgfrNeeded){$labs+='eGFR'};if($p.UacrNeeded){$labs+='uACR'}
+  if($labs.Count -gt 0){$needs.Add((New-Need 'ked:needed' ($labs -join ', ') $labs.Count))}
+  if($p.EyeOpen -and $open -notcontains 'EED'){$needs.Add((New-Need 'eye:open' ''))}
+ }
  $last=Get-PatientLastVisit $p
- if(!$last -or $last -lt $today.AddMonths(-$r.NoVisitLongMonths)){$needs.Add((New-Need 'visit:none-12mo' $(if($last){'last '+(ConvertTo-DateText $last)}else{'no visit on record'})))}
+ if(!$last){$needs.Add((New-Need 'visit:none-record' ''))}
+ elseif($last -lt $today.AddMonths(-$r.NoVisitLongMonths)){$needs.Add((New-Need 'visit:none-12mo' ('last '+(ConvertTo-DateText $last))))}
  elseif($last -lt $today.AddMonths(-$r.NoVisitMonths)){$needs.Add((New-Need 'visit:none-3mo' ('last '+(ConvertTo-DateText $last))))}
  $future=ConvertTo-NumberOrNull $p.FutureVisits
- if($p.Diabetic -or $null -ne $future){
+ # Appointment needs fire when a scheduling source exists, or when no visit exists anywhere (a blank everywhere is read as overdue, not unknown).
+ if($p.Diabetic -or $null -ne $future -or !$last){
   $within1=($p.NextAppt -and $p.NextAppt -le $today.AddMonths($r.UrgentApptMonths));$within3=($p.NextAppt -and $p.NextAppt -le $today.AddMonths($r.NoApptMonths));$hasFuture=($null -ne $future -and $future -gt 0)
   if(!$within3 -and !$hasFuture){$needs.Add((New-Need 'appt:none-3mo' ''))}
   if(!$within1 -and !$hasFuture){$needs.Add((New-Need 'appt:none-1mo' ''))}
@@ -772,8 +780,8 @@ function Get-OutreachCell([string]$Header,$Row){
   'Last Name'{return [string]$p.Last}
   'DOB'{return [string]$p.DOB}
   'Urgency'{return ($Row.tier+' ('+$Row.score+')')}
-  'Open Measures'{return ((@($Row.qual|ForEach-Object{$_.label})) -join ', ')}
-  'Why Ranked Here'{return ((@($Row.boost|ForEach-Object{$(if($_.detail){$_.label+': '+$_.detail}else{$_.label})})) -join '; ')}
+  'Open Measures'{return ((@($Row.qual|ForEach-Object{$(if($_.key -eq 'ked:needed'){$_.short+': '+$_.detail}else{$_.short})})) -join ', ')}
+  'Why Ranked Here'{return ((@($Row.boost|ForEach-Object{$(if($_.detail){$_.short+': '+$_.detail}else{$_.short})})) -join '; ')}
   'Avg Last A1c'{return [string]$p.A1cText}
   'Last A1c Date'{return (ConvertTo-DateText $p.A1cDate)}
   'Eye Exam'{if(!$p.Diabetic){return ''};if($p.EyeOpen){return ('Open'+$(if($p.EyeDate){' (last '+(ConvertTo-DateText $p.EyeDate)+')'}else{''}))};return 'Closed'}
@@ -811,12 +819,12 @@ function New-OutreachTables([object[]]$Patients){
    if($hasValue -or $script:OutreachProtectedColumns -contains $h){$keep+=$c}else{$omitted+=$h}
   }
   $columns=@($keep|ForEach-Object{$headers[$_]});$tableRows=@(foreach($m in $matrix){,@($keep|ForEach-Object{$m[$_]})})
-  $fired=@{};foreach($row in $sorted){foreach($n in @($row.qual)+@($row.boost)){$fired[$n.key]=$n}}
+  $fired=@{};foreach($row in $sorted){foreach($n in @($row.qual)+@($row.boost)){$fired[$n.key+'|'+$n.weight]=$n}}
   $qualifierLabels=@($sorted|ForEach-Object{$_.qual}|ForEach-Object{$_.label})
-  $weights=@($fired.Values|Sort-Object -Property @{Expression={-$_.weight}},@{Expression={$_.label}}|ForEach-Object{$_.label+' (+'+$_.weight+')'}) -join ', '
+  $weights=@($fired.Values|Sort-Object -Property @{Expression={-$_.weight}},@{Expression={$_.label}}|ForEach-Object{$(if($_.key -eq 'ked:needed'){$_.short+': '+$_.detail}else{$_.label})+' (+'+$_.weight+')'}) -join ', '
   $nUrgent=@($sorted|Where-Object{$_.tier -eq 'Urgent'}).Count;$nSoon=@($sorted|Where-Object{$_.tier -eq 'Soon'}).Count;$nRoutine=$sorted.Count-$nUrgent-$nSoon
   $parts=@();if($nUrgent){$parts+=($nUrgent.ToString()+' urgent')};if($nSoon){$parts+=($nSoon.ToString()+' soon')};if($nRoutine){$parts+=($nRoutine.ToString()+' routine')}
-  $countKeys=[ordered]@{'appt:none-3mo'='no appointment within 3 months';'visit:none-12mo'='not seen in 12 months';'a1c:very-high'='A1c 10 or higher';'a1c:high'='A1c 9 to 9.9';'risk:high'='on the high-risk list';'awv:due'='due for an annual wellness visit'}
+  $countKeys=[ordered]@{'appt:none-3mo'='no appointment within 3 months';'visit:none-record'='with no visit on record';'visit:none-12mo'='not seen in 12 months';'a1c:very-high'='A1c 10 or higher';'a1c:high'='A1c 9 to 9.9';'risk:high'='on the high-risk list';'awv:due'='due for an annual wellness visit'}
   foreach($k in $countKeys.Keys){$n=@($sorted|Where-Object{@($_.qual)+@($_.boost)|Where-Object{$_.key -eq $k}}).Count;if($n){$parts+=($n.ToString()+' '+$countKeys[$k])}}
   $t=$script:OutreachText
   $reason=@(
