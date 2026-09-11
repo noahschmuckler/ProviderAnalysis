@@ -720,8 +720,7 @@ $script:NeedCatalog=[ordered]@{
  'visit:none-record'=@{label='No visit on record in any source (assumed overdue)';short='No visit on record';weight=2;group='booster'}
  'visit:none-12mo'=@{label='No visit in 12 months';short='No visit 12 mo';weight=2;group='booster'}
  'visit:none-3mo'=@{label='No visit in 3 months';short='No visit 3 mo';weight=1;group='booster'}
- 'appt:none-3mo'=@{label='No appointment within 3 months';short='No appt 3 mo';weight=1;group='booster'}
- 'appt:none-1mo'=@{label='No appointment within 1 month';short='No appt 1 mo';weight=2;group='booster'}
+ 'appt:none-1mo'=@{label='No appointment within 1 month';short='No appt 1 mo';weight=2;group='booster'}   # weight 3 when nothing is booked within 3 months either (stated in the detail)
  'risk:high'=@{label='On the high-risk list';short='High risk';weight=2;group='booster'}
  'gaps:many'=@{label='3 or more total care gaps (gentle intensifier)';short='Care gaps 3+';weight=1;group='booster'}
  'tcm'=@{label='Had a transitional care (TCM) visit (gentle intensifier)';short='TCM';weight=1;group='booster'}
@@ -782,8 +781,7 @@ function Get-PatientNeeds($p){
  # Appointment needs fire when a scheduling source exists, or when no visit exists anywhere (a blank everywhere is read as overdue, not unknown).
  if($p.Diabetic -or $null -ne $future -or !$last){
   $within1=($p.NextAppt -and $p.NextAppt -le $today.AddMonths($r.UrgentApptMonths));$within3=($p.NextAppt -and $p.NextAppt -le $today.AddMonths($r.NoApptMonths));$hasFuture=($null -ne $future -and $future -gt 0)
-  if(!$within3 -and !$hasFuture){$needs.Add((New-Need 'appt:none-3mo' ''))}
-  if(!$within1 -and !$hasFuture){$needs.Add((New-Need 'appt:none-1mo' ''))}
+  if(!$within1 -and !$hasFuture){if(!$within3){$needs.Add((New-Need 'appt:none-1mo' 'none within 3 months' 3))}else{$needs.Add((New-Need 'appt:none-1mo' ''))}}
  }
  if($p.NewPatient -and !$last){$needs.Add((New-Need 'new:unseen' ''))}
  if($p.IncompleteAttest -gt 0){$needs.Add((New-Need 'attest:incomplete' ([string]$p.IncompleteAttest)))}
@@ -859,12 +857,12 @@ function New-OutreachTable([string]$Key,[string]$Title,[object[]]$Members,[objec
   if($hasValue -or $script:OutreachProtectedColumns -contains $h){$keep+=$c}else{$omitted+=$h}
  }
  $columns=@($keep|ForEach-Object{$headers[$_]});$tableRows=@(foreach($m in $matrix){,@($keep|ForEach-Object{$m[$_]})})
- $fired=@{};foreach($row in $shown){foreach($n in @($row.boost)){$fired[$n.key]=$n}}
- $boosterText=$(if($fired.Count -gt 0){$t.Boosters.Replace('{list}',((@($fired.Values|Sort-Object -Property @{Expression={-$_.weight}},@{Expression={$_.label}}|ForEach-Object{$_.label+' (+'+$_.weight+')'})) -join ', '))}else{''})
+ $fired=@{};foreach($row in $shown){foreach($n in @($row.boost)){$fired[$n.key+'|'+$n.weight]=$n}}
+ $boosterText=$(if($fired.Count -gt 0){$t.Boosters.Replace('{list}',((@($fired.Values|Sort-Object -Property @{Expression={-$_.weight}},@{Expression={$_.label}}|ForEach-Object{$_.label+$(if($_.key -eq 'appt:none-1mo' -and $_.detail){' ('+$_.detail+')'}else{''})+' (+'+$_.weight+')'})) -join ', '))}else{''})
  $nUrgent=@($shown|Where-Object{$_.tier -eq 'Urgent'}).Count;$nSoon=@($shown|Where-Object{$_.tier -eq 'Soon'}).Count;$nRoutine=$shown.Count-$nUrgent-$nSoon
  $parts=@();if($nUrgent){$parts+=($nUrgent.ToString()+' urgent')};if($nSoon){$parts+=($nSoon.ToString()+' soon')};if($nRoutine){$parts+=($nRoutine.ToString()+' routine')}
  $nAcor=@($shown|Where-Object{$_.p.ACOR -eq $true}).Count;if($nAcor){$parts+=($nAcor.ToString()+' ACOR')}
- $countKeys=[ordered]@{'appt:none-3mo'='with no appointment within 3 months';'visit:none-record'='with no visit on record';'visit:none-12mo'='not seen in 12 months';'a1c:very-high'='with A1c 10 or higher';'a1c:high'='with A1c 9 to 9.9';'risk:high'='on the high-risk list'}
+ $countKeys=[ordered]@{'appt:none-1mo'='with no appointment within 1 month';'visit:none-record'='with no visit on record';'visit:none-12mo'='not seen in 12 months';'a1c:very-high'='with A1c 10 or higher';'a1c:high'='with A1c 9 to 9.9';'risk:high'='on the high-risk list'}
  foreach($key in $countKeys.Keys){$n=@($shown|Where-Object{@($_.boost|Where-Object{$_.key -eq $key}).Count -gt 0}).Count;if($n){$parts+=($n.ToString()+' '+$countKeys[$key])}}
  $included=$(switch([string]$selection.mode){
   'all'{$t.IncludedAll.Replace('{count}',$shown.Count.ToString()).Replace('{items}',$ItemText)}
