@@ -657,7 +657,7 @@ function New-UniqueIndex([object[]]$Rows,[string]$Key){$counts=@{};$first=@{};fo
 function Get-LatestDateFromText([string]$Text){$best=$null;foreach($part in @($Text -split ',')){$d=ConvertTo-DateValue $part;if($d -and $d -le (Get-Date) -and (!$best -or $d -gt $best)){$best=$d}};return $best}
 function New-ProviderAnalysis($Job){
  $a=$Job.aliases;$exportAlias=Get-Alias $a 'Export';$qualityAlias=Get-Alias $a 'PtListQuality';$serialAlias=Get-Alias $a 'SerialScheduling';$dscAlias=Get-Alias $a 'DiabetesScorecard';$rpoAlias=Get-Alias $a 'RiskPopulationOutreach';$hrKey=$(if(Get-Alias $a 'HR-CRH'){'HR-CRH'}elseif(Get-Alias $a 'HR-RIVPHNYCMM'){'HR-RIVPHNYCMM'}else{''});$hrAlias=$(if($hrKey){Get-Alias $a $hrKey}else{''})
- $exportFields=@('Provider Name','Risk Pool','NPI','MemberID','First Name','Last Name','Date of Birth','Payer','Last QEM date with non-PCP','Last ACV Date','Last QEM Visit Date with any PCP in assigned TIN','Completed Attestations','Incompleted Attestations','Open ICDs','New Patient','Total Care Gaps','TCM','Risk')
+ $exportFields=@('Provider Name','Risk Pool','NPI','MemberID','First Name','Last Name','Date of Birth','Payer','Last QEM date with non-PCP','Last ACV Date','Last QEM Visit Date with any PCP in assigned TIN','Completed Attestations','Incompleted Attestations','Open ICDs','New Patient','Total Care Gaps','TCM')
  $qualityFields=@('Provider Name','Risk Pool','NPI','MemberID','First Name','Last Name','DOB','BCS','COLO','EED','GSD','CBP','OMW','KED','SPC','MAD','MAC','MAH','SUPD','COB','POLY','OMW Critical Due Date')
  $dscFields=@('Provider','Cdo','Patient','Member ID','KED','EED','Eye Exam Gap Status','Eye Exam Date','Next Appt Date','Next Appt Specialty','Next Appt Location','Risk','GSD','Med Adherence DM','MAD Days Supply','Dx Date','Avg Last A1c','% eGFR last 12 mo.','% uACR last 12 mo.')
  $serialFields=@('Provider Name','Risk Pool','Member ID','Future PCP Visits 2026','PCP Visit Dates','A1c Date');$hrFields=@('PCP Name','Patient First Name','Patient Last Name','DOB','Patient Insurance ID');$rpoFields=@('Epic Pcp','Cdo','Member ID','Next Acv')
@@ -669,9 +669,9 @@ function New-ProviderAnalysis($Job){
   if($d){$overrides=@{'KED'=[string]($d.KED);'EED'=[string]($d.EED);'GSD'=[string]($d.GSD);'MAD'=[string]($d.'Med Adherence DM')};foreach($m in $overrides.Keys){$v=$overrides[$m];if($v -in @('Needed','Non-compliant')){if($open -notcontains $m){$open+=$m};$closed=@($closed|Where-Object{$_ -ne $m})}elseif($v -in @('Completed','Compliant')){$open=@($open|Where-Object{$_ -ne $m});if($closed -notcontains $m){$closed+=$m}}};$egfrComplete=(ConvertTo-NumberValue $d.'% eGFR last 12 mo.') -ge 100;$uacrComplete=(ConvertTo-NumberValue $d.'% uACR last 12 mo.') -ge 100;if($egfrComplete -and $uacrComplete){$open=@($open|Where-Object{$_ -ne 'KED'});if($closed -notcontains 'KED'){$closed+='KED'}}}
   $high=$highIds.ContainsKey($id);$lastAcv=(ConvertTo-DateValue $e.'Last ACV Date');$acor=([string]$e.Payer).Trim() -eq 'ACOR';$due=$false;if($lastAcv){$due=$(if($acor){$lastAcv -le (Get-Date).AddDays(-366)}else{$lastAcv -lt (Get-Date -Day 1 -Month 1)})};$nextAcv=$null;if($rpoIndex.ContainsKey($id)){$nextAcv=ConvertTo-DateValue $rpoIndex[$id].'Next Acv'};if($nextAcv -and $nextAcv.Date -ge (Get-Date).Date){$due=$false}
   $vis=@((ConvertTo-DateValue $e.'Last QEM date with non-PCP'),(ConvertTo-DateValue $e.'Last ACV Date'),(ConvertTo-DateValue $e.'Last QEM Visit Date with any PCP in assigned TIN'))|Where-Object{$_};$last=$(if($vis){$vis|Sort-Object -Descending|Select-Object -First 1}else{$null});$serialLast=$(if($s){Get-LatestDateFromText ([string]$s.'PCP Visit Dates')}else{$null})
-  $patients+=[pscustomobject][ordered]@{MemberID=$id;First=[string]$e.'First Name';Last=[string]$e.'Last Name';DOB=$(ConvertTo-DateText $e.'Date of Birth');ACOR=$acor;ACVDue=$due;Attest=((ConvertTo-NumberValue $e.'Completed Attestations')+(ConvertTo-NumberValue $e.'Incompleted Attestations')) -gt 0;OpenICD=[string]$e.'Open ICDs';NewPatient=(Test-TrueValue $e.'New Patient');OpenHedis=($open -join ', ');ClosedHedis=($closed -join ', ');HighRisk=$high;LastVisit=$last;SerialLast=$serialLast;A1cDate=$(if($s){ConvertTo-DateValue $s.'A1c Date'}else{$null});FutureVisits=$(if($s){[string]$s.'Future PCP Visits 2026'}else{''});NextAppt=$(if($d){ConvertTo-DateValue $d.'Next Appt Date'}else{$null});NextApptSpecialty=$(if($d){([string]$d.'Next Appt Specialty').Trim()}else{''});A1c=$(if($d){ConvertTo-NumberOrNull $d.'Avg Last A1c'}else{$null});A1cText=$(if($d){([string]$d.'Avg Last A1c').Trim()}else{''});Diabetic=($null -ne $d);EyeOpen=[bool]($d -and (([string]$d.'Eye Exam Gap Status').Trim() -eq 'Open'));EyeDate=$(if($d){ConvertTo-DateValue $d.'Eye Exam Date'}else{$null});EgfrNeeded=[bool]($d -and ((ConvertTo-NumberValue $d.'% eGFR last 12 mo.') -lt 100));UacrNeeded=[bool]($d -and ((ConvertTo-NumberValue $d.'% uACR last 12 mo.') -lt 100));MedAdhDM=$(if($d){([string]$d.'Med Adherence DM').Trim()}else{''});OmwDue=$(if($q){ConvertTo-DateText $q.'OMW Critical Due Date'}else{''});TotalGaps=(ConvertTo-NumberValue $e.'Total Care Gaps');IncompleteAttest=(ConvertTo-NumberValue $e.'Incompleted Attestations');OpenIcdCount=@(([string]$e.'Open ICDs') -split ','|Where-Object{$_.Trim() -and $_.Trim() -ne '0'}).Count;Tcm=[bool]((Test-TrueValue $e.TCM) -or ((ConvertTo-NumberValue $e.TCM) -gt 0));RiskContract=[bool]($acor -or ((([string]$e.Risk) -match 'Risk') -and (([string]$e.Risk) -notmatch 'Non-Risk')));DSC=$d}
+  $patients+=[pscustomobject][ordered]@{MemberID=$id;First=[string]$e.'First Name';Last=[string]$e.'Last Name';DOB=$(ConvertTo-DateText $e.'Date of Birth');ACOR=$acor;ACVDue=$due;Attest=((ConvertTo-NumberValue $e.'Completed Attestations')+(ConvertTo-NumberValue $e.'Incompleted Attestations')) -gt 0;OpenICD=[string]$e.'Open ICDs';NewPatient=(Test-TrueValue $e.'New Patient');OpenHedis=($open -join ', ');ClosedHedis=($closed -join ', ');HighRisk=$high;LastVisit=$last;SerialLast=$serialLast;A1cDate=$(if($s){ConvertTo-DateValue $s.'A1c Date'}else{$null});FutureVisits=$(if($s){[string]$s.'Future PCP Visits 2026'}else{''});NextAppt=$(if($d){ConvertTo-DateValue $d.'Next Appt Date'}else{$null});NextApptSpecialty=$(if($d){([string]$d.'Next Appt Specialty').Trim()}else{''});A1c=$(if($d){ConvertTo-NumberOrNull $d.'Avg Last A1c'}else{$null});A1cText=$(if($d){([string]$d.'Avg Last A1c').Trim()}else{''});Diabetic=($null -ne $d);EyeOpen=[bool]($d -and (([string]$d.'Eye Exam Gap Status').Trim() -eq 'Open'));EyeDate=$(if($d){ConvertTo-DateValue $d.'Eye Exam Date'}else{$null});EgfrNeeded=[bool]($d -and ((ConvertTo-NumberValue $d.'% eGFR last 12 mo.') -lt 100));UacrNeeded=[bool]($d -and ((ConvertTo-NumberValue $d.'% uACR last 12 mo.') -lt 100));MedAdhDM=$(if($d){([string]$d.'Med Adherence DM').Trim()}else{''});OmwDue=$(if($q){ConvertTo-DateText $q.'OMW Critical Due Date'}else{''});TotalGaps=(ConvertTo-NumberValue $e.'Total Care Gaps');IncompleteAttest=(ConvertTo-NumberValue $e.'Incompleted Attestations');OpenIcdCount=@(([string]$e.'Open ICDs') -split ','|Where-Object{$_.Trim() -and $_.Trim() -ne '0'}).Count;Tcm=[bool]((Test-TrueValue $e.TCM) -or ((ConvertTo-NumberValue $e.TCM) -gt 0));RiskContract=$true;DSC=$d}
  }
- foreach($hid in $unmatchedHr.Keys){$x=$unmatchedHr[$hid];$patients+=[pscustomobject][ordered]@{MemberID=$hid;First=[string]$x.'Patient First Name';Last=[string]$x.'Patient Last Name';DOB=$(ConvertTo-DateText $x.DOB);ACOR=$null;ACVDue=$false;Attest=$false;OpenICD='';NewPatient=$false;OpenHedis='';ClosedHedis='';HighRisk=$true;LastVisit=$null;SerialLast=$null;A1cDate=$null;FutureVisits='';NextAppt=$null;NextApptSpecialty='';A1c=$null;A1cText='';Diabetic=$false;EyeOpen=$false;EyeDate=$null;EgfrNeeded=$false;UacrNeeded=$false;MedAdhDM='';OmwDue='';TotalGaps=0;IncompleteAttest=0;OpenIcdCount=0;Tcm=$false;RiskContract=$false;DSC=$null}}
+ foreach($hid in $unmatchedHr.Keys){$x=$unmatchedHr[$hid];$patients+=[pscustomobject][ordered]@{MemberID=$hid;First=[string]$x.'Patient First Name';Last=[string]$x.'Patient Last Name';DOB=$(ConvertTo-DateText $x.DOB);ACOR=$null;ACVDue=$false;Attest=$false;OpenICD='';NewPatient=$false;OpenHedis='';ClosedHedis='';HighRisk=$true;LastVisit=$null;SerialLast=$null;A1cDate=$null;FutureVisits='';NextAppt=$null;NextApptSpecialty='';A1c=$null;A1cText='';Diabetic=$false;EyeOpen=$false;EyeDate=$null;EgfrNeeded=$false;UacrNeeded=$false;MedAdhDM='';OmwDue='';TotalGaps=0;IncompleteAttest=0;OpenIcdCount=0;Tcm=$false;RiskContract=$true;DSC=$null}}
  Set-JobProgress $Job 62 'Scoring outreach needs';foreach($p in $patients){Set-P $p 'Items' (Get-PatientItems $p);Set-P $p 'Needs' @(Get-PatientNeeds $p);Set-P $p 'Urgency' (Get-PatientUrgency $p)};$outreach=@(New-OutreachTables $patients)
  Set-JobProgress $Job 65 'Building KPI and patient panels';$total=$patients.Count;$acorCount=@($patients|Where-Object{$_.ACOR -eq $true}).Count;$non=@($patients|Where-Object{$null -ne $_.ACOR -and $_.ACOR -eq $false}).Count
  $kpi=[ordered]@{total=$total;acor=$acorCount;nonAcor=$non;acorAcvDue=@($patients|Where-Object{$_.ACOR -eq $true -and $_.ACVDue}).Count;nonAcorAcvDue=@($patients|Where-Object{$_.ACOR -eq $false -and $_.ACVDue}).Count;newPatients=@($patients|Where-Object{$_.NewPatient}).Count;hasAttestations=@($patients|Where-Object{$_.Attest}).Count;openIcd=@($patients|Where-Object{$_.OpenICD}).Count;hasHedis=@($patients|Where-Object{$_.OpenHedis -or $_.ClosedHedis}).Count;openHedis=@($patients|Where-Object{$_.OpenHedis}).Count;highRisk=@($patients|Where-Object{$_.HighRisk}).Count}
@@ -690,7 +690,7 @@ function ConvertTo-ListCellHtml([object]$Value,[string]$Separator){
  $spans=@();for($i=0;$i -lt $parts.Count;$i++){$suffix=$(if($i -lt $parts.Count-1){$Separator}else{''});$spans+='<span>'+(ConvertTo-HtmlEncoded ($parts[$i]+$suffix))+'</span>'}
  return '<td><div class="list">'+($spans -join ' ')+'</div></td>'
 }
-# --- Draft 4.9: ranked outreach lists (items shared by every patient on a list -> short dynamic tables with a preloaded-text reason builder) ---
+# --- Draft 5.0: ranked outreach lists (items shared by every patient on a list -> short dynamic tables with a preloaded-text reason builder) ---
 $script:OutreachRules=[ordered]@{NoVisitMonths=3;NoVisitLongMonths=12;NoApptMonths=3;UrgentApptMonths=1;A1cHigh=9.0;A1cVeryHigh=10.0;A1cStaleMonths=12;ManyGaps=3;UrgentScore=6;SoonScore=3;PreferredRowsMin=8;PreferredRowsMax=12;MaxRows=25;MinRowsPerList=3;MaxLists=6;MaxItemsPerList=3;RiskDiabetesMultiplier=3}
 $script:HedisMeasures=[ordered]@{
  EED=@{label='Eye exam (EED)';group='diabetes'};KED=@{label='Kidney evaluation (KED)';group='diabetes'};GSD=@{label='A1c control (GSD)';group='diabetes'};MAD=@{label='Diabetes med adherence (MAD)';group='diabetes'};SUPD=@{label='Statin in diabetes (SUPD)';group='diabetes'}
@@ -708,6 +708,7 @@ $script:OutreachItems=[ordered]@{
  'awv-pcp'=@{label='an annual wellness visit due with the PCP (ACOR)';short='AWV due (PCP)';ask='complete the annual wellness visit with the PCP';column='AWV Due';group='';context=@();sources=@('Export (AWV due, payer)')}
  'awv-np'=@{label='an annual wellness visit due that an NP can complete (non-ACOR)';short='AWV due (NP)';ask='complete the annual wellness visit (NP-eligible)';column='AWV Due';group='';context=@();sources=@('Export (AWV due, payer)')}
 }
+foreach($itemKey in @($script:OutreachItems.Keys)){$script:OutreachItems[$itemKey].key=$itemKey}
 # Boosters never qualify a patient for a list; they raise urgency and are explained in "Why Ranked Here". short = table cell text, label = reason-block text.
 $script:NeedCatalog=[ordered]@{
  'a1c:very-high'=@{label='A1c 10 or higher';short='A1c 10+';weight=3;group='booster'}
@@ -730,7 +731,9 @@ $script:OutreachText=[ordered]@{
  IncludedCut='{shown} of {qualifying} patients share {items}; showing those with urgency {threshold} or higher (lists aim for {min}-{prefmax} patients and never exceed {max}).'
  IncludedCapped='{shown} of {qualifying} patients share {items}; the {max} most urgent are shown (all have urgency {threshold}).'
  Ask='Every patient here needs an appointment. At that visit: {asks}.'
- Ranking='Urgency: 1 per open measure (diabetes measures count {mult} for ACOR or risk-contract patients; KED counts 1 per missing lab), 1 for open ICDs, 1 for an AWV due{boosters}. Urgent = {urgent} or more, Soon = {soon} or more; ties go to the oldest last visit.'
+ Ranking='Urgency: 1 per open measure (diabetes measures count {mult} each because every panel patient is on a risk contract; KED counts 1 per missing lab), 1 for open ICDs, 1 for an AWV due{boosters}. Urgent = {urgent} or more, Soon = {soon} or more; ties go to the oldest last visit.'
+ AwvNote='Annual wellness visits are high urgency for ACOR and non-ACOR patients alike, so they get their own list(s) first; {total} patient(s) are due{split}.'
+ AwvSplit=', split into PCP (ACOR) and NP (non-ACOR) lists because more than {max} are due'
  Boosters=', plus {list}'
  Highlights='Highlights: {parts}.'
  Assignment='Each patient appears on one list only, the list where they share the most items; {leftover} qualifying patient(s) did not reach a list.'
@@ -757,8 +760,6 @@ function Get-PatientItems($p){
    if($m -eq 'KED' -and $p.Diabetic){$labs=@();if($p.EgfrNeeded){$labs+='eGFR'};if($p.UacrNeeded){$labs+='uACR'};if($labs.Count -eq 0){continue};$measures+=('KED: '+($labs -join ', '));$weight+=$labs.Count}
    else{$measures+=$m;$weight+=1}
   }
-  # KED is defined by the scorecard labs (diabetic without both eGFR and uACR), even when the lagging HEDIS feed still shows KED complete.
-  if($itemKey -eq 'hedis-diabetes' -and $p.Diabetic -and $open -notcontains 'KED'){$labs=@();if($p.EgfrNeeded){$labs+='eGFR'};if($p.UacrNeeded){$labs+='uACR'};if($labs.Count -gt 0){$measures+=('KED: '+($labs -join ', '));$weight+=$labs.Count}}
   if($measures.Count -eq 0){continue}
   if($itemKey -eq 'hedis-diabetes'){$weight=$weight*$mult}
   $items[$itemKey]=[ordered]@{key=$itemKey;weight=$weight;detail=($measures -join ', ')}
@@ -793,7 +794,7 @@ function Get-PatientNeeds($p){
 }
 function Get-PatientUrgency($p){$s=0;foreach($k in @($p.Items.Keys)){$s+=[int]$p.Items[$k].weight};foreach($n in @($p.Needs)){$s+=[int]$n.weight};return $s}
 function Get-OutreachItemCombos{
- $keys=@($script:OutreachItems.Keys);$max=[int]$script:OutreachRules.MaxItemsPerList;$out=@()
+ $keys=@($script:OutreachItems.Keys|Where-Object{$_ -notlike 'awv-*'});$max=[int]$script:OutreachRules.MaxItemsPerList;$out=@()
  for($i=0;$i -lt $keys.Count;$i++){
   $out+=,@($keys[$i])
   if($max -ge 2){for($j=$i+1;$j -lt $keys.Count;$j++){
@@ -801,12 +802,12 @@ function Get-OutreachItemCombos{
    if($max -ge 3){for($k=$j+1;$k -lt $keys.Count;$k++){$out+=,@($keys[$i],$keys[$j],$keys[$k])}}
   }}
  }
- return @($out|Where-Object{!(($_ -contains 'awv-pcp') -and ($_ -contains 'awv-np'))})
+ return $out
 }
-function Select-OutreachRows([object[]]$Sorted){
- # $Sorted is ordered by score desc. Show everything up to PreferredRowsMax; otherwise raise the urgency cutoff until the list reaches PreferredRowsMin without exceeding MaxRows.
- $r=$script:OutreachRules;$n=$Sorted.Count
- if($n -le $r.PreferredRowsMax){return @{threshold=$(if($n){$Sorted[$n-1].score}else{0});rows=@($Sorted);mode='all'}}
+function Select-OutreachRows([object[]]$Sorted,[int]$ShowAllUpTo=-1){
+ # $Sorted is ordered by score desc. Show everything up to ShowAllUpTo (default PreferredRowsMax); otherwise raise the urgency cutoff until the list reaches PreferredRowsMin without exceeding MaxRows.
+ $r=$script:OutreachRules;$n=$Sorted.Count;if($ShowAllUpTo -lt 0){$ShowAllUpTo=[int]$r.PreferredRowsMax}
+ if($n -le $ShowAllUpTo){return @{threshold=$(if($n){$Sorted[$n-1].score}else{0});rows=@($Sorted);mode='all'}}
  $thresholds=@($Sorted|ForEach-Object{$_.score}|Select-Object -Unique);$best=$null
  foreach($t in $thresholds){
   $count=@($Sorted|Where-Object{$_.score -ge $t}).Count
@@ -842,10 +843,67 @@ function Get-OutreachCell([string]$Header,$Row){
  }
 }
 function Format-OutreachList([string[]]$Items,[string]$Word='and'){$u=@($Items|Select-Object -Unique);if($u.Count -eq 0){return ''};if($u.Count -eq 1){return $u[0]};return ((($u[0..($u.Count-2)]) -join ', ')+' '+$Word+' '+$u[$u.Count-1])}
+function New-OutreachTable([string]$Key,[string]$Title,[object[]]$Members,[object[]]$ItemDefs,[string[]]$LeadColumns,[string]$ItemText,[string[]]$Asks,[string[]]$Sources,[int]$ShowAllUpTo,[string]$Note){
+ $r=$script:OutreachRules;$t=$script:OutreachText
+ $rows=@(foreach($p in $Members){$score=[int]$p.Urgency;@{p=$p;score=$score;tier=$(if($score -ge $r.UrgentScore){'Urgent'}elseif($score -ge $r.SoonScore){'Soon'}else{'Routine'});items=$p.Items;boost=@($p.Needs);k=@($ItemDefs|ForEach-Object{[string]$_.key});lastVisit=(Get-PatientLastVisit $p)}})
+ $sorted=@($rows|Sort-Object -Property @{Expression={-$_.score}},@{Expression={if($_.lastVisit){[DateTime]$_.lastVisit}else{[DateTime]::MinValue}}},@{Expression={[string]$_.p.Last}},@{Expression={[string]$_.p.First}})
+ $selection=Select-OutreachRows $sorted $ShowAllUpTo;$shown=@($selection.rows)
+ $headers=@('First Name','Last Name','DOB','Urgency');foreach($c in $LeadColumns){if($headers -notcontains $c){$headers+=$c}}
+ foreach($d in $ItemDefs){foreach($c in @($d.context)){if($headers -notcontains $c){$headers+=$c}}}
+ $headers+=@('Also Needs','Last Visit','Next Appt','Why Ranked Here')
+ $matrix=@(foreach($row in $shown){,@(foreach($h in $headers){Get-OutreachCell $h $row})})
+ $keep=@();$omitted=@()
+ for($c=0;$c -lt $headers.Count;$c++){
+  $h=$headers[$c];$hasValue=$false
+  foreach($m in $matrix){if($script:OutreachBlankValues -notcontains ([string]$m[$c]).Trim()){$hasValue=$true;break}}
+  if($hasValue -or $script:OutreachProtectedColumns -contains $h){$keep+=$c}else{$omitted+=$h}
+ }
+ $columns=@($keep|ForEach-Object{$headers[$_]});$tableRows=@(foreach($m in $matrix){,@($keep|ForEach-Object{$m[$_]})})
+ $fired=@{};foreach($row in $shown){foreach($n in @($row.boost)){$fired[$n.key]=$n}}
+ $boosterText=$(if($fired.Count -gt 0){$t.Boosters.Replace('{list}',((@($fired.Values|Sort-Object -Property @{Expression={-$_.weight}},@{Expression={$_.label}}|ForEach-Object{$_.label+' (+'+$_.weight+')'})) -join ', '))}else{''})
+ $nUrgent=@($shown|Where-Object{$_.tier -eq 'Urgent'}).Count;$nSoon=@($shown|Where-Object{$_.tier -eq 'Soon'}).Count;$nRoutine=$shown.Count-$nUrgent-$nSoon
+ $parts=@();if($nUrgent){$parts+=($nUrgent.ToString()+' urgent')};if($nSoon){$parts+=($nSoon.ToString()+' soon')};if($nRoutine){$parts+=($nRoutine.ToString()+' routine')}
+ $nAcor=@($shown|Where-Object{$_.p.ACOR -eq $true}).Count;if($nAcor){$parts+=($nAcor.ToString()+' ACOR')}
+ $countKeys=[ordered]@{'appt:none-3mo'='with no appointment within 3 months';'visit:none-record'='with no visit on record';'visit:none-12mo'='not seen in 12 months';'a1c:very-high'='with A1c 10 or higher';'a1c:high'='with A1c 9 to 9.9';'risk:high'='on the high-risk list'}
+ foreach($key in $countKeys.Keys){$n=@($shown|Where-Object{@($_.boost|Where-Object{$_.key -eq $key}).Count -gt 0}).Count;if($n){$parts+=($n.ToString()+' '+$countKeys[$key])}}
+ $included=$(switch([string]$selection.mode){
+  'all'{$t.IncludedAll.Replace('{count}',$shown.Count.ToString()).Replace('{items}',$ItemText)}
+  'capped'{$t.IncludedCapped.Replace('{shown}',$shown.Count.ToString()).Replace('{qualifying}',$sorted.Count.ToString()).Replace('{items}',$ItemText).Replace('{max}',$r.MaxRows.ToString()).Replace('{threshold}',$selection.threshold.ToString())}
+  default{$t.IncludedCut.Replace('{shown}',$shown.Count.ToString()).Replace('{qualifying}',$sorted.Count.ToString()).Replace('{items}',$ItemText).Replace('{threshold}',$selection.threshold.ToString()).Replace('{min}',$r.PreferredRowsMin.ToString()).Replace('{prefmax}',$r.PreferredRowsMax.ToString()).Replace('{max}',$r.MaxRows.ToString())}
+ })
+ $reason=@($included)
+ if($Note){$reason+=$Note}
+ $reason+=@(
+  $t.Ask.Replace('{asks}',(Format-OutreachList $Asks)),
+  $t.Ranking.Replace('{mult}',$r.RiskDiabetesMultiplier.ToString()).Replace('{boosters}',$boosterText).Replace('{urgent}',$r.UrgentScore.ToString()).Replace('{soon}',$r.SoonScore.ToString()),
+  $t.Highlights.Replace('{parts}',($parts -join '; '))
+ )
+ if($omitted.Count -gt 0){$reason+=$t.Omitted.Replace('{columns}',($omitted -join ', '))}
+ $reason+=$t.Sources.Replace('{sources}',(@($Sources|Select-Object -Unique) -join '; '))
+ return [ordered]@{key=$Key;title=$Title;items=@($ItemDefs|ForEach-Object{[string]$_.key});ask=(Format-OutreachList $Asks);reason=@($reason);columns=$columns;rows=$tableRows;omittedColumns=@($omitted);counts=[ordered]@{qualifying=$sorted.Count;shown=$shown.Count;threshold=$selection.threshold;urgent=$nUrgent;soon=$nSoon;routine=$nRoutine};shownIds=@($shown|ForEach-Object{[string]$_.p.MemberID})}
+}
 function New-OutreachTables([object[]]$Patients){
  $r=$script:OutreachRules;$t=$script:OutreachText;$out=@()
- $pool=@($Patients|Where-Object{@($_.Items.Keys).Count -gt 0});$assigned=@{};$usedCombos=@{}
- $combos=@(Get-OutreachItemCombos)
+ $pool=@($Patients|Where-Object{@($_.Items.Keys).Count -gt 0});$assigned=@{}
+ $common=@('Export (visits, payer)','HR list')
+ # AWV lists come first: one list when MaxRows or fewer are due, otherwise split by ACOR (PCP) and non-ACOR (NP).
+ $awv=@($pool|Where-Object{$_.Items.Contains('awv-pcp') -or $_.Items.Contains('awv-np')})
+ if($awv.Count -gt 0){
+  $split=($awv.Count -gt [int]$r.MaxRows);$note=$t.AwvNote.Replace('{total}',$awv.Count.ToString()).Replace('{split}',$(if($split){$t.AwvSplit.Replace('{max}',$r.MaxRows.ToString())}else{''}))
+  $awvGroups=@()
+  if(!$split){$awvGroups+=@{key='outreach-awv';title='AWV Due (PCP and NP)';members=$awv;defs=@($script:OutreachItems['awv-pcp'],$script:OutreachItems['awv-np']);lead=@('AWV Due');itemText='an annual wellness visit due';asks=@('complete the annual wellness visit (with the PCP for ACOR patients; NP-eligible for non-ACOR)')}}
+  else{
+   $pcp=@($awv|Where-Object{$_.Items.Contains('awv-pcp')});$np=@($awv|Where-Object{$_.Items.Contains('awv-np')})
+   if($pcp.Count -gt 0){$awvGroups+=@{key='outreach-awv-pcp';title='AWV Due - PCP (ACOR)';members=$pcp;defs=@($script:OutreachItems['awv-pcp']);lead=@();itemText=[string]$script:OutreachItems['awv-pcp'].label;asks=@([string]$script:OutreachItems['awv-pcp'].ask)}}
+   if($np.Count -gt 0){$awvGroups+=@{key='outreach-awv-np';title='AWV Due - NP (non-ACOR)';members=$np;defs=@($script:OutreachItems['awv-np']);lead=@();itemText=[string]$script:OutreachItems['awv-np'].label;asks=@([string]$script:OutreachItems['awv-np'].ask)}}
+  }
+  foreach($g in $awvGroups){
+   $table=New-OutreachTable $g.key $g.title $g.members $g.defs $g.lead $g.itemText $g.asks (@($g.defs|ForEach-Object{@($_.sources)})+$common) ([int]$r.MaxRows) $note
+   foreach($id in $table.shownIds){$assigned[$id]=$true};$out+=$table
+  }
+ }
+ # Then greedy combination lists over the remaining patients: the combination with the most patients times shared items wins each round.
+ $usedCombos=@{};$combos=@(Get-OutreachItemCombos)
  for($round=0;$round -lt [int]$r.MaxLists;$round++){
   $best=$null
   foreach($combo in $combos){
@@ -856,50 +914,12 @@ function New-OutreachTables([object[]]$Patients){
    if($null -eq $best -or $value -gt $best.value -or ($value -eq $best.value -and $urgency -gt $best.urgency)){$best=@{combo=$combo;key=$comboKey;members=$members;value=$value;urgency=$urgency}}
   }
   if($null -eq $best){break}
-  $usedCombos[$best.key]=$true;$combo=@($best.combo)
-  $rows=@(foreach($p in $best.members){$score=[int]$p.Urgency;@{p=$p;score=$score;tier=$(if($score -ge $r.UrgentScore){'Urgent'}elseif($score -ge $r.SoonScore){'Soon'}else{'Routine'});items=$p.Items;boost=@($p.Needs);k=$combo;lastVisit=(Get-PatientLastVisit $p)}})
-  $sorted=@($rows|Sort-Object -Property @{Expression={-$_.score}},@{Expression={if($_.lastVisit){[DateTime]$_.lastVisit}else{[DateTime]::MinValue}}},@{Expression={[string]$_.p.Last}},@{Expression={[string]$_.p.First}})
-  $selection=Select-OutreachRows $sorted;$shown=@($selection.rows)
-  foreach($row in $shown){$assigned[[string]$row.p.MemberID]=$true}
-  $defs=@($combo|ForEach-Object{$script:OutreachItems[$_]})
-  $headers=@('First Name','Last Name','DOB','Urgency');foreach($d in $defs){if($headers -notcontains [string]$d.column){$headers+=[string]$d.column}}
-  foreach($d in $defs){foreach($c in @($d.context)){if($headers -notcontains $c){$headers+=$c}}}
-  $headers+=@('Also Needs','Last Visit','Next Appt','Why Ranked Here')
-  $matrix=@(foreach($row in $shown){,@(foreach($h in $headers){Get-OutreachCell $h $row})})
-  $keep=@();$omitted=@()
-  for($c=0;$c -lt $headers.Count;$c++){
-   $h=$headers[$c];$hasValue=$false
-   foreach($m in $matrix){if($script:OutreachBlankValues -notcontains ([string]$m[$c]).Trim()){$hasValue=$true;break}}
-   if($hasValue -or $script:OutreachProtectedColumns -contains $h){$keep+=$c}else{$omitted+=$h}
-  }
-  $columns=@($keep|ForEach-Object{$headers[$_]});$tableRows=@(foreach($m in $matrix){,@($keep|ForEach-Object{$m[$_]})})
-  $itemLabels=@($defs|ForEach-Object{[string]$_.label});$asks=@($defs|ForEach-Object{[string]$_.ask})
-  $itemsText=Format-OutreachList $itemLabels;$title=(@($defs|ForEach-Object{[string]$_.short}) -join ' + ')
-  $fired=@{};foreach($row in $shown){foreach($n in @($row.boost)){$fired[$n.key]=$n}}
-  $boosterText=$(if($fired.Count -gt 0){$t.Boosters.Replace('{list}',((@($fired.Values|Sort-Object -Property @{Expression={-$_.weight}},@{Expression={$_.label}}|ForEach-Object{$_.label+' (+'+$_.weight+')'})) -join ', '))}else{''})
-  $nUrgent=@($shown|Where-Object{$_.tier -eq 'Urgent'}).Count;$nSoon=@($shown|Where-Object{$_.tier -eq 'Soon'}).Count;$nRoutine=$shown.Count-$nUrgent-$nSoon
-  $parts=@();if($nUrgent){$parts+=($nUrgent.ToString()+' urgent')};if($nSoon){$parts+=($nSoon.ToString()+' soon')};if($nRoutine){$parts+=($nRoutine.ToString()+' routine')}
-  $nRisk=@($shown|Where-Object{$_.p.RiskContract}).Count;if($nRisk){$parts+=($nRisk.ToString()+' ACOR or risk-contract')}
-  $countKeys=[ordered]@{'appt:none-3mo'='with no appointment within 3 months';'visit:none-record'='with no visit on record';'visit:none-12mo'='not seen in 12 months';'a1c:very-high'='with A1c 10 or higher';'a1c:high'='with A1c 9 to 9.9';'risk:high'='on the high-risk list'}
-  foreach($key in $countKeys.Keys){$n=@($shown|Where-Object{@($_.boost|Where-Object{$_.key -eq $key}).Count -gt 0}).Count;if($n){$parts+=($n.ToString()+' '+$countKeys[$key])}}
-  $included=$(switch([string]$selection.mode){
-   'all'{$t.IncludedAll.Replace('{count}',$shown.Count.ToString()).Replace('{items}',$itemsText)}
-   'capped'{$t.IncludedCapped.Replace('{shown}',$shown.Count.ToString()).Replace('{qualifying}',$sorted.Count.ToString()).Replace('{items}',$itemsText).Replace('{max}',$r.MaxRows.ToString()).Replace('{threshold}',$selection.threshold.ToString())}
-   default{$t.IncludedCut.Replace('{shown}',$shown.Count.ToString()).Replace('{qualifying}',$sorted.Count.ToString()).Replace('{items}',$itemsText).Replace('{threshold}',$selection.threshold.ToString()).Replace('{min}',$r.PreferredRowsMin.ToString()).Replace('{prefmax}',$r.PreferredRowsMax.ToString()).Replace('{max}',$r.MaxRows.ToString())}
-  })
-  $sources=@();foreach($d in $defs){$sources+=@($d.sources)};$sources+=@('Export (visits, payer)','HR list')
-  $reason=@(
-   $included,
-   $t.Ask.Replace('{asks}',(Format-OutreachList $asks)),
-   $t.Ranking.Replace('{mult}',$r.RiskDiabetesMultiplier.ToString()).Replace('{boosters}',$boosterText).Replace('{urgent}',$r.UrgentScore.ToString()).Replace('{soon}',$r.SoonScore.ToString()),
-   $t.Highlights.Replace('{parts}',($parts -join '; '))
-  )
-  if($omitted.Count -gt 0){$reason+=$t.Omitted.Replace('{columns}',($omitted -join ', '))}
-  $reason+=$t.Sources.Replace('{sources}',(@($sources|Select-Object -Unique) -join '; '))
-  $out+=[ordered]@{key=('outreach-'+($combo -join '-'));title=$title;items=@($combo);ask=(Format-OutreachList $asks);reason=@($reason);columns=$columns;rows=$tableRows;omittedColumns=@($omitted);counts=[ordered]@{qualifying=$sorted.Count;shown=$shown.Count;threshold=$selection.threshold;urgent=$nUrgent;soon=$nSoon;routine=$nRoutine}}
+  $usedCombos[$best.key]=$true;$combo=@($best.combo);$defs=@($combo|ForEach-Object{$script:OutreachItems[$_]})
+  $table=New-OutreachTable ('outreach-'+($combo -join '-')) (@($defs|ForEach-Object{[string]$_.short}) -join ' + ') $best.members $defs @($defs|ForEach-Object{[string]$_.column}) (Format-OutreachList @($defs|ForEach-Object{[string]$_.label})) @($defs|ForEach-Object{[string]$_.ask}) (@($defs|ForEach-Object{@($_.sources)})+$common) -1 ''
+  foreach($id in $table.shownIds){$assigned[$id]=$true};$out+=$table
  }
  $leftover=@($pool|Where-Object{!$assigned.ContainsKey([string]$_.MemberID)}).Count
- foreach($table in $out){$table.reason=@($table.reason)+@($t.Assignment.Replace('{leftover}',$leftover.ToString()))}
+ foreach($table in $out){$table.reason=@($table.reason)+@($t.Assignment.Replace('{leftover}',$leftover.ToString()));$table.Remove('shownIds')}
  return $out
 }
 function ConvertTo-TableHtml([string]$Id,[string]$Title,$Table,[string[]]$Description){
