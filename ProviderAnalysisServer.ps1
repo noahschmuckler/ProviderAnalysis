@@ -559,6 +559,7 @@ body{font:14px Segoe UI,Arial;margin:0;background:#f4f7fb;color:#172033}header{b
 __TABCSS__
 .card{background:white;border:1px solid #dce4ef;border-radius:8px;padding:18px;margin:14px 0}.muted{color:#667085}.error{color:#a61b1b}
 details.pool{border:1px solid #dce4ef;border-radius:8px;margin:10px 0;background:#fff}details.pool>summary{cursor:pointer;padding:12px 16px;font-size:16px;background:#eaf1f8;border-radius:8px}details.pool[open]>summary{border-radius:8px 8px 0 0}
+details.loc{margin:8px 12px;border:1px solid #e5e9f0;border-radius:6px;background:#fff}details.loc>summary{cursor:pointer;padding:8px 12px;font-weight:600;color:#17365d;background:#f7f9fc;border-radius:6px}details.loc[open]>summary{border-radius:6px 6px 0 0}
 .provider{padding:12px 16px;border-top:1px solid #e5e9f0}.row{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
 button,a.btn{padding:7px 12px;cursor:pointer;background:#1769aa;color:#fff;border:0;border-radius:5px;text-decoration:none;font:inherit}button:disabled{opacity:.5;cursor:default}a.btn{background:#e4e9f0;color:#172033}
 details.reports{margin-top:8px}details.reports>summary{cursor:pointer;color:#17365d}.report{padding:6px 0 6px 14px;border-left:3px solid #dce4ef;margin:4px 0}
@@ -582,10 +583,15 @@ function providerHtml(p){
  const active=p.active?'<div class="progress"><span style="width:'+Math.max(0,Math.min(100,p.active.percent||0))+'%"></span></div><span class="muted">'+esc(p.active.state)+' '+(p.active.percent||0)+'% - '+esc(p.active.stage)+'</span>':'';
  return '<div class="provider"><div class="row"><div><b>'+esc(p.displayName)+'</b> <span class="muted">NPI '+esc(p.npi)+' &middot; '+(p.location?esc(p.location):'<em>no location saved</em>')+'</span></div><div><button data-npi="'+esc(p.npi)+'"'+(p.active?' disabled':'')+'>'+(p.active?'Running...':'Generate report')+'</button> <a class="btn" href="/providers?profile='+encodeURIComponent(p.npi)+'">Edit profile</a></div></div>'+active+'<details class="reports" data-key="'+esc(k)+'"'+(isOpen(k,false)?' open':'')+'><summary>Reports <span class="muted">('+done+' completed'+(p.reports.length-done?', '+(p.reports.length-done)+' failed':'')+')</span></summary>'+(p.reports.length?p.reports.map(reportHtml).join(''):'<div class="muted report">No reports yet.</div>')+'</details></div>';
 }
+function locationGroups(g){
+ const byKey={};
+ g.providers.forEach(p=>{const name=(p.location||'').trim();const key=name?name.toLowerCase():'~none';if(!byKey[key])byKey[key]={key:key,name:name||'No location saved',providers:[]};byKey[key].providers.push(p)});
+ return Object.keys(byKey).sort((a,b)=>a==='~none'?1:b==='~none'?-1:a.localeCompare(b)).map(k=>byKey[k]);
+}
 function render(groups){
  rememberOpen();
  if(!groups.length){el('index').innerHTML='<p class="muted">No saved profiles yet. Map a provider in the Provider Wizard and tick "Save/update provider profile".</p>';return}
- el('index').innerHTML=groups.map(g=>{const k='pool:'+g.riskPool;return '<details class="pool" data-key="'+esc(k)+'"'+(isOpen(k,true)?' open':'')+'><summary><b>'+esc(g.riskPool)+'</b> <span class="muted">'+g.providers.length+' provider'+(g.providers.length===1?'':'s')+'</span></summary>'+g.providers.map(providerHtml).join('')+'</details>'}).join('');
+ el('index').innerHTML=groups.map(g=>{const k='pool:'+g.riskPool;const locs=locationGroups(g);return '<details class="pool" data-key="'+esc(k)+'"'+(isOpen(k,true)?' open':'')+'><summary><b>'+esc(g.riskPool)+'</b> <span class="muted">'+g.providers.length+' provider'+(g.providers.length===1?'':'s')+' &middot; '+locs.length+' location'+(locs.length===1?'':'s')+'</span></summary>'+locs.map(loc=>{const lk='loc:'+g.riskPool+'|'+loc.key;return '<details class="loc" data-key="'+esc(lk)+'"'+(isOpen(lk,true)?' open':'')+'><summary>'+esc(loc.name)+' <span class="muted">'+loc.providers.length+' provider'+(loc.providers.length===1?'':'s')+'</span></summary>'+loc.providers.map(providerHtml).join('')+'</details>'}).join('')+'</details>'}).join('');
  [...el('index').querySelectorAll('button[data-npi]')].forEach(b=>b.onclick=()=>generate(b.dataset.npi,b));
 }
 async function generate(npi,btn){btn.disabled=true;btn.textContent='Queuing...';try{await api('/api/profile-job?npi='+encodeURIComponent(npi),{method:'POST'});lastJson='';await refresh()}catch(e){alert('Could not queue the report: '+e.message);btn.disabled=false;btn.textContent='Generate report'}}
