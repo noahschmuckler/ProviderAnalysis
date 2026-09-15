@@ -717,7 +717,17 @@ function New-AnalysisModel($Provider,$Facts,[object[]]$Flags){
    foreach($t in $defaultOutreach){foreach($id in @($t.memberIds)){if($applied.ContainsKey($id) -and !$applied[$id].defaultList){$applied[$id].defaultList=[string]$t.key;$applied[$id].defaultTitle=[string]$t.title}}}
    foreach($k in @($defaultTables.Keys)){foreach($id in @($defaultTables[$k].memberIds)){if($applied.ContainsKey($id)){$applied[$id].panels+=$k}}}
    $activeKeys=@($outreach|ForEach-Object{[string]$_.key})
-   foreach($e in @($applied.Values)){$e.targetList=$e.defaultList;if($e.defaultList -like 'outreach-awv*' -and $activeKeys -notcontains $e.defaultList){if($activeKeys -contains 'outreach-awv'){$e.targetList='outreach-awv'}elseif($e.awv -eq 'pcp' -and $activeKeys -contains 'outreach-awv-pcp'){$e.targetList='outreach-awv-pcp'}elseif($e.awv -eq 'np' -and $activeKeys -contains 'outreach-awv-np'){$e.targetList='outreach-awv-np'}}}
+   foreach($e in @($applied.Values)){
+    $e.panelTitles=@(foreach($k in @($e.panels)){[string]$script:ReferencePanelTitles[$k]});$e.removedFrom=@($(if($e.defaultTitle){@($e.defaultTitle)}else{@()}))+@($e.panelTitles)
+    $e.targetList=$(if($activeKeys -contains $e.defaultList){$e.defaultList}else{''})
+    if(!$e.targetList -and $e.defaultList){
+     if($e.defaultList -like 'outreach-awv*'){if($activeKeys -contains 'outreach-awv'){$e.targetList='outreach-awv'}elseif($e.awv -eq 'pcp' -and $activeKeys -contains 'outreach-awv-pcp'){$e.targetList='outreach-awv-pcp'}elseif($e.awv -eq 'np' -and $activeKeys -contains 'outreach-awv-np'){$e.targetList='outreach-awv-np'}}
+     # Otherwise the live list sharing the most of the patient's items (a full match outranks a partial one); the note names both lists.
+     if(!$e.targetList){$bestScore=0;foreach($t in $outreach){$need=@($t.items);if($need.Count -eq 0){continue};$shared=@($need|Where-Object{$e.items -contains $_}).Count;if($shared -eq 0){continue};$score=$shared*10+$(if($shared -eq $need.Count){5}else{0});if($score -gt $bestScore){$bestScore=$score;$e.targetList=[string]$t.key}}}
+     $live=@($outreach|Where-Object{[string]$_.key -eq $e.targetList})[0]
+     if($live){$e.targetTitle=[string]$live.title;$e.notes+=($script:FlagText.MovedList.Replace('{default}',$e.defaultTitle).Replace('{live}',$e.targetTitle))}else{$e.notes+=($script:FlagText.LostList.Replace('{default}',$e.defaultTitle))}
+    }
+   }
    foreach($t in $outreach){$members=@($applied.Values|Where-Object{$_.targetList -eq [string]$t.key});if($members.Count -gt 0){$t.flagged=New-FlaggedSubList $members}}
    foreach($k in @($tables.Keys)){$members=@($applied.Values|Where-Object{$_.panels -contains $k});if($members.Count -gt 0){$tables[$k].flagged=New-FlaggedSubList $members}}
   }
@@ -736,6 +746,8 @@ $script:FlagText=[ordered]@{
  SectionTitle='Flagged patients'
  SectionNote='Every patient excluded from the lists and panels above by a flag saved on this provider profile. Flags stay in force on every future report until they are cleared by hand; a note appears when the source data for a flagged patient has changed since the flag was saved.'
  NoDefault='Would not have reached an outreach list'
+ MovedList='Default list "{default}" changed after exclusions; shown under "{live}"'
+ LostList='Default list "{default}" no longer forms after exclusions; listed here only'
  Review='Needs review'
  Dormant='Inactive (patient not in any current source; the flag re-applies if the patient returns)'
  Empty='No patients are flagged for this provider.'
@@ -770,16 +782,16 @@ function Set-ProviderFlag([string]$Npi,[string]$MemberId,[string]$Kind,[string]$
 function New-FlagEntry($Flag,$Target,[string]$Match,[string]$StatusNote){
  $kind=[string](Get-P $Flag 'kind' '');$def=$script:FlagKinds[$kind];$notes=@();if($StatusNote){$notes+=$StatusNote}
  $name='';$dob='';$mrn='';$urgency=0;$snapshot=$null
- $awv='';if($Target){$name=[string]$Target.name;$dob=[string]$Target.dob;$mrn=[string]$Target.mrn;$urgency=[int]$Target.urgency;$snapshot=$Target.snapshot;$awv=[string]$Target.awv;if($Match -eq 'name'){$notes+=('Matched by name and DOB (member ID changed from '+[string](Get-P $Flag 'memberId' '')+' to '+[string]$Target.id+')')};$change=Get-FlagChangeNote (Get-P $Flag 'snapshot' $null) $snapshot;if($change){$notes+=$change}}
+ $awv='';$itemKeys=@();if($Target){$name=[string]$Target.name;$dob=[string]$Target.dob;$mrn=[string]$Target.mrn;$urgency=[int]$Target.urgency;$snapshot=$Target.snapshot;$awv=[string]$Target.awv;$itemKeys=@($Target.items);if($Match -eq 'name'){$notes+=('Matched by name and DOB (member ID changed from '+[string](Get-P $Flag 'memberId' '')+' to '+[string]$Target.id+')')};$change=Get-FlagChangeNote (Get-P $Flag 'snapshot' $null) $snapshot;if($change){$notes+=$change}}
  else{$name=Get-PatientDisplayName ([pscustomobject]@{Last=[string](Get-P $Flag 'last' '');First=[string](Get-P $Flag 'first' '')});$dob=[string](Get-P $Flag 'dob' '');$mrn=[string](Get-P $Flag 'mrn' '')}
  if(!$mrn){$mrn=[string](Get-P $Flag 'mrn' '')}
- return @{memberId=$(if($Target){[string]$Target.id}else{[string](Get-P $Flag 'memberId' '')});flagMemberId=[string](Get-P $Flag 'memberId' '');name=$name;dob=$dob;mrn=$mrn;kind=$kind;kindLabel=$(if($def){[string]$def.label}else{$kind});order=$(if($def){[int]$def.order}else{9});note=[string](Get-P $Flag 'note' '');urgency=$urgency;match=$Match;notes=@($notes);updatedUtc=(ConvertTo-IsoText (Get-P $Flag 'updatedUtc' ''));defaultList='';defaultTitle='';targetList='';awv=$awv;panels=@()}
+ return @{memberId=$(if($Target){[string]$Target.id}else{[string](Get-P $Flag 'memberId' '')});flagMemberId=[string](Get-P $Flag 'memberId' '');name=$name;dob=$dob;mrn=$mrn;kind=$kind;kindLabel=$(if($def){[string]$def.label}else{$kind});order=$(if($def){[int]$def.order}else{9});note=[string](Get-P $Flag 'note' '');urgency=$urgency;match=$Match;notes=@($notes);updatedUtc=(ConvertTo-IsoText (Get-P $Flag 'updatedUtc' ''));defaultList='';defaultTitle='';targetList='';targetTitle='';awv=$awv;items=$itemKeys;panels=@();panelTitles=@();removedFrom=@()}
 }
 function Resolve-ProviderFlags([object[]]$Flags,[object[]]$Patients,[object[]]$NonRiskDsc){
  # Member ID first; then an exact last name + first name + DOB match; more than one name match means nobody is excluded and the flag is listed for review.
  $byId=@{};$byName=@{}
- foreach($p in @($Patients)){$id=[string]$p.MemberID;$byId[$id]=@{id=$id;name=(Get-PatientDisplayName $p);dob=[string]$p.DOB;mrn=[string](Get-P $p 'MRN' '');urgency=[int](Get-P $p 'Urgency' 0);snapshot=(New-FlagSnapshot $p);awv=$(if($p.Items.Contains('awv-pcp')){'pcp'}elseif($p.Items.Contains('awv-np')){'np'}else{''})};$nk=Get-FlagNameKey ([string]$p.Last) ([string]$p.First) ([string]$p.DOB);if($nk){if(!$byName.ContainsKey($nk)){$byName[$nk]=@()};$byName[$nk]+=$id}}
- foreach($d in @($NonRiskDsc)){$id=([string](Get-P $d 'Member ID' '')).Trim();if(!$id -or $byId.ContainsKey($id)){continue};$byId[$id]=@{id=$id;name=[string](Get-P $d 'Patient' '');dob='';mrn=([string](Get-P $d 'Mrn' '')).Trim();urgency=0;snapshot=$null;awv=''}}
+ foreach($p in @($Patients)){$id=[string]$p.MemberID;$byId[$id]=@{id=$id;name=(Get-PatientDisplayName $p);dob=[string]$p.DOB;mrn=[string](Get-P $p 'MRN' '');urgency=[int](Get-P $p 'Urgency' 0);snapshot=(New-FlagSnapshot $p);awv=$(if($p.Items.Contains('awv-pcp')){'pcp'}elseif($p.Items.Contains('awv-np')){'np'}else{''});items=@($p.Items.Keys)};$nk=Get-FlagNameKey ([string]$p.Last) ([string]$p.First) ([string]$p.DOB);if($nk){if(!$byName.ContainsKey($nk)){$byName[$nk]=@()};$byName[$nk]+=$id}}
+ foreach($d in @($NonRiskDsc)){$id=([string](Get-P $d 'Member ID' '')).Trim();if(!$id -or $byId.ContainsKey($id)){continue};$byId[$id]=@{id=$id;name=[string](Get-P $d 'Patient' '');dob='';mrn=([string](Get-P $d 'Mrn' '')).Trim();urgency=0;snapshot=$null;awv='';items=@()}}
  $applied=@{};$review=@();$dormant=@()
  foreach($f in @($Flags)){
   if($null -eq $f){continue};$kind=[string](Get-P $f 'kind' '');if(!$script:FlagKinds.Contains($kind)){continue}
@@ -796,7 +808,7 @@ function Sort-FlagEntries([object[]]$Entries){return @($Entries|Sort-Object -Pro
 function Get-FlagReasonText($e){return ('['+[string]$e.kindLabel+']'+$(if($e.note){' '+[string]$e.note}else{''}))}
 function New-FlaggedSubList([object[]]$Entries,[string[]]$ExtraColumns){
  $sorted=@(Sort-FlagEntries $Entries);$extra=@($ExtraColumns|Where-Object{$_});$rows=@();$ids=@();$names=@();$anyNote=$false
- foreach($e in $sorted){$row=@([string]$e.name,[string]$e.dob,[string]$e.mrn,(Get-FlagReasonText $e));foreach($c in $extra){$row+=$(switch($c){'Default List'{$(if($e.defaultTitle){[string]$e.defaultTitle}else{$script:FlagText.NoDefault})}'Status'{[string](@($e.notes)[0])}default{''}})};$noteText=(@($e.notes) -join '; ');if($noteText){$anyNote=$true};$row+=$noteText;$rows+=,$row;$ids+=[string]$e.memberId;$names+=[string]$e.name}
+ foreach($e in $sorted){$row=@([string]$e.name,[string]$e.dob,[string]$e.mrn,(Get-FlagReasonText $e));foreach($c in $extra){$row+=$(switch($c){'Removed From'{$(if(@($e.removedFrom).Count -gt 0){(@($e.removedFrom) -join '; ')}else{$script:FlagText.NoDefault})}'Status'{[string](@($e.notes)[0])}default{''}})};$noteText=(@($e.notes) -join '; ');if($noteText){$anyNote=$true};$row+=$noteText;$rows+=,$row;$ids+=[string]$e.memberId;$names+=[string]$e.name}
  $columns=@('Patient','DOB','MRN','Reason')+$extra+@('Notes')
  if(!$anyNote){$rows=@(foreach($r in $rows){,@($r[0..($r.Count-2)])});$columns=@($columns[0..($columns.Count-2)])}
  return [ordered]@{columns=$columns;rows=@($rows);memberIds=@($ids);memberNames=@($names);count=$sorted.Count}
@@ -804,7 +816,7 @@ function New-FlaggedSubList([object[]]$Entries,[string[]]$ExtraColumns){
 function New-FlagSummary($Resolved,[object[]]$Outreach){
  $applied=@($Resolved.applied.Values);$review=@($Resolved.review);$dormant=@($Resolved.dormant)
  $out=[ordered]@{count=$applied.Count;reviewCount=$review.Count;dormantCount=$dormant.Count;active=$null;review=$null;dormant=$null}
- if($applied.Count -gt 0){$out.active=New-FlaggedSubList $applied @('Default List')}
+ if($applied.Count -gt 0){$out.active=New-FlaggedSubList $applied @('Removed From')}
  if($review.Count -gt 0){$rv=New-FlaggedSubList $review;$out.review=$rv}
  if($dormant.Count -gt 0){$out.dormant=New-FlaggedSubList $dormant}
  $out.entries=@(foreach($e in @($applied+$review+$dormant)){[ordered]@{memberId=[string]$e.memberId;flagMemberId=[string]$e.flagMemberId;kind=[string]$e.kind;note=[string]$e.note;match=[string]$e.match}})
@@ -834,7 +846,7 @@ function Save-FlagFromRequest($Body){
  $record=Set-ProviderFlag $npi $memberId $kind $note $identity ([string](Get-P $Body 'previousMemberId' ''))
  return [ordered]@{npi=$npi;flag=$record;flagCount=@(Get-ProviderFlags $npi|Where-Object{$script:FlagKinds.Contains([string](Get-P $_ 'kind' ''))}).Count}
 }
-$script:ListColumns=@{'Open ICDs'=',';'Open HEDIS'=',';'Reason Included'=';';'KED Needs'=',';'Open Measures'=',';'Why Ranked Here'=';';'Diabetes Measures'=',';'Cardio Measures'=',';'Screenings Due'=',';'Med Safety Measures'=',';'Also Needs'=';'}
+$script:ListColumns=@{'Removed From'=';';'Open ICDs'=',';'Open HEDIS'=',';'Reason Included'=';';'KED Needs'=',';'Open Measures'=',';'Why Ranked Here'=';';'Diabetes Measures'=',';'Cardio Measures'=',';'Screenings Due'=',';'Med Safety Measures'=',';'Also Needs'=';'}
 function Get-KedNeedsText($Row){$needs=@();if((ConvertTo-NumberValue $Row.'% eGFR last 12 mo.') -lt 100){$needs+='eGFR'};if((ConvertTo-NumberValue $Row.'% uACR last 12 mo.') -lt 100){$needs+='uACR'};if($needs.Count -eq 0){return 'None'};return ($needs -join ', ')}
 function ConvertTo-ListCellHtml([object]$Value,[string]$Separator){
  # Comma/semicolon lists wrap only between items: each item is a nowrap span inside a max-width block.
