@@ -725,11 +725,21 @@ function Get-OutlookApplication{
  if(!$script:Outlook){try{$script:Outlook=New-Object -ComObject Outlook.Application}catch{$script:Outlook=$null;throw ('Outlook could not be started for drafting: '+$_.Exception.Message)}}
  return $script:Outlook
 }
+$script:DraftDateTags=@('0x00390040','0x0E060040')   # PR_CLIENT_SUBMIT_TIME (the Drafts folder's Sent/Date column) and PR_MESSAGE_DELIVERY_TIME
+function Set-OutlookItemDate($Mail){
+ # A draft saved through COM carries no date, so Outlook sorts it to the bottom of Drafts; stamping the MAPI date properties with "now" puts it at the top like a hand-written draft.
+ $now=Get-Date
+ foreach($tag in $script:DraftDateTags){
+  $name='http://schemas.microsoft.com/mapi/proptag/'+$tag
+  try{$utc=$null;try{$utc=$Mail.PropertyAccessor.LocalTimeToUTC($name,$now)}catch{$utc=$now.ToUniversalTime()};$Mail.PropertyAccessor.SetProperty($name,$utc)}
+  catch{Log 'DRAFT_DATE' 'WARN' ($tag+': '+$_.Exception.Message)}
+ }
+}
 function New-OutlookDraft($Spec){
  # $Spec keys: to, subject, html, attachmentPath, attachmentName, includeSignature. Returns the saved draft's Outlook EntryID.
  # Test hook: when PA_MAIL_SINK names a folder, each draft is written there as JSON (plus a copy of the attachment) instead of going to Outlook.
  $sink=[string]$env:PA_MAIL_SINK
- if($sink){if(!(Test-Path -LiteralPath $sink)){New-Item -ItemType Directory -Path $sink -Force|Out-Null};$id='SINK-'+[Guid]::NewGuid().ToString('N');$copy='';if($Spec.attachmentPath){Copy-Item -LiteralPath $Spec.attachmentPath -Destination (Join-Path $sink ([string]$Spec.attachmentName)) -Force;$copy=[string]$Spec.attachmentName};Save-JsonAtomic (Join-Path $sink ($id+'.json')) ([ordered]@{entryId=$id;to=[string]$Spec.to;subject=[string]$Spec.subject;html=[string]$Spec.html;attachment=$copy;includeSignature=[bool]$Spec.includeSignature});return $id}
+ if($sink){if(!(Test-Path -LiteralPath $sink)){New-Item -ItemType Directory -Path $sink -Force|Out-Null};$id='SINK-'+[Guid]::NewGuid().ToString('N');$copy='';if($Spec.attachmentPath){Copy-Item -LiteralPath $Spec.attachmentPath -Destination (Join-Path $sink ([string]$Spec.attachmentName)) -Force;$copy=[string]$Spec.attachmentName};Save-JsonAtomic (Join-Path $sink ($id+'.json')) ([ordered]@{entryId=$id;to=[string]$Spec.to;subject=[string]$Spec.subject;html=[string]$Spec.html;attachment=$copy;includeSignature=[bool]$Spec.includeSignature;draftedUtc=[DateTime]::UtcNow.ToString('o')});return $id}
  $ol=Get-OutlookApplication;$mail=$ol.CreateItem(0);$tempDir=''
  try{
   $mail.Subject=[string]$Spec.subject;$mail.To=[string]$Spec.to;$mail.BodyFormat=2
@@ -738,6 +748,7 @@ function New-OutlookDraft($Spec){
   if($signature -match '(?is)<body[^>]*>'){$tag=$matches[0];$pos=$signature.IndexOf($tag);$mail.HTMLBody=$signature.Substring(0,$pos+$tag.Length)+[string]$Spec.html+$signature.Substring($pos+$tag.Length)}else{$mail.HTMLBody=[string]$Spec.html}
   # HTML mail shows the attached file's own name, so the PDF is attached from a temporary copy that already carries the friendly name.
   if($Spec.attachmentPath){$tempDir=Join-Path $script:Paths.Staging ('mail-'+[Guid]::NewGuid().ToString('N'));New-Item -ItemType Directory -Path $tempDir -Force|Out-Null;$copy=Join-Path $tempDir ([string]$Spec.attachmentName);Copy-Item -LiteralPath ([string]$Spec.attachmentPath) -Destination $copy -Force;$null=$mail.Attachments.Add($copy,1,1,[string]$Spec.attachmentName)}
+  Set-OutlookItemDate $mail
   $mail.Save();$id=[string]$mail.EntryID;try{$mail.Close(0)}catch{};return $id
  }finally{try{[void][Runtime.InteropServices.Marshal]::ReleaseComObject($mail)}catch{};if($tempDir){Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue}}
 }
