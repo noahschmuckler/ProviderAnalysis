@@ -1,7 +1,8 @@
 #requires -Version 5.1
-# ProviderAnalysisServer.ps1 - Draft 5.1 (ranked outreach lists, per-provider patient flags)
+# ProviderAnalysisServer.ps1 - Draft 5.2 (ranked outreach lists, per-provider patient flags, Communication tab)
 # Adds provider indexes, guided cross-source mapping, fuzzy suggestions, NPI profiles, prepared job tracking, ranked outreach lists,
-# and a flag mode (/flag?jobId=...) that excludes flagged patients from every list and panel on every later report for that provider.
+# a flag mode (/flag?jobId=...) that excludes flagged patients from every list and panel on every later report for that provider,
+# and a Communication tab (/communication) that emails every provider in a risk pool a fresh report PDF via Outlook drafts.
 [CmdletBinding()]
 param([int]$PreferredPort=8765,[switch]$NoBrowser,[switch]$SkipModuleInstallPrompt,[string]$RunJobId='')
 Set-StrictMode -Version 2.0
@@ -22,6 +23,7 @@ $script:Paths=[ordered]@{
  State=Join-Path $script:Root 'state'
  Staging=Join-Path $script:Root 'staging'
  Logs=Join-Path $script:Root 'logs'
+ Contacts=Join-Path $script:Root 'contacts'
 }
 $script:ConfigPath=Join-Path $script:Root 'config.json'
 $script:ManifestPath=Join-Path $script:Paths.State 'manifest.json'
@@ -183,7 +185,7 @@ function Request($Context){
  $remote=$null;try{$remote=$Context.Request.RemoteEndPoint}catch{}
  if($null -eq $remote -or -not ([Net.IPAddress]::IsLoopback($remote.Address))){try{Send $Context 403 'text/plain' 'Forbidden'}catch{};return}
  $method=$Context.Request.HttpMethod;$path=$Context.Request.Url.AbsolutePath.TrimEnd('/');if(!$path){$path='/'}
- try{if($method -eq 'GET' -and $path -eq '/'){Send $Context 200 'text/html; charset=utf-8' (Page);return};if($method -eq 'GET' -and $path -eq '/providers'){Send $Context 200 'text/html; charset=utf-8' (ProviderPage);return};if($method -eq 'GET' -and $path -eq '/provider-index'){Send $Context 200 'text/html; charset=utf-8' (ProviderIndexPage);return};if($method -eq 'GET' -and $path -eq '/api/locations'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-KnownLocations ([string]$Context.Request.QueryString['riskPool'])) -Depth 3);return};if($method -eq 'GET' -and $path -eq '/api/provider-index'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-ProviderIndexModel) -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/profile-job'){$result=New-JobFromProfile ([string]$Context.Request.QueryString['npi']);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/health'){Send $Context 200 'application/json' '{"status":"ok","draft":4}';return};if($method -eq 'GET' -and $path -eq '/api/status'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Status) -Depth 6);return};if($method -eq 'GET' -and $path -eq '/api/provider-sources'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @((Json $script:ConfigPath).sources|Select-Object sourceKey,displayName,providerColumns) -Depth 5);return};if($method -eq 'GET' -and $path -eq '/api/providers'){$sourceKey=[string]$Context.Request.QueryString['sourceKey'];$sw=[Diagnostics.Stopwatch]::StartNew();$result=@(Get-ProviderIndexForPool $sourceKey ([string]$Context.Request.QueryString['riskPool']));Log 'PROVIDER_LIST' 'OK' ($result.Count.ToString()+' names in '+[Math]::Round($sw.Elapsed.TotalSeconds,2)+'s') $sourceKey;Send $Context 200 'application/json' (ConvertTo-Json -InputObject $result -Depth 6);return};if($method -eq 'GET' -and $path -eq '/api/suggest'){$names=@($Context.Request.QueryString.GetValues('name')|Where-Object{$_});$result=@(Get-ProviderSuggestions ([string]$Context.Request.QueryString['sourceKey']) $names ([string]$Context.Request.QueryString['riskPool']));Send $Context 200 'application/json' (ConvertTo-Json -InputObject $result -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/reindex'){$out=@();foreach($s in (Json $script:ConfigPath).sources){if(!(Test-Path -LiteralPath (Join-Path $script:Paths.CanonicalCurrent $s.canonicalFileName))){continue};$r=Update-ProviderIndexAfterImport ([string]$s.sourceKey) -Force;$out+=[ordered]@{sourceKey=$s.sourceKey;displayName=$s.displayName;count=$r.count;seconds=$r.seconds;error=$r.error}};Send $Context 200 'application/json' (ConvertTo-Json -InputObject @($out) -Depth 5);return};if($method -eq 'GET' -and $path -eq '/api/profiles'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-ProviderProfiles) -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/profile'){$result=Save-ProviderProfile (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/html'){Send-JobOutput $Context ([string]$Context.Request.QueryString['jobId']) 'html';return};if($method -eq 'GET' -and $path -eq '/pdf'){Send-JobOutput $Context ([string]$Context.Request.QueryString['jobId']) 'pdf';return};if($method -eq 'GET' -and $path -eq '/flag'){Send $Context 200 'text/html; charset=utf-8' (ConvertTo-AnalysisHtml (Get-FlagReportModel ([string]$Context.Request.QueryString['jobId'])) -Interactive);return};if($method -eq 'GET' -and $path -eq '/api/flags'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-ProviderFlags ([string]$Context.Request.QueryString['npi'])) -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/flag'){$result=Save-FlagFromRequest (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/run-next'){$script:RunNext=$true;Send $Context 202 'application/json' '{"status":"scheduled"}';return};if($method -eq 'GET' -and $path -eq '/api/jobs'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-Jobs) -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/job'){$result=New-PreparedJob (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/stage'){$result=Receive-Upload $Context;Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/confirm'){$result=Publish-StagedFile ([string]$Context.Request.QueryString['token']);$index=Update-ProviderIndexAfterImport ([string]$result.sourceKey) -Force;$result['providerCount']=$index.count;$result['indexSeconds']=$index.seconds;$result['indexError']=$index.error;Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/stop'){$script:Stop=$true;Send $Context 202 'application/json' '{"status":"stopping"}';return};Send $Context 404 'application/json' '{"error":"not found"}'}catch{$msg=Safe $_.Exception.Message;Log 'HTTP_REQUEST' 'FAILED' $msg;try{Send $Context 400 'application/json' (([ordered]@{error=$msg}|ConvertTo-Json -Compress))}catch{}}
+ try{if($method -eq 'GET' -and $path -eq '/'){Send $Context 200 'text/html; charset=utf-8' (Page);return};if($method -eq 'GET' -and $path -eq '/providers'){Send $Context 200 'text/html; charset=utf-8' (ProviderPage);return};if($method -eq 'GET' -and $path -eq '/provider-index'){Send $Context 200 'text/html; charset=utf-8' (ProviderIndexPage);return};if($method -eq 'GET' -and $path -eq '/api/locations'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-KnownLocations ([string]$Context.Request.QueryString['riskPool'])) -Depth 3);return};if($method -eq 'GET' -and $path -eq '/api/provider-index'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-ProviderIndexModel) -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/profile-job'){$result=New-JobFromProfile ([string]$Context.Request.QueryString['npi']);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/health'){Send $Context 200 'application/json' '{"status":"ok","draft":4}';return};if($method -eq 'GET' -and $path -eq '/api/status'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Status) -Depth 6);return};if($method -eq 'GET' -and $path -eq '/api/provider-sources'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @((Json $script:ConfigPath).sources|Select-Object sourceKey,displayName,providerColumns) -Depth 5);return};if($method -eq 'GET' -and $path -eq '/api/providers'){$sourceKey=[string]$Context.Request.QueryString['sourceKey'];$sw=[Diagnostics.Stopwatch]::StartNew();$result=@(Get-ProviderIndexForPool $sourceKey ([string]$Context.Request.QueryString['riskPool']));Log 'PROVIDER_LIST' 'OK' ($result.Count.ToString()+' names in '+[Math]::Round($sw.Elapsed.TotalSeconds,2)+'s') $sourceKey;Send $Context 200 'application/json' (ConvertTo-Json -InputObject $result -Depth 6);return};if($method -eq 'GET' -and $path -eq '/api/suggest'){$names=@($Context.Request.QueryString.GetValues('name')|Where-Object{$_});$result=@(Get-ProviderSuggestions ([string]$Context.Request.QueryString['sourceKey']) $names ([string]$Context.Request.QueryString['riskPool']));Send $Context 200 'application/json' (ConvertTo-Json -InputObject $result -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/reindex'){$out=@();foreach($s in (Json $script:ConfigPath).sources){if(!(Test-Path -LiteralPath (Join-Path $script:Paths.CanonicalCurrent $s.canonicalFileName))){continue};$r=Update-ProviderIndexAfterImport ([string]$s.sourceKey) -Force;$out+=[ordered]@{sourceKey=$s.sourceKey;displayName=$s.displayName;count=$r.count;seconds=$r.seconds;error=$r.error}};Send $Context 200 'application/json' (ConvertTo-Json -InputObject @($out) -Depth 5);return};if($method -eq 'GET' -and $path -eq '/api/profiles'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-ProviderProfiles) -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/profile'){$result=Save-ProviderProfile (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/html'){Send-JobOutput $Context ([string]$Context.Request.QueryString['jobId']) 'html';return};if($method -eq 'GET' -and $path -eq '/pdf'){Send-JobOutput $Context ([string]$Context.Request.QueryString['jobId']) 'pdf';return};if($method -eq 'GET' -and $path -eq '/flag'){Send $Context 200 'text/html; charset=utf-8' (ConvertTo-AnalysisHtml (Get-FlagReportModel ([string]$Context.Request.QueryString['jobId'])) -Interactive);return};if($method -eq 'GET' -and $path -eq '/communication'){Send $Context 200 'text/html; charset=utf-8' (CommunicationPage);return};if($method -eq 'GET' -and $path -eq '/api/communication'){Send $Context 200 'application/json' ((Get-CommunicationModel)|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/contact-list'){$result=Select-ContactList ([string]$Context.Request.QueryString['path']);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/contact-list-upload'){$result=Receive-ContactListUpload $Context;Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return};if($method -eq 'GET' -and $path -eq '/api/recipients'){Send $Context 200 'application/json' ((Get-CommunicationRecipients ([string]$Context.Request.QueryString['riskPool']))|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/campaign'){$result=New-Campaign (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/campaign'){Send $Context 200 'application/json' ((Get-CampaignModel ([string]$Context.Request.QueryString['id']))|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/campaigns'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-CampaignList) -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/campaign-drafts'){$result=Invoke-CampaignDrafts ([string]$Context.Request.QueryString['id']);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/campaign-retry'){$result=Reset-CampaignDrafts ([string]$Context.Request.QueryString['id']);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/flags'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-ProviderFlags ([string]$Context.Request.QueryString['npi'])) -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/flag'){$result=Save-FlagFromRequest (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/run-next'){$script:RunNext=$true;Send $Context 202 'application/json' '{"status":"scheduled"}';return};if($method -eq 'GET' -and $path -eq '/api/jobs'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-Jobs) -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/job'){$result=New-PreparedJob (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/stage'){$result=Receive-Upload $Context;Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/confirm'){$result=Publish-StagedFile ([string]$Context.Request.QueryString['token']);$index=Update-ProviderIndexAfterImport ([string]$result.sourceKey) -Force;$result['providerCount']=$index.count;$result['indexSeconds']=$index.seconds;$result['indexError']=$index.error;Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/stop'){$script:Stop=$true;Send $Context 202 'application/json' '{"status":"stopping"}';return};Send $Context 404 'application/json' '{"error":"not found"}'}catch{$msg=Safe $_.Exception.Message;Log 'HTTP_REQUEST' 'FAILED' $msg;try{Send $Context 400 'application/json' (([ordered]@{error=$msg}|ConvertTo-Json -Compress))}catch{}}
 }
 
 
@@ -347,7 +349,7 @@ function New-PreparedJob($Body){if($null -eq $Body.aliases){throw 'Confirmed ali
 function Get-Jobs{return @(Get-ChildItem $script:Paths.State -Filter 'job-*.json' -File -ErrorAction SilentlyContinue|ForEach-Object{Json $_.FullName}|Sort-Object queuedUtc -Descending)}
 $script:TabCss='.tabs{display:flex;gap:4px;background:#17365d;padding:0 22px}.tabs a{color:#cfe0f5;text-decoration:none;padding:10px 18px;border-radius:8px 8px 0 0;font-weight:600}.tabs a:hover{background:#274b7a;color:#fff}.tabs a.active{background:#f4f7fb;color:#17365d}'
 function Get-NavHtml([string]$Active){
- $tabs=@(@('sources','/','Sources'),@('wizard','/providers','Provider Wizard'),@('index','/provider-index','Provider Index'))
+ $tabs=@(@('sources','/','Sources'),@('wizard','/providers','Provider Wizard'),@('index','/provider-index','Provider Index'),@('communication','/communication','Communication'))
  $links=foreach($t in $tabs){'<a href="'+$t[1]+'"'+$(if($t[0] -eq $Active){' class="active"'}else{''})+'>'+$t[2]+'</a>'}
  return '<nav class="tabs">'+($links -join '')+'</nav>'
 }
@@ -608,6 +610,325 @@ refresh();setInterval(refresh,3000);
 </script></body></html>
 '@
  return $html.Replace('__NAV__',(Get-NavHtml 'index')).Replace('__TABCSS__',$script:TabCss)
+}
+# --- Draft 5.2: Communication tab - provider contact list, per-pool email campaigns with fresh report PDFs saved to Outlook Drafts ---
+$script:ContactFields=[ordered]@{lastName=@('lastname','last','providerlastname','surname');firstName=@('firstname','first','providerfirstname');degree=@('degree','degrees','credential','credentials','title');location=@('location','site','office','practice','practicelocation');specialty=@('specialty','speciality','specialtydescription');phone=@('phone','officephone','workphone','phonenumber','businessphone');email=@('email','emailaddress','provideremail','mail');npi=@('npi','npinumber','providernpi');cellPhone=@('pvtcellphone','pvtcell','cellphone','cell','mobile','mobilephone','privatecell','privatecellphone');homePhone=@('homephone','home')}
+$script:ContactFieldLabels=[ordered]@{lastName='Last name';firstName='First name';degree='Degree';location='Location';specialty='Specialty';phone='Phone';email='Email';npi='NPI';cellPhone='Pvt cell phone';homePhone='Home phone'}
+$script:ContactRequiredFields=@('npi','email')
+$script:ContactCache=@{}
+function ConvertTo-HeaderToken([string]$Text){return (([string]$Text).ToLowerInvariant() -replace '[^a-z0-9]','')}
+function Get-CellText($Worksheet,[int]$Row,[int]$Column){
+ # Numbers come back as digits (an NPI or phone stored as a number must not be rendered in scientific notation).
+ $v=$Worksheet.Cells[$Row,$Column].Value
+ if($v -is [double] -or $v -is [decimal] -or $v -is [int] -or $v -is [long]){return ([decimal]$v).ToString('0.############')}
+ if($v -is [DateTime]){return ([DateTime]$v).ToString('M/d/yyyy')}
+ return ([string]$Worksheet.Cells[$Row,$Column].Text).Trim()
+}
+function Find-ContactHeader($Worksheet){
+ # Fingerprint by column titles: the first 25 rows are scanned for the row that names the most contact fields (NPI and Email are required).
+ if($null -eq $Worksheet.Dimension){return $null}
+ $maxCol=$Worksheet.Dimension.End.Column;$limit=[Math]::Min(25,$Worksheet.Dimension.End.Row);$best=$null
+ for($row=1;$row -le $limit;$row++){
+  $map=[ordered]@{};$headers=@()
+  for($col=1;$col -le $maxCol;$col++){
+   $text=([string]$Worksheet.Cells[$row,$col].Text).Trim();if(!$text){continue};$headers+=$text;$token=ConvertTo-HeaderToken $text
+   foreach($field in @($script:ContactFields.Keys)){if($map.Contains($field)){continue};if(@($script:ContactFields[$field]) -contains $token){$map[$field]=$col;break}}
+  }
+  if(@($script:ContactRequiredFields|Where-Object{!$map.Contains($_)}).Count -gt 0){continue}
+  if($null -eq $best -or $map.Count -gt $best.map.Count){$best=[ordered]@{row=$row;map=$map;headers=$headers}}
+ }
+ return $best
+}
+function Get-ContactDisplayName($c){$n=(([string]$c.firstName+' '+[string]$c.lastName).Trim());if($c.degree){$n=(($n+', '+[string]$c.degree).Trim(',',' '))};return $n}
+function Read-ContactList([string]$Path){
+ if(!(Test-Path -LiteralPath $Path)){throw ('Provider contact list was not found: '+$Path)}
+ $item=Get-Item -LiteralPath $Path;$cacheKey=$item.FullName+'|'+$item.LastWriteTimeUtc.Ticks+'|'+$item.Length
+ if($script:ContactCache.ContainsKey($cacheKey)){return $script:ContactCache[$cacheKey]}
+ $package=$null;$best=$null;$bestWs=$null
+ try{
+  $package=Open-ExcelPackage -Path $item.FullName -ErrorAction Stop
+  foreach($ws in $package.Workbook.Worksheets){$h=Find-ContactHeader $ws;if($h -and ($null -eq $best -or $h.map.Count -gt $best.map.Count)){$best=$h;$bestWs=$ws}}
+  if($null -eq $best){throw ('No worksheet in '+$item.Name+' has a header row with at least NPI and Email columns (the first 25 rows of every sheet were checked).')}
+  $contacts=New-Object Collections.Generic.List[object];$byNpi=@{};$duplicates=@();$noNpi=0;$last=$bestWs.Dimension.End.Row
+  for($r=$best.row+1;$r -le $last;$r++){
+   $c=[ordered]@{};foreach($field in @($script:ContactFields.Keys)){$c[$field]=$(if($best.map.Contains($field)){Get-CellText $bestWs $r $best.map[$field]}else{''})}
+   $npi=([string]$c.npi -replace '[^0-9]','');if($npi.Length -ne 10){if(([string]$c.lastName+[string]$c.firstName+[string]$c.email).Trim() -ne ''){$noNpi++};continue}
+   $c.npi=$npi;$c.name=Get-ContactDisplayName $c;$c.row=$r
+   if($byNpi.ContainsKey($npi)){$duplicates+=$npi;continue}
+   $byNpi[$npi]=$c;$contacts.Add($c)
+  }
+  $result=[ordered]@{path=$item.FullName;fileName=$item.Name;lastWriteUtc=$item.LastWriteTimeUtc.ToString('o');sha256=(Get-FileHash256 $item.FullName);worksheet=[string]$bestWs.Name;headerRow=[int]$best.row;headers=@($best.headers);recognized=@(foreach($k in @($best.map.Keys)){[string]$script:ContactFieldLabels[$k]});missing=@(foreach($k in @($script:ContactFields.Keys)){if(!$best.map.Contains($k)){[string]$script:ContactFieldLabels[$k]}});contactCount=$contacts.Count;duplicateNpis=@($duplicates|Select-Object -Unique);rowsWithoutNpi=$noNpi;contacts=@($contacts.ToArray());byNpi=$byNpi}
+ }finally{if($package){Close-ExcelPackage $package -NoSave}}
+ $script:ContactCache.Clear();$script:ContactCache[$cacheKey]=$result;return $result
+}
+function Get-ContactListSummary($List){if($null -eq $List){return $null};$o=[ordered]@{};foreach($k in @($List.Keys)){if($k -in @('contacts','byNpi')){continue};$o[$k]=$List[$k]};return $o}
+function Get-CommunicationSettings{$s=Json (Join-Path $script:Paths.State 'communication.json');return [ordered]@{version=1;contactListPath=$(if($s){[string](Get-P $s 'contactListPath' '')}else{''});updatedUtc=$(if($s){[string](Get-P $s 'updatedUtc' '')}else{''})}}
+function Save-CommunicationSettings($Settings){$Settings.updatedUtc=[DateTime]::UtcNow.ToString('o');Save-JsonAtomic (Join-Path $script:Paths.State 'communication.json') $Settings}
+function Get-ContactListCandidates{
+ # XLSX files in the application root and the contacts folder; canonical source exports live in subfolders and are never offered.
+ $out=@()
+ foreach($dir in @($script:Root,$script:Paths.Contacts)){foreach($f in @(Get-ChildItem -LiteralPath $dir -File -Filter '*.xlsx' -ErrorAction SilentlyContinue|Where-Object{$_.Name -notlike '~$*'})){$out+=[ordered]@{path=$f.FullName;fileName=$f.Name;folder=$(if($dir -eq $script:Root){'root'}else{'contacts'});byteLength=$f.Length;lastWriteUtc=$f.LastWriteTimeUtc.ToString('o')}}}
+ return @($out|Sort-Object -Property @{Expression={[string]$_.fileName}})
+}
+function Resolve-ContactListPath([string]$Path){
+ if([string]::IsNullOrWhiteSpace($Path)){throw 'Choose a provider contact list.'}
+ $candidate=$(if([IO.Path]::IsPathRooted($Path)){$Path}else{Join-Path $script:Root $Path})
+ if(!(Test-Path -LiteralPath $candidate -PathType Leaf)){throw ('Provider contact list was not found: '+$Path)}
+ $full=(Get-Item -LiteralPath $candidate).FullName
+ if([IO.Path]::GetExtension($full) -ine '.xlsx'){throw 'The contact list must be an XLSX file.'}
+ $dir=(Split-Path -Parent $full).TrimEnd('\','/');$allowed=@(foreach($d in @($script:Root,$script:Paths.Contacts)){([string]$d).TrimEnd('\','/')})
+ if(@($allowed|Where-Object{$_ -ieq $dir}).Count -eq 0){throw 'The contact list must be in the application folder or its contacts folder.'}
+ return $full
+}
+function Select-ContactList([string]$Path){$full=Resolve-ContactListPath $Path;$list=Read-ContactList $full;$settings=Get-CommunicationSettings;$settings.contactListPath=$full;Save-CommunicationSettings $settings;Log 'CONTACT_LIST_SELECTED' 'OK' ($list.fileName+'; '+$list.contactCount+' contacts');return (Get-ContactListSummary $list)}
+function Get-CurrentContactList{$settings=Get-CommunicationSettings;if(!$settings.contactListPath){return $null};if(!(Test-Path -LiteralPath $settings.contactListPath)){return $null};return (Read-ContactList $settings.contactListPath)}
+function Receive-ContactListUpload($Context){
+ $name=[Net.WebUtility]::UrlDecode([string]$Context.Request.Headers['X-File-Name']);if([string]::IsNullOrWhiteSpace($name)){throw 'Missing file name.'};if([IO.Path]::GetExtension($name) -ine '.xlsx'){throw 'Only XLSX files are accepted.'}
+ $safe=([IO.Path]::GetFileName($name) -replace '[^A-Za-z0-9 ._-]','_');$target=Join-Path $script:Paths.Contacts $safe;$tmp=Join-Path $script:Paths.Staging ([Guid]::NewGuid().ToString('N')+'.xlsx')
+ $stream=[IO.File]::Create($tmp);try{$buffer=New-Object byte[] 1048576;$total=0;while(($read=$Context.Request.InputStream.Read($buffer,0,$buffer.Length)) -gt 0){$total+=$read;if($total -gt 52428800){throw 'Contact list exceeds the 50 MB limit.'};$stream.Write($buffer,0,$read)}}finally{$stream.Dispose()}
+ try{$null=Read-ContactList $tmp}catch{Remove-Item $tmp -Force -ErrorAction SilentlyContinue;throw}
+ if(Test-Path -LiteralPath $target){Copy-Item -LiteralPath $target -Destination ($target+'.'+(Get-Date -Format 'yyyyMMdd-HHmmss')+'.bak') -Force}
+ Move-Item -LiteralPath $tmp -Destination $target -Force;$script:ContactCache.Clear();Log 'CONTACT_LIST_UPLOADED' 'OK' $safe
+ return (Select-ContactList $target)
+}
+function Get-CommunicationPools{return @(Get-ProviderProfiles|ForEach-Object{ConvertTo-RiskPoolName ([string](Get-P $_ 'riskPool' ''))}|Where-Object{$_}|Select-Object -Unique|Sort-Object)}
+function Get-CommunicationModel{$list=$null;$listError='';try{$list=Get-CurrentContactList}catch{$listError=$_.Exception.Message};return [ordered]@{pools=@(Get-CommunicationPools);contactList=(Get-ContactListSummary $list);contactListPath=(Get-CommunicationSettings).contactListPath;contactListError=$listError;candidates=@(Get-ContactListCandidates)}}
+function Get-LatestCompletedJob([string]$Npi){foreach($j in @(Get-Jobs|Where-Object{[string](Get-P $_ 'providerKey' '') -eq $Npi -and [string](Get-P $_ 'state' '') -eq 'Completed'}|Sort-Object -Property @{Expression={ConvertTo-IsoText (Get-P $_ 'completedUtc' '')}} -Descending)){if(Resolve-JobOutputPath $j 'pdf'){return $j}};return $null}
+function Get-CommunicationRecipients([string]$RiskPool){
+ $pool=ConvertTo-RiskPoolName $RiskPool;if(!$pool){throw 'Choose a risk pool.'}
+ $list=Get-CurrentContactList;$out=@()
+ foreach($profile in @(Get-ProviderProfiles)){
+  if((ConvertTo-RiskPoolName ([string](Get-P $profile 'riskPool' ''))) -ne $pool){continue}
+  $npi=[string](Get-P $profile 'npi' '');if(!$npi){continue}
+  $contact=$(if($list -and $list.byNpi.ContainsKey($npi)){$list.byNpi[$npi]}else{$null})
+  $latest=Get-LatestCompletedJob $npi
+  $out+=[ordered]@{npi=$npi;displayName=[string](Get-P $profile 'displayName' $npi);location=[string](Get-P $profile 'location' '');matched=[bool]($null -ne $contact);contactName=$(if($contact){[string]$contact.name}else{''});contactLocation=$(if($contact){[string]$contact.location}else{''});contactSpecialty=$(if($contact){[string]$contact.specialty}else{''});email=$(if($contact){[string]$contact.email}else{''});latestReportUtc=$(if($latest){ConvertTo-IsoText (Get-P $latest 'completedUtc' '')}else{''})}
+ }
+ return [ordered]@{riskPool=$pool;contactList=(Get-ContactListSummary $list);recipients=@($out|Sort-Object -Property @{Expression={[string]$_.displayName}})}
+}
+$script:EmailAllowedTags=@('p','br','b','strong','i','em','u','ul','ol','li','a','div','span','blockquote','h1','h2','h3','h4','hr','sub','sup','s','strike')
+function ConvertTo-SafeEmailHtml([string]$Html){
+ # Keeps ordinary formatting from the composer (paragraphs, bold/italic/underline, lists, links) and drops everything else, including every attribute except a safe href.
+ if([string]::IsNullOrWhiteSpace($Html)){return ''}
+ $h=[regex]::Replace($Html,'(?is)<(script|style|iframe|object|embed|form|textarea|select|button|title|head)\b[^>]*>.*?</\1\s*>','')
+ $h=[regex]::Replace($h,'(?is)<(script|style|iframe|object|embed|form|input|meta|link|img)\b[^>]*/?>','')
+ $h=[regex]::Replace($h,'(?s)<!--.*?-->','')
+ $h=[regex]::Replace($h,'(?is)<\s*(/?)\s*([a-z0-9]+)([^>]*)>',{param($m)$close=$m.Groups[1].Value;$tag=$m.Groups[2].Value.ToLowerInvariant();$attrs=$m.Groups[3].Value;if($script:EmailAllowedTags -notcontains $tag){return ''};if($close){return ('</'+$tag+'>')};if($tag -eq 'br' -or $tag -eq 'hr'){return ('<'+$tag+'>')};$keep='';if($tag -eq 'a'){$hm=[regex]::Match($attrs,'(?i)href\s*=\s*("([^"]*)"|''([^'']*)''|([^\s>]+))');if($hm.Success){$href=$(if($hm.Groups[2].Success){$hm.Groups[2].Value}elseif($hm.Groups[3].Success){$hm.Groups[3].Value}else{$hm.Groups[4].Value}).Trim();if($href -match '^(https?:|mailto:)'){$keep=' href="'+[Net.WebUtility]::HtmlEncode($href)+'"'}}};return ('<'+$tag+$keep+'>')})
+ return $h.Trim()
+}
+function Get-EmailPlainText([string]$Html){return (([Net.WebUtility]::HtmlDecode(($Html -replace '<[^>]+>',' '))) -replace '\s+',' ').Trim()}
+function New-EmailHtml([string]$Greeting,[string]$BodyHtml){return ('<div style="font-family:Calibri,Segoe UI,Arial,sans-serif;font-size:11pt"><p>Dear '+(ConvertTo-HtmlEncoded $Greeting)+',</p>'+$BodyHtml+'</div>')}
+$script:Outlook=$null
+function Get-OutlookApplication{
+ if($script:Outlook){try{$null=$script:Outlook.Name;return $script:Outlook}catch{$script:Outlook=$null}}
+ try{$script:Outlook=[Runtime.InteropServices.Marshal]::GetActiveObject('Outlook.Application')}catch{$script:Outlook=$null}
+ if(!$script:Outlook){try{$script:Outlook=New-Object -ComObject Outlook.Application}catch{$script:Outlook=$null;throw ('Outlook could not be started for drafting: '+$_.Exception.Message)}}
+ return $script:Outlook
+}
+function New-OutlookDraft($Spec){
+ # $Spec keys: to, subject, html, attachmentPath, attachmentName, includeSignature. Returns the saved draft's Outlook EntryID.
+ # Test hook: when PA_MAIL_SINK names a folder, each draft is written there as JSON (plus a copy of the attachment) instead of going to Outlook.
+ $sink=[string]$env:PA_MAIL_SINK
+ if($sink){if(!(Test-Path -LiteralPath $sink)){New-Item -ItemType Directory -Path $sink -Force|Out-Null};$id='SINK-'+[Guid]::NewGuid().ToString('N');$copy='';if($Spec.attachmentPath){Copy-Item -LiteralPath $Spec.attachmentPath -Destination (Join-Path $sink ([string]$Spec.attachmentName)) -Force;$copy=[string]$Spec.attachmentName};Save-JsonAtomic (Join-Path $sink ($id+'.json')) ([ordered]@{entryId=$id;to=[string]$Spec.to;subject=[string]$Spec.subject;html=[string]$Spec.html;attachment=$copy;includeSignature=[bool]$Spec.includeSignature});return $id}
+ $ol=Get-OutlookApplication;$mail=$ol.CreateItem(0);$tempDir=''
+ try{
+  $mail.Subject=[string]$Spec.subject;$mail.To=[string]$Spec.to;$mail.BodyFormat=2
+  $signature='';if($Spec.includeSignature){try{$null=$mail.GetInspector;$signature=[string]$mail.HTMLBody}catch{$signature=''}}
+  # The default signature arrives as a full HTML document once the inspector exists; the message goes in right after its <body> tag so the signature keeps its styles.
+  if($signature -match '(?is)<body[^>]*>'){$tag=$matches[0];$pos=$signature.IndexOf($tag);$mail.HTMLBody=$signature.Substring(0,$pos+$tag.Length)+[string]$Spec.html+$signature.Substring($pos+$tag.Length)}else{$mail.HTMLBody=[string]$Spec.html}
+  # HTML mail shows the attached file's own name, so the PDF is attached from a temporary copy that already carries the friendly name.
+  if($Spec.attachmentPath){$tempDir=Join-Path $script:Paths.Staging ('mail-'+[Guid]::NewGuid().ToString('N'));New-Item -ItemType Directory -Path $tempDir -Force|Out-Null;$copy=Join-Path $tempDir ([string]$Spec.attachmentName);Copy-Item -LiteralPath ([string]$Spec.attachmentPath) -Destination $copy -Force;$null=$mail.Attachments.Add($copy,1,1,[string]$Spec.attachmentName)}
+  $mail.Save();$id=[string]$mail.EntryID;try{$mail.Close(0)}catch{};return $id
+ }finally{try{[void][Runtime.InteropServices.Marshal]::ReleaseComObject($mail)}catch{};if($tempDir){Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue}}
+}
+function Get-CampaignPath([string]$Id){if($Id -notmatch '^[a-f0-9]{32}$'){throw 'Invalid campaign ID.'};return (Join-Path $script:Paths.State ('campaign-'+$Id+'.json'))}
+function Get-Campaign([string]$Id){$c=Json (Get-CampaignPath $Id);if($null -eq $c){throw 'Campaign not found.'};return $c}
+function Get-Campaigns{return @(Get-ChildItem $script:Paths.State -Filter 'campaign-*.json' -File -ErrorAction SilentlyContinue|ForEach-Object{Json $_.FullName}|Where-Object{$_}|Sort-Object -Property @{Expression={ConvertTo-IsoText (Get-P $_ 'createdUtc' '')}} -Descending)}
+function Update-CampaignState($Campaign){
+ $ps=@($Campaign.providers)
+ $reportsPending=@($ps|Where-Object{$_.draftState -eq 'Pending' -and $_.reportState -notin @('Completed','Failed')}).Count
+ $draftsPending=@($ps|Where-Object{$_.draftState -eq 'Pending' -and $_.reportState -eq 'Completed'}).Count
+ $Campaign.state=$(if($reportsPending -gt 0){'Running'}elseif($draftsPending -gt 0){'Drafting'}else{'Completed'})
+ Set-P $Campaign 'summary' ([ordered]@{total=$ps.Count;reportsPending=$reportsPending;draftsPending=$draftsPending;draftsCreated=@($ps|Where-Object{$_.draftState -eq 'Created'}).Count;draftsFailed=@($ps|Where-Object{$_.draftState -eq 'Failed'}).Count;skipped=@($ps|Where-Object{$_.draftState -eq 'Skipped'}).Count})
+}
+function New-Campaign($Body){
+ if($null -eq $Body){throw 'Email details are required.'}
+ $pool=ConvertTo-RiskPoolName ([string](Get-P $Body 'riskPool' ''));if(!$pool){throw 'Choose a risk pool.'}
+ $subject=([string](Get-P $Body 'subject' '')).Trim();if(!$subject){throw 'A subject line is required.'}
+ $bodyHtml=ConvertTo-SafeEmailHtml ([string](Get-P $Body 'bodyHtml' ''));if(!(Get-EmailPlainText $bodyHtml)){throw 'An email body is required.'}
+ $fresh=[bool](Get-P $Body 'freshReports' $true);$sig=[bool](Get-P $Body 'includeSignature' $true);$settings=Get-CommunicationSettings
+ $providers=@();$seen=@{}
+ foreach($r in @(Get-P $Body 'providers' @())){
+  if($null -eq $r){continue};$npi=([string](Get-P $r 'npi' '') -replace '[^0-9]','');if($npi -notmatch '^\d{10}$'){throw ('Invalid NPI in the recipient list: '+[string](Get-P $r 'npi' ''))};if($seen.ContainsKey($npi)){continue};$seen[$npi]=$true
+  $profile=Json (Join-Path $script:Paths.Profiles ($npi+'.json'));if($null -eq $profile){throw ('No saved profile for NPI '+$npi+'.')}
+  $name=[string](Get-P $profile 'displayName' $npi)
+  if((ConvertTo-RiskPoolName ([string](Get-P $profile 'riskPool' ''))) -ne $pool){throw ($name+' is not in risk pool '+$pool+'.')}
+  $email=([string](Get-P $r 'email' '')).Trim();if($email -notmatch '^[^\s@]+@[^\s@]+\.[^\s@]+$'){throw ('A valid email address is required for '+$name+'.')}
+  $greeting=([string](Get-P $r 'greeting' '')).Trim();if(!$greeting){$greeting=$name}
+  $providers+=[ordered]@{npi=$npi;displayName=$name;location=[string](Get-P $profile 'location' '');greeting=$greeting;email=$email;jobId='';reportState='';percent=0;stage='';pdfPath='';draftState='Pending';draftUtc='';entryId='';error=''}
+ }
+ if($providers.Count -eq 0){throw 'Select at least one recipient with an email address.'}
+ $campaign=[ordered]@{campaignVersion=1;campaignId=[Guid]::NewGuid().ToString('N');riskPool=$pool;subject=$subject;bodyHtml=$bodyHtml;includeSignature=$sig;freshReports=$fresh;contactListPath=[string]$settings.contactListPath;createdUtc=[DateTime]::UtcNow.ToString('o');state='Running';providers=$providers}
+ foreach($p in $campaign.providers){
+  if($fresh){$job=New-JobFromProfile $p.npi;$job['campaignId']=$campaign.campaignId;Save-JsonAtomic (Join-Path $script:Paths.State ('job-'+$job.jobId+'.json')) $job;$p.jobId=[string]$job.jobId;$p.reportState='Prepared';$p.stage=[string]$job.stage}
+  else{$latest=Get-LatestCompletedJob $p.npi;if($latest){$p.jobId=[string]$latest.jobId;$p.reportState='Completed';$p.percent=100;$p.stage='Existing report'}else{$p.reportState='Failed';$p.draftState='Skipped';$p.error='No existing report PDF to attach; generate a fresh report instead.'}}
+ }
+ Save-JsonAtomic (Get-CampaignPath $campaign.campaignId) $campaign
+ Log 'CAMPAIGN_CREATED' 'OK' ($pool+'; '+$providers.Count+' recipients; fresh='+$fresh)
+ return (Get-CampaignModel $campaign.campaignId)
+}
+function Get-CampaignModel([string]$Id){
+ # Merges live job progress into the campaign record; a failed report marks the draft as skipped.
+ $c=Get-Campaign $Id;$changed=$false
+ foreach($p in @($c.providers)){
+  if(!$p.jobId -or $p.draftState -ne 'Pending' -or $p.reportState -in @('Completed','Failed')){continue}
+  $job=Json (Join-Path $script:Paths.State ('job-'+$p.jobId+'.json'))
+  if(!$job){$p.reportState='Failed';$p.draftState='Skipped';$p.error='Report job record not found.';$changed=$true;continue}
+  $s=[string](Get-P $job 'state' '');$pct=[int](Get-P $job 'percent' 0);$stage=[string](Get-P $job 'stage' '')
+  if($s -ne [string]$p.reportState -or $pct -ne [int]$p.percent -or $stage -ne [string]$p.stage){$p.reportState=$s;$p.percent=$pct;$p.stage=$stage;$changed=$true}
+  if($s -eq 'Failed'){$p.draftState='Skipped';$p.error='Report failed: '+[string](Get-P $job 'errorSummary' '');$changed=$true}
+ }
+ $prev=[string]$c.state;Update-CampaignState $c
+ if($changed -or $prev -ne [string]$c.state){Save-JsonAtomic (Get-CampaignPath $Id) $c}
+ return $c
+}
+function Invoke-CampaignDrafts([string]$Id,[int]$Limit=5){
+ # Saves an Outlook draft for every provider whose report is complete and whose draft is still pending (at most $Limit per call so a poll never blocks for long).
+ $c=Get-CampaignModel $Id;$created=0
+ foreach($p in @($c.providers)){
+  if($created -ge $Limit){break}
+  if($p.draftState -ne 'Pending' -or $p.reportState -ne 'Completed'){continue}
+  try{
+   $job=Json (Join-Path $script:Paths.State ('job-'+$p.jobId+'.json'));if(!$job){throw 'Report job record not found.'}
+   $pdf=Resolve-JobOutputPath $job 'pdf';if(!$pdf){throw 'Report PDF is not available.'}
+   $when=ConvertTo-DateValue ([string](Get-P $job 'completedUtc' ''));$stamp=$(if($when){$when.ToString('yyyy-MM-dd')}else{Get-Date -Format 'yyyy-MM-dd'})
+   $attachmentName=((('Provider Patient Dashboard - '+[string]$p.displayName+' - '+$stamp) -replace '[\\/:*?"<>|]','-')+'.pdf')
+   $entry=New-OutlookDraft ([ordered]@{to=[string]$p.email;subject=[string]$c.subject;html=(New-EmailHtml ([string]$p.greeting) ([string]$c.bodyHtml));attachmentPath=$pdf;attachmentName=$attachmentName;includeSignature=[bool]$c.includeSignature})
+   $p.pdfPath=$pdf;$p.draftState='Created';$p.draftUtc=[DateTime]::UtcNow.ToString('o');$p.entryId=[string]$entry;$p.error='';$created++
+  }catch{$p.draftState='Failed';$p.error=$_.Exception.Message;Log 'CAMPAIGN_DRAFT' 'FAILED' ([string]$p.npi+' '+$_.Exception.Message)}
+ }
+ Update-CampaignState $c;Save-JsonAtomic (Get-CampaignPath $Id) $c
+ if($created -gt 0){Log 'CAMPAIGN_DRAFTS' 'OK' ($created.ToString()+' drafts saved for campaign '+$Id)}
+ return $c
+}
+function Reset-CampaignDrafts([string]$Id){$c=Get-Campaign $Id;foreach($p in @($c.providers)){if($p.draftState -eq 'Failed'){$p.draftState='Pending';$p.error=''}};Save-JsonAtomic (Get-CampaignPath $Id) $c;return (Invoke-CampaignDrafts $Id)}
+function Get-CampaignList([int]$Take=10){$out=@();foreach($c in @(Get-Campaigns|Select-Object -First $Take)){$m=Get-CampaignModel ([string]$c.campaignId);$out+=[ordered]@{campaignId=[string]$m.campaignId;riskPool=[string]$m.riskPool;subject=[string]$m.subject;createdUtc=(ConvertTo-IsoText $m.createdUtc);state=[string]$m.state;summary=$m.summary}};return $out}
+function CommunicationPage{
+ $html=@'
+<!doctype html><html><head><meta charset="utf-8"><title>Communication</title>
+<style>
+body{font:14px Segoe UI,Arial;margin:0;background:#f4f7fb;color:#172033}header{background:#17365d;color:white;padding:22px 22px 12px}main{padding:22px;max-width:1200px}
+__TABCSS__
+.card{background:white;border:1px solid #dce4ef;border-radius:8px;padding:18px;margin:14px 0}.card h2{margin:0 0 8px;font-size:17px;color:#17365d}.muted{color:#667085}.error{color:#a61b1b}.warn{color:#9a5b00}.ok{color:#1d7a3a;font-weight:600}
+.row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:8px 0}label{font-weight:600}select,input[type=text],input:not([type]){padding:7px 9px;border:1px solid #c8d2e0;border-radius:5px;font:inherit;background:#fff}
+button{padding:7px 12px;cursor:pointer;background:#1769aa;color:#fff;border:0;border-radius:5px;font:inherit}button:disabled{opacity:.5;cursor:default}button.alt{background:#e4e9f0;color:#172033}button.go{background:#1d7a3a;font-weight:600;padding:10px 16px}
+table{border-collapse:collapse;width:100%;margin-top:8px}th,td{padding:7px 8px;border-bottom:1px solid #dce4ef;text-align:left;vertical-align:top}th{background:#eaf1f8}tr.unmatched td{background:#fff8ec}td input{width:100%;box-sizing:border-box}
+.greet{font:14px Calibri,Segoe UI,Arial;padding:8px 10px 0;color:#172033}.toolbar{display:flex;gap:4px;margin:6px 0 4px}.toolbar button{background:#e4e9f0;color:#172033;min-width:34px}
+.editor{min-height:200px;border:1px solid #c8d2e0;border-radius:6px;padding:10px;background:#fff;font:14px Calibri,Segoe UI,Arial;line-height:1.45;outline:none}.editor:focus{border-color:#1769aa}.editor p{margin:0 0 10px}
+.progress{height:10px;background:#e4e9f0;border-radius:6px;overflow:hidden;margin:6px 0}.progress span{display:block;height:100%;background:#1769aa;transition:width .3s}
+.subject{width:100%;box-sizing:border-box}.check{font-weight:400;display:block;margin:6px 0}
+</style></head><body>
+<header><h1>Communication</h1><p>Draft 5.2 - email every provider in a risk pool a fresh report, saved to your Outlook Drafts folder for review before sending</p></header>__NAV__
+<main>
+<div class="card"><h2>1. Provider contact list</h2>
+<p class="muted">Choose the XLSX that holds provider emails. Its columns are recognized by title (last name, first name, degree, location, specialty, phone, email, NPI, pvt cell phone, home phone) and providers are matched to saved profiles by NPI. Files in the application folder and its <b>contacts</b> folder are listed; uploads are copied into <b>contacts</b>.</p>
+<div class="row"><select id="listSelect"><option value="">Choose a contact list...</option></select><button id="useList">Use this list</button><button class="alt" id="refreshLists">Refresh files</button><button class="alt" onclick="pickFile()">Upload XLSX...</button><input id="file" type="file" accept=".xlsx" hidden></div>
+<div id="listInfo" class="muted">No contact list selected.</div></div>
+<div class="card"><h2>2. Recipients</h2>
+<div class="row"><label for="pool">Risk pool</label><select id="pool"><option value="">Choose risk pool...</option></select><button class="alt" id="selAll">Select all with an email</button><button class="alt" id="selNone">Clear selection</button><span id="recipNote" class="muted"></span></div>
+<div id="recipients" class="muted">Choose a risk pool to list its saved provider profiles.</div></div>
+<div class="card"><h2>3. Email</h2>
+<label for="subject">Subject</label><div class="row"><input id="subject" class="subject" placeholder="Subject line"></div>
+<label>Body</label><div class="greet">Dear [Provider Name],</div>
+<div class="toolbar"><button type="button" data-cmd="bold" title="Bold"><b>B</b></button><button type="button" data-cmd="italic" title="Italic"><i>I</i></button><button type="button" data-cmd="underline" title="Underline"><u>U</u></button><button type="button" data-cmd="insertUnorderedList" title="Bulleted list">&bull; List</button><button type="button" data-cmd="insertOrderedList" title="Numbered list">1. List</button><button type="button" data-cmd="link" title="Insert link">Link</button><button type="button" data-cmd="removeFormat" title="Clear formatting">Clear</button><button type="button" data-cmd="undo" title="Undo">Undo</button></div>
+<div id="body" class="editor" contenteditable="true"></div>
+<label class="check"><input type="checkbox" id="sig" checked> Include my default Outlook signature</label>
+<label class="check"><input type="checkbox" id="fresh" checked> Generate a fresh report for each provider (uncheck to attach each provider's latest existing PDF)</label>
+<div class="row"><button class="go" id="go" disabled>Generate reports and save Outlook drafts</button><span id="goNote" class="muted"></span></div></div>
+<div class="card" id="progressCard" style="display:none"><h2>4. Progress</h2><div id="campaign"></div></div>
+</main>
+<script>
+const el=id=>document.getElementById(id);let recipients=[],campaignId='',pollTimer=null,pollBusy=false,draftBusy=false,runner=false,lastCampaignJson='';
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+async function api(u,o){const r=await fetch(u,o);const text=await r.text();let j=null;try{j=text?JSON.parse(text):null}catch(e){throw Error('Server returned invalid JSON: '+text.slice(0,200))}if(!r.ok)throw Error((j&&j.error)||('Request failed ('+r.status+')'));return j}
+function when(iso){if(!iso)return '';const d=new Date(iso);return isNaN(d)?iso:d.toLocaleString()}
+function note(id,t,err){const n=el(id);n.textContent=t;n.className=err?'error':'muted'}
+function saveDraft(){try{localStorage.setItem('pa-communication',JSON.stringify({pool:el('pool').value,subject:el('subject').value,body:el('body').innerHTML,sig:el('sig').checked,fresh:el('fresh').checked}))}catch(e){}}
+function loadDraft(){try{const d=JSON.parse(localStorage.getItem('pa-communication')||'null');if(!d)return null;el('subject').value=d.subject||'';el('body').innerHTML=d.body||'';el('sig').checked=d.sig!==false;el('fresh').checked=d.fresh!==false;return d}catch(e){return null}}
+function listInfoHtml(l,path,err){
+ if(err)return '<span class="error">'+esc(err)+'</span>';
+ if(!l)return '<span class="muted">No contact list selected'+(path?' (the saved list '+esc(path)+' is no longer available)':'')+'.</span>';
+ const d=l.duplicateNpis.length,n=l.rowsWithoutNpi;
+ return '<b>'+esc(l.fileName)+'</b> <span class="muted">sheet '+esc(l.worksheet)+', header row '+l.headerRow+', '+l.contactCount+' contact'+(l.contactCount===1?'':'s')+' with an NPI'+(d?', '+d+' duplicate NPI'+(d===1?'':'s')+' ignored':'')+(n?', '+n+' row'+(n===1?'':'s')+' without a valid NPI skipped':'')+'</span><br>Recognized columns: '+esc(l.recognized.join(', '))+(l.missing.length?'<br><span class="warn">Not found: '+esc(l.missing.join(', '))+'</span>':'');
+}
+function fillLists(m){const s=el('listSelect');s.innerHTML='<option value="">Choose a contact list...</option>';m.candidates.forEach(c=>s.add(new Option(c.fileName+(c.folder==='contacts'?'  (contacts folder)':'')+'  -  '+when(c.lastWriteUtc),c.path)));if(m.contactListPath&&[...s.options].some(o=>o.value===m.contactListPath))s.value=m.contactListPath;el('listInfo').innerHTML=listInfoHtml(m.contactList,m.contactListPath,m.contactListError)}
+async function refreshLists(){try{const m=await api('/api/communication');fillLists(m);fillPools(m.pools)}catch(e){el('listInfo').innerHTML='<span class="error">'+esc(e.message)+'</span>'}}
+function fillPools(pools){const s=el('pool');const keep=s.value;s.innerHTML='<option value="">Choose risk pool...</option>';pools.forEach(p=>s.add(new Option(p,p)));if(keep&&pools.includes(keep))s.value=keep}
+async function useList(){const p=el('listSelect').value;if(!p){note('goNote','Choose a contact list first.',true);return}el('listInfo').innerHTML='<span class="muted">Reading '+esc(p)+' ...</span>';try{const l=await api('/api/contact-list?path='+encodeURIComponent(p),{method:'POST'});el('listInfo').innerHTML=listInfoHtml(l,p,'');if(el('pool').value)await loadRecipients()}catch(e){el('listInfo').innerHTML='<span class="error">'+esc(e.message)+'</span>'}}
+function pickFile(){const f=el('file');f.value='';f.click()}
+el('file').onchange=async()=>{const f=el('file');if(!f.files.length)return;const file=f.files[0];el('listInfo').innerHTML='<span class="muted">Uploading and reading '+esc(file.name)+' ...</span>';try{const l=await api('/api/contact-list-upload',{method:'POST',headers:{'X-File-Name':encodeURIComponent(file.name)},body:file});await refreshLists();el('listInfo').innerHTML=listInfoHtml(l,l.path,'');if(el('pool').value)await loadRecipients()}catch(e){el('listInfo').innerHTML='<span class="error">'+esc(e.message)+'</span>'}};
+function recipientsHtml(){
+ if(!recipients.length)return '<span class="muted">No saved profiles in this risk pool. Map providers in the Provider Wizard and save their profiles first.</span>';
+ const matched=recipients.filter(r=>r.matched).length;
+ return '<p class="muted">'+recipients.length+' saved profile'+(recipients.length===1?'':'s')+' in this pool, '+matched+' matched to the contact list by NPI. Rows without a match are highlighted; type an email to include one anyway. The greeting name is prefilled from the profile.</p><table><thead><tr><th></th><th>Provider (profile)</th><th>NPI</th><th>Location</th><th>Contact list</th><th>Email</th><th>Greeting name</th><th>Latest report</th></tr></thead><tbody>'+recipients.map((r,i)=>'<tr'+(r.matched?'':' class="unmatched"')+'><td><input type="checkbox" data-i="'+i+'"'+(r.matched&&r.email?' checked':'')+'></td><td><b>'+esc(r.displayName)+'</b></td><td>'+esc(r.npi)+'</td><td>'+esc(r.location)+'</td><td>'+(r.matched?esc(r.contactName)+(r.contactSpecialty?'<br><span class="muted">'+esc(r.contactSpecialty)+'</span>':''):'<span class="warn">Not in contact list</span>')+'</td><td><input data-email="'+i+'" value="'+esc(r.email)+'" placeholder="email address"></td><td><input data-greet="'+i+'" value="'+esc(r.displayName)+'"></td><td class="muted">'+(r.latestReportUtc?esc(when(r.latestReportUtc)):'none yet')+'</td></tr>').join('')+'</tbody></table>';
+}
+async function loadRecipients(){const pool=el('pool').value;recipients=[];if(!pool){el('recipients').innerHTML='<span class="muted">Choose a risk pool to list its saved provider profiles.</span>';updateGo();return}el('recipients').innerHTML='<span class="muted">Loading...</span>';try{const m=await api('/api/recipients?riskPool='+encodeURIComponent(pool));recipients=m.recipients;el('recipients').innerHTML=recipientsHtml();[...el('recipients').querySelectorAll('input')].forEach(x=>{x.oninput=updateGo;x.onchange=updateGo})}catch(e){el('recipients').innerHTML='<span class="error">'+esc(e.message)+'</span>'}updateGo()}
+function selected(){return [...el('recipients').querySelectorAll('input[type=checkbox]:checked')].map(cb=>{const i=+cb.dataset.i;return {npi:recipients[i].npi,displayName:recipients[i].displayName,email:el('recipients').querySelector('input[data-email="'+i+'"]').value.trim(),greeting:el('recipients').querySelector('input[data-greet="'+i+'"]').value.trim()}})}
+function bodyText(){return el('body').innerText.replace(/\s+/g,' ').trim()}
+function updateGo(){
+ const sel=selected();const noEmail=sel.filter(s=>!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.email));const problems=[];
+ if(!el('pool').value)problems.push('choose a risk pool');
+ if(!sel.length)problems.push('tick at least one recipient');
+ if(noEmail.length)problems.push(noEmail.length+' selected recipient'+(noEmail.length===1?' has':'s have')+' no valid email');
+ if(!el('subject').value.trim())problems.push('enter a subject');
+ if(!bodyText())problems.push('write the email body');
+ el('go').disabled=problems.length>0;
+ note('goNote',problems.length?('To continue: '+problems.join('; ')+'.'):(sel.length+' email'+(sel.length===1?'':'s')+' will be drafted'+(el('fresh').checked?' after fresh reports are generated':' with each provider\'s latest existing PDF')+'.'),false);
+}
+el('selAll').onclick=()=>{[...el('recipients').querySelectorAll('input[type=checkbox]')].forEach(cb=>{const i=+cb.dataset.i;cb.checked=!!el('recipients').querySelector('input[data-email="'+i+'"]').value.trim()});updateGo()};
+el('selNone').onclick=()=>{[...el('recipients').querySelectorAll('input[type=checkbox]')].forEach(cb=>cb.checked=false);updateGo()};
+[...document.querySelectorAll('.toolbar button')].forEach(b=>{b.onmousedown=e=>e.preventDefault();b.onclick=()=>{el('body').focus();const c=b.dataset.cmd;if(c==='link'){const u=prompt('Link address (https://...)');if(u)document.execCommand('createLink',false,u)}else{document.execCommand(c,false,null)}saveDraft();updateGo()}});
+['subject','body','sig','fresh'].forEach(id=>{el(id).addEventListener('input',()=>{saveDraft();updateGo()});el(id).addEventListener('change',()=>{saveDraft();updateGo()})});
+el('pool').onchange=async()=>{saveDraft();await loadRecipients()};
+el('useList').onclick=useList;el('refreshLists').onclick=refreshLists;
+el('go').onclick=async()=>{
+ updateGo();if(el('go').disabled)return;const sel=selected();
+ if(!confirm('Generate '+(el('fresh').checked?'fresh reports and ':'')+'Outlook drafts for '+sel.length+' provider'+(sel.length===1?'':'s')+' in '+el('pool').value+'? Nothing is sent; drafts wait in Outlook for your review.'))return;
+ el('go').disabled=true;note('goNote','Starting...',false);
+ try{const c=await api('/api/campaign',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({riskPool:el('pool').value,subject:el('subject').value,bodyHtml:el('body').innerHTML,includeSignature:el('sig').checked,freshReports:el('fresh').checked,providers:sel})});startCampaign(c);note('goNote','Started. Progress is shown below; you can leave this tab open while reports run.',false)}
+ catch(e){note('goNote','Could not start: '+e.message,true);updateGo()}
+};
+function campaignHtml(c){
+ const s=c.summary||{};
+ const rows=c.providers.map(p=>{const rep=p.reportState==='Completed'?'<span class="ok">Completed</span>'+(p.stage==='Existing report'?' <span class="muted">(existing)</span>':''):p.reportState==='Failed'?'<span class="error">Failed</span>':'<div class="progress"><span style="width:'+Math.max(0,Math.min(100,p.percent||0))+'%"></span></div><span class="muted">'+esc(p.reportState||'Queued')+' '+(p.percent||0)+'% '+esc(p.stage||'')+'</span>';
+  const dr=p.draftState==='Created'?'<span class="ok">Saved to Drafts</span> <span class="muted">'+esc(when(p.draftUtc))+'</span>':p.draftState==='Failed'?'<span class="error">Failed</span>':p.draftState==='Skipped'?'<span class="warn">Skipped</span>':p.reportState==='Completed'?'<span class="muted">Saving...</span>':'<span class="muted">Waiting for the report</span>';
+  return '<tr><td><b>'+esc(p.displayName)+'</b><br><span class="muted">'+esc(p.email)+' &middot; Dear '+esc(p.greeting)+',</span></td><td>'+rep+'</td><td>'+dr+(p.error?'<br><span class="error">'+esc(p.error)+'</span>':'')+'</td></tr>'}).join('');
+ const head='<p><b>'+esc(c.subject)+'</b> <span class="muted">'+esc(c.riskPool)+' &middot; started '+esc(when(c.createdUtc))+' &middot; '+esc(c.state)+'</span></p>';
+ const sum='<p>'+(s.draftsCreated||0)+' of '+(s.total||0)+' drafts saved to Outlook'+(s.draftsFailed?', <span class="error">'+s.draftsFailed+' failed</span>':'')+(s.skipped?', '+s.skipped+' skipped':'')+(s.reportsPending?', '+s.reportsPending+' report'+(s.reportsPending===1?'':'s')+' still running':'')+'.'+(c.state==='Completed'?' Open Outlook, review each message in the Drafts folder, then send.':'')+'</p><div class="row">'+(s.draftsFailed?'<button id="retry">Retry failed drafts</button>':'')+(c.state==='Completed'?'<button class="alt" id="another">Start another email</button>':'')+'</div>';
+ return head+'<table><thead><tr><th>Provider</th><th>Report</th><th>Outlook draft</th></tr></thead><tbody>'+rows+'</tbody></table>'+sum;
+}
+function renderCampaign(c){const txt=JSON.stringify(c);if(txt===lastCampaignJson)return;lastCampaignJson=txt;el('progressCard').style.display='';el('campaign').innerHTML=campaignHtml(c);const r=el('retry');if(r)r.onclick=retryDrafts;const a=el('another');if(a)a.onclick=()=>{updateGo();window.scrollTo(0,0)}}
+function startCampaign(c){campaignId=c.campaignId;lastCampaignJson='';renderCampaign(c);if(pollTimer)clearInterval(pollTimer);pollTimer=setInterval(poll,2500);poll()}
+function stopPoll(){if(pollTimer){clearInterval(pollTimer);pollTimer=null}}
+async function retryDrafts(){el('retry').disabled=true;try{renderCampaign(await api('/api/campaign-retry?id='+campaignId,{method:'POST'}))}catch(e){alert('Retry failed: '+e.message)}if(!pollTimer)poll()}
+async function poll(){
+ if(!campaignId||pollBusy)return;pollBusy=true;
+ try{let c=await api('/api/campaign?id='+campaignId);renderCampaign(c);const ps=c.providers;
+  if(!runner&&!ps.some(p=>p.reportState==='Starting'||p.reportState==='Running')&&ps.some(p=>p.reportState==='Prepared'||p.reportState==='Queued')){runner=true;try{await fetch('/api/run-next',{method:'POST'})}finally{runner=false}}
+  if(c.summary&&c.summary.draftsPending>0&&!draftBusy){draftBusy=true;try{c=await api('/api/campaign-drafts?id='+campaignId,{method:'POST'});renderCampaign(c)}catch(e){el('campaign').insertAdjacentHTML('beforeend','<p class="error">Drafting failed: '+esc(e.message)+'</p>')}finally{draftBusy=false}}
+  if(c.state==='Completed')stopPoll();
+ }catch(e){el('campaign').innerHTML='<p class="error">'+esc(e.message)+'</p>';stopPoll()}
+ finally{pollBusy=false}
+}
+async function init(){
+ const m=await api('/api/communication');fillLists(m);fillPools(m.pools);
+ const d=loadDraft();if(d&&d.pool&&m.pools.includes(d.pool)){el('pool').value=d.pool;await loadRecipients()}else{updateGo()}
+ try{const list=await api('/api/campaigns');if(list.length){const c=await api('/api/campaign?id='+list[0].campaignId);if(c.state==='Completed'){renderCampaign(c);campaignId=c.campaignId}else{startCampaign(c)}}}catch(e){}
+}
+init().catch(e=>{document.body.insertAdjacentHTML('beforeend','<p class="error" style="padding:22px">Error: '+esc(e.message)+'</p>')});
+</script></body></html>
+'@
+ return $html.Replace('__NAV__',(Get-NavHtml 'communication')).Replace('__TABCSS__',$script:TabCss)
 }
 # --- Draft 4: analysis transformation, HTML/PDF publishing, and persisted execution ---
 function ConvertTo-HtmlEncoded([object]$Value){return [Net.WebUtility]::HtmlEncode([string]$Value)}
