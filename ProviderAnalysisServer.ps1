@@ -137,7 +137,16 @@ function Serve{
  if(!$NoBrowser){Start-Process $url}
  while(-not $script:Stop -and $script:Listener.IsListening){$a=$script:Listener.BeginGetContext($null,$null);while(-not $a.AsyncWaitHandle.WaitOne(250)){if($script:Stop){break};if(([DateTime]::UtcNow-$script:LastHeartbeat).TotalSeconds -ge $script:HeartbeatSeconds){Invoke-Heartbeat}};if($script:Stop){break};try{Request ($script:Listener.EndGetContext($a))}catch{Log 'HTTP_LOOP' 'FAILED' $_.Exception.Message};if($script:RunNext){$script:RunNext=$false;try{Invoke-NextPendingJob}catch{Log 'JOB_LAUNCH' 'FAILED' $_.Exception.Message}}}
 }
-function Save-JsonAtomic([string]$Path,[object]$Value){$tmp=$Path+'.tmp';$Value|ConvertTo-Json -Depth 15|Set-Content -LiteralPath $tmp -Encoding UTF8;Move-Item -LiteralPath $tmp -Destination $Path -Force}
+function Save-JsonAtomic([string]$Path,[object]$Value){
+ # Writes a per-process temp file, then swaps it in with File.Replace so readers never see the file missing. On Windows the swap briefly
+ # fails while another process (the server polling progress) has the file open ("Cannot create a file when that file already exists"),
+ # so it is retried for up to about five seconds before giving up.
+ $tmp=$Path+'.'+$PID+'.tmp';$Value|ConvertTo-Json -Depth 15|Set-Content -LiteralPath $tmp -Encoding UTF8
+ for($attempt=1;;$attempt++){
+  try{if([IO.File]::Exists($Path)){[IO.File]::Replace($tmp,$Path,[NullString]::Value)}else{[IO.File]::Move($tmp,$Path)};return}
+  catch{if($attempt -ge 20){Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue;throw};Start-Sleep -Milliseconds (25*$attempt)}
+ }
+}
 function Get-FileHash256([string]$Path){return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()}
 function Test-HeaderEqual([object[]]$Actual,[object[]]$Expected){if($Actual.Count -ne $Expected.Count){return $false};for($i=0;$i -lt $Expected.Count;$i++){if(([string]$Actual[$i]).Trim() -cne ([string]$Expected[$i]).Trim()){return $false}};return $true}
 function Test-WorkbookSchema([string]$Path){
@@ -1711,7 +1720,13 @@ function New-KpiTotal([object[]]$Rows){
  return [ordered]@{providers=$n;kpi=$t}
 }
 $script:GroupSort=@(@{Expression={([string]$_).StartsWith('(')}},@{Expression={[string]$_}})   # named groups alphabetically, then '(No location)' / '(No risk pool)'
-function Set-OverviewProgress($Overview,[string]$Path,[int]$Percent,[string]$Stage){$Overview.state='Running';$Overview.percent=$Percent;$Overview.stage=$Stage;Save-JsonAtomic $Path $Overview}
+$script:OverviewLastSave=[DateTime]::MinValue
+function Set-OverviewProgress($Overview,[string]$Path,[int]$Percent,[string]$Stage){
+ # Progress is written at most once a second (a large pool counts many providers per second); the start and the final stages always are.
+ $Overview.state='Running';$Overview.percent=$Percent;$Overview.stage=$Stage
+ if($Percent -gt 5 -and $Percent -lt 94 -and ([DateTime]::UtcNow-$script:OverviewLastSave).TotalMilliseconds -lt 1000){return}
+ Save-JsonAtomic $Path $Overview;$script:OverviewLastSave=[DateTime]::UtcNow
+}
 function Invoke-OverviewRun([string]$Id){
  # Runs in its own worker process: reads each source once for every selected provider, then counts per provider exactly as a report would.
  $path=Get-OverviewPath $Id;$ov=Json $path;if(!$ov){throw 'Overview was not found.'}
@@ -1924,7 +1939,8 @@ function showResult(o){
  el('result').innerHTML='<div class="row"><b>'+o.providerCount+' provider'+(o.providerCount===1?'':'s')+'</b><span class="muted">built '+esc(when(o.completedUtc))+(o.seconds!=null?' in '+o.seconds+' s':'')+'</span><a class="btn" id="xlsx" href="'+esc(o.xlsxUrl)+'">Download Excel</a>'+(o.pdfUrl?'<a class="btn" id="pdf" target="_blank" href="'+esc(o.pdfUrl)+'">Open PDF</a>':'<span class="warn">PDF not available'+(o.pdfError?': '+esc(o.pdfError):'')+'</span>')+'</div><p class="muted">'+esc(o.sourcesText)+'. Flagged patients are excluded from every count, as on each dashboard.'+(o.failedProviders?' <span class="error">'+o.failedProviders+' provider'+(o.failedProviders===1?' was':'s were')+' not counted; see the red notes below.</span>':'')+'</p><p class="warn" id="selNote" style="display:none">Your selection has changed since this overview was built; select Build overview to update it.</p><div class="scroll">'+o.tableHtml+'</div>';
  syncChecks();
 }
-function startPoll(id){if(timer)clearInterval(timer);timer=setInterval(async()=>{try{const o=await api('/api/overview-run?id='+encodeURIComponent(id));showResult(o);if(!busy()){clearInterval(timer);timer=null}}catch(e){clearInterval(timer);timer=null;el('result').innerHTML='<p class="error">'+esc(e.message)+'</p>'}},1500)}
+let pollErrors=0;
+function startPoll(id){if(timer)clearInterval(timer);pollErrors=0;timer=setInterval(async()=>{try{const o=await api('/api/overview-run?id='+encodeURIComponent(id));pollErrors=0;showResult(o);if(!busy()){clearInterval(timer);timer=null}}catch(e){if(++pollErrors<5)return;clearInterval(timer);timer=null;el('result').innerHTML='<p class="error">'+esc(e.message)+'</p>'}},1500)}
 el('build').onclick=async()=>{if(!sel.size||busy())return;el('build').disabled=true;try{const o=await api('/api/overview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({npis:[...sel]})});showResult(o);if(busy())startPoll(o.overviewId)}catch(e){el('result').innerHTML='<p class="error">'+esc(e.message)+'</p>';syncChecks()}};
 (async()=>{try{const m=await api('/api/overview');providers=m.providers;const last=m.latest;if(last)last.npis.forEach(n=>{if(providers.some(p=>p.npi===n))sel.add(n)});renderPicker();showResult(last);if(busy())startPoll(last.overviewId)}catch(e){el('picker').innerHTML='<p class="error">'+esc(e.message)+'</p>'}})();
 </script></body></html>
