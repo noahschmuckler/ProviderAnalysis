@@ -1771,7 +1771,7 @@ function Invoke-OverviewRun([string]$Id){
    [IO.File]::WriteAllText($stageHtml,(ConvertTo-OverviewDocument $ov),(New-Object Text.UTF8Encoding($false)))
    # Rendered under a space-free staging name (the browser command line is not quoted), then moved to its readable name.
    $stagePdf=Join-Path $script:Paths.Staging ('overview-'+$Id+'.pdf');Convert-HtmlPdf $stageHtml $stagePdf
-   $pdf=Join-Path $script:Paths.Overviews ('Provider Overview - '+(Get-Date -Format 'yyyy-MM-dd HHmmss')+'.pdf');Move-Item -LiteralPath $stagePdf -Destination $pdf -Force;Set-P $ov 'pdfPath' $pdf
+   $built=ConvertTo-DateValue (Get-P $ov 'asOf' $null);if(!$built){$built=Get-Date};$pdf=Join-Path $script:Paths.Overviews ('Provider Overview - '+$built.ToString('yyyy-MM-dd HHmmss')+'.pdf');Move-Item -LiteralPath $stagePdf -Destination $pdf -Force;Set-P $ov 'pdfPath' $pdf
   }catch{Set-P $ov 'pdfError' $_.Exception.Message;Log 'OVERVIEW_PDF' 'WARN' $_.Exception.Message}finally{Remove-Item -LiteralPath $stageHtml,(Join-Path $script:Paths.Staging ('overview-'+$Id+'.pdf')) -Force -ErrorAction SilentlyContinue}
   $ov.state='Completed';$ov.percent=100;$ov.stage='Overview complete';Set-P $ov 'completedUtc' ([DateTime]::UtcNow.ToString('o'));Set-P $ov 'seconds' ([Math]::Round($sw.Elapsed.TotalSeconds,1));Save-JsonAtomic $path $ov
   Log 'OVERVIEW_COMPLETED' 'OK' ($chosen.Count.ToString()+' providers in '+[Math]::Round($sw.Elapsed.TotalSeconds,1)+'s')
@@ -1793,17 +1793,35 @@ function Update-OverviewLiveness($Ov){
  if(!$reason){return $false}
  $Ov.state='Failed';$Ov.stage='Overview failed';Set-P $Ov 'errorSummary' $reason;Save-JsonAtomic (Get-OverviewPath ([string]$Ov.overviewId)) $Ov;Log 'OVERVIEW_INTERRUPTED' 'WARN' ([string]$Ov.overviewId);return $true
 }
-function Get-OverviewModel([string]$Id){
+function Get-OverviewModel([string]$Id,[switch]$Summary){
  $ov=Json (Get-OverviewPath $Id);if(!$ov){throw 'Overview was not found.'}
  $null=Update-OverviewLiveness $ov
- $m=[ordered]@{overviewId=[string]$ov.overviewId;state=[string]$ov.state;percent=[int](Get-P $ov 'percent' 0);stage=[string](Get-P $ov 'stage' '');requestedUtc=(ConvertTo-IsoText (Get-P $ov 'requestedUtc' ''));completedUtc=(ConvertTo-IsoText (Get-P $ov 'completedUtc' ''));asOf=(ConvertTo-IsoText (Get-P $ov 'asOf' ''));seconds=(Get-P $ov 'seconds' $null);npis=@(Get-P $ov 'npis' @());errorSummary=[string](Get-P $ov 'errorSummary' '');pdfError=[string](Get-P $ov 'pdfError' '');failedProviders=[int](Get-P $ov 'failedProviders' 0);providerCount=@(Get-P $ov 'npis' @()).Count;tableHtml='';sourcesText='';xlsxUrl=$null;pdfUrl=$null}
+ $m=[ordered]@{overviewId=[string]$ov.overviewId;state=[string]$ov.state;percent=[int](Get-P $ov 'percent' 0);stage=[string](Get-P $ov 'stage' '');requestedUtc=(ConvertTo-IsoText (Get-P $ov 'requestedUtc' ''));completedUtc=(ConvertTo-IsoText (Get-P $ov 'completedUtc' ''));asOf=(ConvertTo-IsoText (Get-P $ov 'asOf' ''));seconds=(Get-P $ov 'seconds' $null);npis=@(Get-P $ov 'npis' @());errorSummary=[string](Get-P $ov 'errorSummary' '');pdfError=[string](Get-P $ov 'pdfError' '');failedProviders=[int](Get-P $ov 'failedProviders' 0);providerCount=@(Get-P $ov 'npis' @()).Count;selection=(Get-OverviewSelectionText $ov);totalPatients=$null;tableHtml='';sourcesText='';xlsxUrl=$null;pdfUrl=$null}
  if($m.state -eq 'Completed'){
-  $m.tableHtml=ConvertTo-OverviewTablesHtml $ov;$m.sourcesText=Get-OverviewSourcesText $ov;$m.xlsxUrl='/overview.xlsx?id='+$m.overviewId
+  $m.totalPatients=[int](Get-Field (Get-Field (Get-P $ov 'total' $null) 'kpi' $null) 'total' 0);$m.xlsxUrl='/overview.xlsx?id='+$m.overviewId
+  if(!$Summary){$m.tableHtml=ConvertTo-OverviewTablesHtml $ov;$m.sourcesText=Get-OverviewSourcesText $ov}
   $pdf=[string](Get-P $ov 'pdfPath' '');if($pdf -and (Test-Path -LiteralPath $pdf)){$m.pdfUrl='/overview.pdf?id='+$m.overviewId}elseif($pdf -and !$m.pdfError){$m.pdfError='The PDF was moved or deleted from the overviews folder.'}
  }
  return $m
 }
-function Get-OverviewPageModel{$latest=@(Get-Overviews|Select-Object -First 1);return [ordered]@{providers=@(Get-OverviewProviders);latest=$(if($latest.Count){Get-OverviewModel ([string]$latest[0].overviewId)}else{$null})}}
+function Get-OverviewPageModel{
+ $all=@(Get-Overviews);$history=@(foreach($o in $all){if([string](Get-P $o 'state' '') -in @('Completed','Failed')){Get-OverviewModel ([string]$o.overviewId) -Summary}})
+ return [ordered]@{providers=@(Get-OverviewProviders);latest=$(if($all.Count){Get-OverviewModel ([string]$all[0].overviewId)}else{$null});history=$history}
+}
+function New-SelectionSummary([object[]]$All,[hashtable]$Chosen,[string]$Field){
+ # Per risk pool or location: how many of its saved profiles were picked (only groups with at least one pick).
+ $out=@();foreach($name in @($All|ForEach-Object{$_[$Field]}|Select-Object -Unique|Sort-Object -Property $script:GroupSort)){$members=@($All|Where-Object{$_[$Field] -eq $name});$picked=@($members|Where-Object{$Chosen.ContainsKey($_.npi)}).Count;if($picked -gt 0){$out+=[ordered]@{name=$name;selected=$picked;total=$members.Count}}}
+ return @($out)
+}
+function Get-OverviewSelectionText($Ov){
+ # "CRYSTAL RUN (all 12), PROHEALTH (2 of 8)"; overviews built before the selection was recorded fall back to their result groups.
+ $fmt={param($Items)(@(foreach($i in @($Items)){if($null -eq $i){continue};$k=[int](Get-Field $i 'selected' 0);$t=[int](Get-Field $i 'total' 0);[string](Get-Field $i 'name' '')+$(if($t -le 0){' ('+$k+')'}elseif($k -ge $t){' (all '+$t+')'}else{' ('+$k+' of '+$t+')'})}) -join ', ')}
+ $sel=Get-P $Ov 'selection' $null
+ if($sel){return [ordered]@{riskPools=(& $fmt (Get-Field $sel 'riskPools' @()));locations=(& $fmt (Get-Field $sel 'locations' @()))}}
+ $pools=@(foreach($p in @(Get-P $Ov 'pools' @())){if($p){[ordered]@{name=[string](Get-Field $p 'riskPool' '');selected=[int](Get-Field $p 'providers' 0);total=0}}})
+ $locs=@(foreach($l in @(Get-P $Ov 'locations' @())){if($l){[ordered]@{name=[string](Get-Field $l 'location' '');selected=@(Get-Field $l 'rows' @()).Count;total=0}}})
+ return [ordered]@{riskPools=(& $fmt $pools);locations=(& $fmt $locs)}
+}
 function New-OverviewRun($Body){
  $npis=@(@(Get-P $Body 'npis' @())|ForEach-Object{([string]$_).Trim()}|Where-Object{$_ -match '^\d{10}$'}|Select-Object -Unique)
  if($npis.Count -eq 0){throw 'Choose at least one provider.'}
@@ -1811,7 +1829,8 @@ function New-OverviewRun($Body){
  $missing=@($npis|Where-Object{!$known.ContainsKey($_)});if($missing.Count -gt 0){throw ('No saved profile for NPI '+($missing -join ', ')+'; reload the page.')}
  foreach($o in @(Get-Overviews)){if([string](Get-P $o 'state' '') -in @('Starting','Running') -and !(Update-OverviewLiveness $o)){throw 'An overview is already being built; wait for it to finish.'}}
  $id=[Guid]::NewGuid().ToString('N');$path=Get-OverviewPath $id
- $ov=[ordered]@{overviewVersion=1;overviewId=$id;state='Starting';percent=1;stage='Launching overview worker';requestedUtc=[DateTime]::UtcNow.ToString('o');npis=$npis;workerPid=0}
+ $all=@(Get-OverviewProviders);$chosen=@{};foreach($n in $npis){$chosen[$n]=$true};$selection=[ordered]@{riskPools=@(New-SelectionSummary $all $chosen 'riskPool');locations=@(New-SelectionSummary $all $chosen 'location')}
+ $ov=[ordered]@{overviewVersion=1;overviewId=$id;state='Starting';percent=1;stage='Launching overview worker';requestedUtc=[DateTime]::UtcNow.ToString('o');npis=$npis;selection=$selection;workerPid=0}
  Save-JsonAtomic $path $ov;Log 'OVERVIEW_REQUESTED' 'OK' ($npis.Count.ToString()+' providers')
  if($script:OverviewInline){Invoke-OverviewRun $id}
  else{try{$null=Start-OverviewWorker $id}catch{$ov.state='Failed';$ov.stage='Worker launch failed';$ov['errorSummary']=$_.Exception.Message;Save-JsonAtomic $path $ov;Log 'OVERVIEW_FAILED' 'FAILED' $_.Exception.Message}}
@@ -1873,7 +1892,7 @@ function New-OverviewWorkbook($Ov){
  try{return ,$pkg.GetAsByteArray()}finally{$pkg.Dispose()}
 }
 function Send-OverviewFile($Context,[string]$Id,[string]$Type){
- $ov=Get-CompletedOverview $Id;$asOf=ConvertTo-DateValue (Get-P $ov 'asOf' $null);$stamp=$(if($asOf){$asOf.ToString('yyyy-MM-dd')}else{Get-Date -Format 'yyyy-MM-dd'})
+ $ov=Get-CompletedOverview $Id;$asOf=ConvertTo-DateValue (Get-P $ov 'asOf' $null);$stamp=$(if($asOf){$asOf.ToString('yyyy-MM-dd HHmmss')}else{Get-Date -Format 'yyyy-MM-dd HHmmss'})
  if($Type -eq 'xlsx'){Send-Bytes $Context 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' (New-OverviewWorkbook $ov) ('attachment; filename="Provider Overview - '+$stamp+'.xlsx"');return}
  $pdf=[string](Get-P $ov 'pdfPath' '');$full=$(if($pdf){[IO.Path]::GetFullPath($pdf)}else{''});$root=[IO.Path]::GetFullPath($script:Paths.Overviews)
  if(!$full -or !$full.StartsWith($root,[StringComparison]::OrdinalIgnoreCase) -or !(Test-Path -LiteralPath $full)){throw 'The PDF for this overview is not available.'}
@@ -1891,7 +1910,7 @@ button,a.btn{padding:7px 12px;cursor:pointer;background:#1769aa;color:#fff;borde
 .chips{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 10px}.chip{border:1px solid #c8d2e0;border-radius:16px;padding:4px 10px;background:#f8fafc;cursor:pointer;user-select:none}.chip input{margin:0 5px 0 0;vertical-align:-1px}.grp{font-weight:600;color:#17365d;margin-top:10px}
 .provs{columns:3 260px;column-gap:18px;margin-top:6px}.locgrp{break-inside:avoid;margin:0 0 10px}.lochead{font-weight:600;color:#17365d;border-bottom:1px solid #dce4ef;margin-bottom:3px}.prov{display:block;padding:2px 0;cursor:pointer}.prov input{margin:0 6px 0 0}
 .progress{height:10px;background:#e4e9f0;border-radius:6px;overflow:hidden;margin:6px 0;max-width:600px}.progress span{display:block;height:100%;background:#1769aa;transition:width .3s}
-.scroll{overflow-x:auto}
+.scroll{overflow-x:auto}table.hist{border-collapse:collapse;width:100%}table.hist th,table.hist td{padding:6px 8px;border-bottom:1px solid #dce4ef;text-align:left;vertical-align:top}table.hist th{background:#eaf1f8}table.hist .n{text-align:right}table.hist tr.showing td{background:#f4f9ff}
 __OVCSS__
 </style></head><body>
 <header><h1>Overview</h1><p>Draft 5.5 - the dashboard's top-section counts for a group of providers: one row per provider, subtotals by location and risk pool, grand total at the bottom</p></header>__NAV__
@@ -1903,6 +1922,7 @@ __OVCSS__
 <p class="muted">Counts are computed from the current source files in one pass (no reports or PDFs are generated per provider), with flagged patients excluded exactly as on each dashboard.</p>
 </section>
 <section class="card"><h2>Overview</h2><div id="result"><span class="muted">Loading...</span></div></section>
+<section class="card"><h2>Previous overviews</h2><p class="muted">The last 30 overviews, newest first. View shows one again and restores its provider selection; its Excel and PDF are kept as built.</p><div id="history"><span class="muted">Loading...</span></div></section>
 </main>
 <script>
 const el=id=>document.getElementById(id);
@@ -1939,10 +1959,18 @@ function showResult(o){
  el('result').innerHTML='<div class="row"><b>'+o.providerCount+' provider'+(o.providerCount===1?'':'s')+'</b><span class="muted">built '+esc(when(o.completedUtc))+(o.seconds!=null?' in '+o.seconds+' s':'')+'</span><a class="btn" id="xlsx" href="'+esc(o.xlsxUrl)+'">Download Excel</a>'+(o.pdfUrl?'<a class="btn" id="pdf" target="_blank" href="'+esc(o.pdfUrl)+'">Open PDF</a>':'<span class="warn">PDF not available'+(o.pdfError?': '+esc(o.pdfError):'')+'</span>')+'</div><p class="muted">'+esc(o.sourcesText)+'. Flagged patients are excluded from every count, as on each dashboard.'+(o.failedProviders?' <span class="error">'+o.failedProviders+' provider'+(o.failedProviders===1?' was':'s were')+' not counted; see the red notes below.</span>':'')+'</p><p class="warn" id="selNote" style="display:none">Your selection has changed since this overview was built; select Build overview to update it.</p><div class="scroll">'+o.tableHtml+'</div>';
  syncChecks();
 }
+function historyHtml(list){
+ if(!list.length)return '<span class="muted">None yet.</span>';
+ return '<table class="hist"><thead><tr><th>Built</th><th>Providers</th><th>Risk pools</th><th>Locations</th><th class="n">Patients</th><th></th></tr></thead><tbody>'+list.map(h=>{const showing=current&&current.overviewId===h.overviewId;const s=h.selection||{};return '<tr'+(showing?' class="showing"':'')+'><td>'+esc(when(h.completedUtc||h.requestedUtc))+(showing?' <span class="muted">(shown above)</span>':'')+'</td><td>'+h.providerCount+'</td><td>'+esc(s.riskPools||'')+'</td><td>'+esc(s.locations||'')+'</td><td class="n">'+(h.totalPatients!=null?h.totalPatients:'')+'</td><td>'+(h.state==='Completed'?'<a href="#" data-view="'+esc(h.overviewId)+'">View</a> &middot; <a href="'+esc(h.xlsxUrl)+'">Excel</a>'+(h.pdfUrl?' &middot; <a target="_blank" href="'+esc(h.pdfUrl)+'">PDF</a>':''):'<span class="error">Failed: '+esc(h.errorSummary)+'</span>')+'</td></tr>'}).join('')+'</tbody></table>';
+}
+let history=[];
+function renderHistory(){el('history').innerHTML=historyHtml(history)}
+async function loadHistory(){try{const m=await api('/api/overview');history=m.history;renderHistory()}catch(e){el('history').innerHTML='<p class="error">'+esc(e.message)+'</p>'}}
+el('history').addEventListener('click',async e=>{const a=e.target.closest('a[data-view]');if(!a)return;e.preventDefault();if(busy())return;try{const o=await api('/api/overview-run?id='+encodeURIComponent(a.dataset.view));sel.clear();o.npis.forEach(n=>{if(providers.some(p=>p.npi===n))sel.add(n)});showResult(o);renderHistory();el('result').scrollIntoView({behavior:'smooth'})}catch(err){el('result').innerHTML='<p class="error">'+esc(err.message)+'</p>'}});
 let pollErrors=0;
-function startPoll(id){if(timer)clearInterval(timer);pollErrors=0;timer=setInterval(async()=>{try{const o=await api('/api/overview-run?id='+encodeURIComponent(id));pollErrors=0;showResult(o);if(!busy()){clearInterval(timer);timer=null}}catch(e){if(++pollErrors<5)return;clearInterval(timer);timer=null;el('result').innerHTML='<p class="error">'+esc(e.message)+'</p>'}},1500)}
+function startPoll(id){if(timer)clearInterval(timer);pollErrors=0;timer=setInterval(async()=>{try{const o=await api('/api/overview-run?id='+encodeURIComponent(id));pollErrors=0;showResult(o);if(!busy()){clearInterval(timer);timer=null;loadHistory()}}catch(e){if(++pollErrors<5)return;clearInterval(timer);timer=null;el('result').innerHTML='<p class="error">'+esc(e.message)+'</p>'}},1500)}
 el('build').onclick=async()=>{if(!sel.size||busy())return;el('build').disabled=true;try{const o=await api('/api/overview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({npis:[...sel]})});showResult(o);if(busy())startPoll(o.overviewId)}catch(e){el('result').innerHTML='<p class="error">'+esc(e.message)+'</p>';syncChecks()}};
-(async()=>{try{const m=await api('/api/overview');providers=m.providers;const last=m.latest;if(last)last.npis.forEach(n=>{if(providers.some(p=>p.npi===n))sel.add(n)});renderPicker();showResult(last);if(busy())startPoll(last.overviewId)}catch(e){el('picker').innerHTML='<p class="error">'+esc(e.message)+'</p>'}})();
+(async()=>{try{const m=await api('/api/overview');providers=m.providers;const last=m.latest;if(last)last.npis.forEach(n=>{if(providers.some(p=>p.npi===n))sel.add(n)});renderPicker();showResult(last);history=m.history;renderHistory();if(busy())startPoll(last.overviewId)}catch(e){el('picker').innerHTML='<p class="error">'+esc(e.message)+'</p>'}})();
 </script></body></html>
 '@
  return $html.Replace('__NAV__',(Get-NavHtml 'overview')).Replace('__TABCSS__',$script:TabCss).Replace('__OVCSS__',$script:OverviewCss)
