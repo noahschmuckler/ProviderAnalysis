@@ -1,10 +1,10 @@
 #requires -Version 5.1
-# ProviderAnalysisServer.ps1 - Draft 5.5 (ranked outreach lists, patient flags, Communication tab, unattended-run recovery, report server feeds, group Overview)
+# ProviderAnalysisServer.ps1 - Draft 5.6 (ranked outreach lists, patient flags, Communication tab, unattended-run recovery, report server feeds, group Overview, new-patient lists)
 # Adds provider indexes, guided cross-source mapping, fuzzy suggestions, NPI profiles, prepared job tracking, ranked outreach lists,
 # a flag mode (/flag?jobId=...) that excludes flagged patients from every list and panel on every later report for that provider,
 # and a Communication tab (/communication) that emails every provider in a risk pool a fresh report PDF via Outlook drafts.
 [CmdletBinding()]
-param([int]$PreferredPort=8765,[switch]$NoBrowser,[switch]$SkipModuleInstallPrompt,[string]$RunJobId='',[string]$RunOverviewId='')
+param([int]$PreferredPort=8765,[switch]$NoBrowser,[switch]$SkipModuleInstallPrompt,[string]$RunJobId='',[string]$RunOverviewId='',[string]$RunNewListId='')
 Set-StrictMode -Version 2.0
 $ErrorActionPreference='Stop'
 $script:Root=Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -25,6 +25,7 @@ $script:Paths=[ordered]@{
  Logs=Join-Path $script:Root 'logs'
  Contacts=Join-Path $script:Root 'contacts'
  Overviews=Join-Path $script:Root 'overviews'
+ NewLists=Join-Path $script:Root 'new-patient-lists'
 }
 $script:ConfigPath=Join-Path $script:Root 'config.json'
 $script:ManifestPath=Join-Path $script:Paths.State 'manifest.json'
@@ -214,7 +215,10 @@ function Request($Context){
  $remote=$null;try{$remote=$Context.Request.RemoteEndPoint}catch{}
  if($null -eq $remote -or -not ([Net.IPAddress]::IsLoopback($remote.Address))){try{Send $Context 403 'text/plain' 'Forbidden'}catch{};return}
  $method=$Context.Request.HttpMethod;$path=$Context.Request.Url.AbsolutePath.TrimEnd('/');if(!$path){$path='/'}
- try{if($method -eq 'GET' -and $path -eq '/'){Send $Context 200 'text/html; charset=utf-8' (Page);return};if($method -eq 'GET' -and $path -eq '/providers'){Send $Context 200 'text/html; charset=utf-8' (ProviderPage);return};if($method -eq 'GET' -and $path -eq '/provider-index'){Send $Context 200 'text/html; charset=utf-8' (ProviderIndexPage);return};if($method -eq 'GET' -and $path -eq '/api/locations'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-KnownLocations ([string]$Context.Request.QueryString['riskPool'])) -Depth 3);return};if($method -eq 'GET' -and $path -eq '/api/provider-index'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-ProviderIndexModel) -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/profile-job'){$result=New-JobFromProfile ([string]$Context.Request.QueryString['npi']);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/health'){Send $Context 200 'application/json' '{"status":"ok","draft":4}';return};if($method -eq 'GET' -and $path -eq '/api/status'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Status) -Depth 6);return};if($method -eq 'GET' -and $path -eq '/api/provider-sources'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @((Json $script:ConfigPath).sources|Select-Object sourceKey,displayName,providerColumns) -Depth 5);return};if($method -eq 'GET' -and $path -eq '/api/providers'){$sourceKey=[string]$Context.Request.QueryString['sourceKey'];$sw=[Diagnostics.Stopwatch]::StartNew();$result=@(Get-ProviderIndexForPool $sourceKey ([string]$Context.Request.QueryString['riskPool']));Log 'PROVIDER_LIST' 'OK' ($result.Count.ToString()+' names in '+[Math]::Round($sw.Elapsed.TotalSeconds,2)+'s') $sourceKey;Send $Context 200 'application/json' (ConvertTo-Json -InputObject $result -Depth 6);return};if($method -eq 'GET' -and $path -eq '/api/suggest'){$names=@($Context.Request.QueryString.GetValues('name')|Where-Object{$_});$result=@(Get-ProviderSuggestions ([string]$Context.Request.QueryString['sourceKey']) $names ([string]$Context.Request.QueryString['riskPool']));Send $Context 200 'application/json' (ConvertTo-Json -InputObject $result -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/reindex'){$out=@();foreach($s in (Json $script:ConfigPath).sources){if(!(Test-Path -LiteralPath (Join-Path $script:Paths.CanonicalCurrent $s.canonicalFileName))){continue};$r=Update-ProviderIndexAfterImport ([string]$s.sourceKey) -Force;$out+=[ordered]@{sourceKey=$s.sourceKey;displayName=$s.displayName;count=$r.count;seconds=$r.seconds;error=$r.error}};Send $Context 200 'application/json' (ConvertTo-Json -InputObject @($out) -Depth 5);return};if($method -eq 'GET' -and $path -eq '/api/profiles'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-ProviderProfiles) -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/profile'){$result=Save-ProviderProfile (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/html'){Send-JobOutput $Context ([string]$Context.Request.QueryString['jobId']) 'html';return};if($method -eq 'GET' -and $path -eq '/pdf'){Send-JobOutput $Context ([string]$Context.Request.QueryString['jobId']) 'pdf';return};if($method -eq 'GET' -and $path -eq '/flag'){Send $Context 200 'text/html; charset=utf-8' (ConvertTo-AnalysisHtml (Get-FlagReportModel ([string]$Context.Request.QueryString['jobId'])) -Interactive);return};if($method -eq 'GET' -and $path -eq '/communication'){Send $Context 200 'text/html; charset=utf-8' (CommunicationPage);return};if($method -eq 'GET' -and $path -eq '/api/communication'){Send $Context 200 'application/json' ((Get-CommunicationModel)|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/contact-list'){$result=Select-ContactList ([string]$Context.Request.QueryString['path']);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/contact-list-upload'){$result=Receive-ContactListUpload $Context;Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return};if($method -eq 'GET' -and $path -eq '/api/recipients'){Send $Context 200 'application/json' ((Get-CommunicationRecipients ([string]$Context.Request.QueryString['riskPool']))|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/campaign'){$result=New-Campaign (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/campaign'){Send $Context 200 'application/json' ((Get-CampaignModel ([string]$Context.Request.QueryString['id']))|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/campaigns'){Send $Context 200 'application/json' ([ordered]@{queue=(Get-QueueStatus);campaigns=@(Get-CampaignList)}|ConvertTo-Json -Depth 9);return};if($method -eq 'GET' -and $path -eq '/api/queue'){Send $Context 200 'application/json' ((Get-QueueStatus)|ConvertTo-Json -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/job-reset'){$result=Reset-RunningJob ([string]$Context.Request.QueryString['jobId']);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/campaign-cancel'){$result=Stop-Campaign ([string]$Context.Request.QueryString['id']);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/campaign-drafts'){$result=Invoke-CampaignDrafts ([string]$Context.Request.QueryString['id']);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/campaign-resume'){$result=Resume-Campaign ([string]$Context.Request.QueryString['id']);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/overview'){Send $Context 200 'text/html; charset=utf-8' (OverviewPage);return};if($method -eq 'GET' -and $path -eq '/api/overview'){Send $Context 200 'application/json' ((Get-OverviewPageModel)|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/overview'){$result=New-OverviewRun (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/overview-run'){Send $Context 200 'application/json' ((Get-OverviewModel ([string]$Context.Request.QueryString['id']))|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/overview.xlsx'){Send-OverviewFile $Context ([string]$Context.Request.QueryString['id']) 'xlsx';return};if($method -eq 'GET' -and $path -eq '/overview.pdf'){Send-OverviewFile $Context ([string]$Context.Request.QueryString['id']) 'pdf';return};if($method -eq 'GET' -and $path -eq '/api/sync'){Send $Context 200 'application/json' ((Get-SyncModel)|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/sync-feed'){$b=Read-BodyJson $Context;$result=Register-ReportFeed ([string](Get-P $b 'text' ''));Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/sync-feed-remove'){$result=Remove-ReportFeed ([string]$Context.Request.QueryString['sourceKey']);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/sync-now'){$result=Invoke-FeedSync @([string]$Context.Request.QueryString['sourceKey']);Send $Context 200 'application/json' (ConvertTo-Json -InputObject @($result) -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/sync-schedule'){$result=Set-SyncSchedule (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/flags'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-ProviderFlags ([string]$Context.Request.QueryString['npi'])) -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/flag'){$result=Save-FlagFromRequest (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/run-next'){$script:RunNext=$true;Send $Context 202 'application/json' '{"status":"scheduled"}';return};if($method -eq 'GET' -and $path -eq '/api/jobs'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-Jobs) -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/job'){$result=New-PreparedJob (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/stage'){$result=Receive-Upload $Context;Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/confirm'){$result=Publish-StagedFile ([string]$Context.Request.QueryString['token']);$index=Update-ProviderIndexAfterImport ([string]$result.sourceKey) -Force;$result['providerCount']=$index.count;$result['indexSeconds']=$index.seconds;$result['indexError']=$index.error;Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/stop'){$script:Stop=$true;Send $Context 202 'application/json' '{"status":"stopping"}';return};Send $Context 404 'application/json' '{"error":"not found"}'}catch{$msg=Safe $_.Exception.Message;Log 'HTTP_REQUEST' 'FAILED' $msg;try{Send $Context 400 'application/json' (([ordered]@{error=$msg}|ConvertTo-Json -Compress))}catch{}}
+ try{if($method -eq 'GET' -and $path -eq '/'){Send $Context 200 'text/html; charset=utf-8' (Page);return};if($method -eq 'GET' -and $path -eq '/providers'){Send $Context 200 'text/html; charset=utf-8' (ProviderPage);return};if($method -eq 'GET' -and $path -eq '/provider-index'){Send $Context 200 'text/html; charset=utf-8' (ProviderIndexPage);return};if($method -eq 'GET' -and $path -eq '/api/locations'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-KnownLocations ([string]$Context.Request.QueryString['riskPool'])) -Depth 3);return};if($method -eq 'GET' -and $path -eq '/api/provider-index'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-ProviderIndexModel) -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/profile-job'){$result=New-JobFromProfile ([string]$Context.Request.QueryString['npi']);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/health'){Send $Context 200 'application/json' '{"status":"ok","draft":4}';return};if($method -eq 'GET' -and $path -eq '/api/status'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Status) -Depth 6);return};if($method -eq 'GET' -and $path -eq '/api/provider-sources'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @((Json $script:ConfigPath).sources|Select-Object sourceKey,displayName,providerColumns) -Depth 5);return};if($method -eq 'GET' -and $path -eq '/api/providers'){$sourceKey=[string]$Context.Request.QueryString['sourceKey'];$sw=[Diagnostics.Stopwatch]::StartNew();$result=@(Get-ProviderIndexForPool $sourceKey ([string]$Context.Request.QueryString['riskPool']));Log 'PROVIDER_LIST' 'OK' ($result.Count.ToString()+' names in '+[Math]::Round($sw.Elapsed.TotalSeconds,2)+'s') $sourceKey;Send $Context 200 'application/json' (ConvertTo-Json -InputObject $result -Depth 6);return};if($method -eq 'GET' -and $path -eq '/api/suggest'){$names=@($Context.Request.QueryString.GetValues('name')|Where-Object{$_});$result=@(Get-ProviderSuggestions ([string]$Context.Request.QueryString['sourceKey']) $names ([string]$Context.Request.QueryString['riskPool']));Send $Context 200 'application/json' (ConvertTo-Json -InputObject $result -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/reindex'){$out=@();foreach($s in (Json $script:ConfigPath).sources){if(!(Test-Path -LiteralPath (Join-Path $script:Paths.CanonicalCurrent $s.canonicalFileName))){continue};$r=Update-ProviderIndexAfterImport ([string]$s.sourceKey) -Force;$out+=[ordered]@{sourceKey=$s.sourceKey;displayName=$s.displayName;count=$r.count;seconds=$r.seconds;error=$r.error}};Send $Context 200 'application/json' (ConvertTo-Json -InputObject @($out) -Depth 5);return};if($method -eq 'GET' -and $path -eq '/api/profiles'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-ProviderProfiles) -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/profile'){$result=Save-ProviderProfile (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/html'){Send-JobOutput $Context ([string]$Context.Request.QueryString['jobId']) 'html';return};if($method -eq 'GET' -and $path -eq '/pdf'){Send-JobOutput $Context ([string]$Context.Request.QueryString['jobId']) 'pdf';return};if($method -eq 'GET' -and $path -eq '/flag'){Send $Context 200 'text/html; charset=utf-8' (ConvertTo-AnalysisHtml (Get-FlagReportModel ([string]$Context.Request.QueryString['jobId'])) -Interactive);return};if($method -eq 'GET' -and $path -eq '/communication'){Send $Context 200 'text/html; charset=utf-8' (CommunicationPage);return};if($method -eq 'GET' -and $path -eq '/api/communication'){Send $Context 200 'application/json' ((Get-CommunicationModel)|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/contact-list'){$result=Select-ContactList ([string]$Context.Request.QueryString['path']);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/contact-list-upload'){$result=Receive-ContactListUpload $Context;Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return};if($method -eq 'GET' -and $path -eq '/api/recipients'){Send $Context 200 'application/json' ((Get-CommunicationRecipients ([string]$Context.Request.QueryString['riskPool']))|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/campaign'){$result=New-Campaign (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/campaign'){Send $Context 200 'application/json' ((Get-CampaignModel ([string]$Context.Request.QueryString['id']))|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/campaigns'){Send $Context 200 'application/json' ([ordered]@{queue=(Get-QueueStatus);campaigns=@(Get-CampaignList)}|ConvertTo-Json -Depth 9);return};if($method -eq 'GET' -and $path -eq '/api/queue'){Send $Context 200 'application/json' ((Get-QueueStatus)|ConvertTo-Json -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/job-reset'){$result=Reset-RunningJob ([string]$Context.Request.QueryString['jobId']);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/campaign-cancel'){$result=Stop-Campaign ([string]$Context.Request.QueryString['id']);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/campaign-drafts'){$result=Invoke-CampaignDrafts ([string]$Context.Request.QueryString['id']);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/campaign-resume'){$result=Resume-Campaign ([string]$Context.Request.QueryString['id']);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/overview'){Send $Context 200 'text/html; charset=utf-8' (OverviewPage);return};if($method -eq 'GET' -and $path -eq '/api/overview'){Send $Context 200 'application/json' ((Get-OverviewPageModel)|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/overview'){$result=New-OverviewRun (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/overview-run'){Send $Context 200 'application/json' ((Get-OverviewModel ([string]$Context.Request.QueryString['id']))|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/overview.xlsx'){Send-OverviewFile $Context ([string]$Context.Request.QueryString['id']) 'xlsx';return};if($method -eq 'GET' -and $path -eq '/overview.pdf'){Send-OverviewFile $Context ([string]$Context.Request.QueryString['id']) 'pdf';return}
+  if($method -eq 'GET' -and $path -eq '/new-patients'){Send $Context 200 'text/html; charset=utf-8' (NewPatientsPage);return};if($method -eq 'GET' -and $path -eq '/api/new-patients'){Send $Context 200 'application/json' ((Get-NewListPageModel)|ConvertTo-Json -Depth 8);return}
+  if($method -eq 'POST' -and $path -eq '/api/new-patients'){$result=New-NewListRun (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/new-patients-run'){Send $Context 200 'application/json' ((Get-NewListModel ([string]$Context.Request.QueryString['id']))|ConvertTo-Json -Depth 8);return}
+  if($method -eq 'GET' -and $path -eq '/new-patients.file'){Send-NewListFile $Context ([string]$Context.Request.QueryString['id']) ([string]$Context.Request.QueryString['n']);return};if($method -eq 'GET' -and $path -eq '/api/sync'){Send $Context 200 'application/json' ((Get-SyncModel)|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/sync-feed'){$b=Read-BodyJson $Context;$result=Register-ReportFeed ([string](Get-P $b 'text' ''));Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/sync-feed-remove'){$result=Remove-ReportFeed ([string]$Context.Request.QueryString['sourceKey']);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/sync-now'){$result=Invoke-FeedSync @([string]$Context.Request.QueryString['sourceKey']);Send $Context 200 'application/json' (ConvertTo-Json -InputObject @($result) -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/sync-schedule'){$result=Set-SyncSchedule (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/flags'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-ProviderFlags ([string]$Context.Request.QueryString['npi'])) -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/flag'){$result=Save-FlagFromRequest (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/run-next'){$script:RunNext=$true;Send $Context 202 'application/json' '{"status":"scheduled"}';return};if($method -eq 'GET' -and $path -eq '/api/jobs'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-Jobs) -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/job'){$result=New-PreparedJob (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/stage'){$result=Receive-Upload $Context;Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/confirm'){$result=Publish-StagedFile ([string]$Context.Request.QueryString['token']);$index=Update-ProviderIndexAfterImport ([string]$result.sourceKey) -Force;$result['providerCount']=$index.count;$result['indexSeconds']=$index.seconds;$result['indexError']=$index.error;Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/stop'){$script:Stop=$true;Send $Context 202 'application/json' '{"status":"stopping"}';return};Send $Context 404 'application/json' '{"error":"not found"}'}catch{$msg=Safe $_.Exception.Message;Log 'HTTP_REQUEST' 'FAILED' $msg;try{Send $Context 400 'application/json' (([ordered]@{error=$msg}|ConvertTo-Json -Compress))}catch{}}
 }
 
 
@@ -378,7 +382,7 @@ function New-PreparedJob($Body){if($null -eq $Body.aliases){throw 'Confirmed ali
 function Get-Jobs{return @(Get-ChildItem $script:Paths.State -Filter 'job-*.json' -File -ErrorAction SilentlyContinue|ForEach-Object{Json $_.FullName}|Sort-Object queuedUtc -Descending)}
 $script:TabCss='.tabs{display:flex;gap:4px;background:#17365d;padding:0 22px}.tabs a{color:#cfe0f5;text-decoration:none;padding:10px 18px;border-radius:8px 8px 0 0;font-weight:600}.tabs a:hover{background:#274b7a;color:#fff}.tabs a.active{background:#f4f7fb;color:#17365d}'
 function Get-NavHtml([string]$Active){
- $tabs=@(@('sources','/','Sources'),@('wizard','/providers','Provider Wizard'),@('index','/provider-index','Provider Index'),@('communication','/communication','Communication'),@('overview','/overview','Overview'))
+ $tabs=@(@('sources','/','Sources'),@('wizard','/providers','Provider Wizard'),@('index','/provider-index','Provider Index'),@('communication','/communication','Communication'),@('overview','/overview','Overview'),@('newpatients','/new-patients','New Patients'))
  $links=foreach($t in $tabs){'<a href="'+$t[1]+'"'+$(if($t[0] -eq $Active){' class="active"'}else{''})+'>'+$t[2]+'</a>'}
  return '<nav class="tabs">'+($links -join '')+'</nav>'
 }
@@ -1048,7 +1052,7 @@ function Get-LatestDateFromText([string]$Text){$best=$null;foreach($part in @($T
 function Get-Field($Object,[string]$Name,$Default){if($null -eq $Object){return $Default};if($Object -is [Collections.IDictionary]){if($Object.Contains($Name)){return $Object[$Name]};return $Default};return (Get-P $Object $Name $Default)}
 # Fields each source contributes to patient facts, and the provider column its rows are filtered on (one report or a whole overview reads the same columns).
 $script:FactFields=[ordered]@{
- Export=@('Provider Name','Risk Pool','NPI','MemberID','First Name','Last Name','Date of Birth','Payer','Last QEM date with non-PCP','Last ACV Date','Last QEM Visit Date with any PCP in assigned TIN','Completed Attestations','Incompleted Attestations','Open ICDs','New Patient','Total Care Gaps','TCM')
+ Export=@('Provider Name','Risk Pool','NPI','MemberID','First Name','Last Name','Date of Birth','Payer','Last QEM date with non-PCP','Last ACV Date','Last QEM Visit Date with any PCP in assigned TIN','Completed Attestations','Incompleted Attestations','Open ICDs','New Patient','Total Care Gaps','TCM','Phone Number','Active Date')
  PtListQuality=@('Provider Name','Risk Pool','NPI','MemberID','First Name','Last Name','DOB','BCS','COLO','EED','GSD','CBP','OMW','KED','SPC','MAD','MAC','MAH','SUPD','COB','POLY','OMW Critical Due Date')
  DiabetesScorecard=@('Provider','Cdo','Patient','Member ID','Mrn','KED','EED','Eye Exam Gap Status','Eye Exam Date','Next Appt Date','Next Appt Specialty','Next Appt Location','Risk','GSD','Med Adherence DM','MAD Days Supply','Dx Date','Avg Last A1c','% eGFR last 12 mo.','% uACR last 12 mo.')
  SerialScheduling=@('Provider Name','Risk Pool','Member ID','MRN','Future PCP Visits 2026','PCP Visit Dates','A1c Date')
@@ -1073,12 +1077,12 @@ function New-PatientFacts([object[]]$exports,[object[]]$quality,[object[]]$dsc,[
   $high=$highIds.ContainsKey($id);$lastAcv=(ConvertTo-DateValue $e.'Last ACV Date');$acor=([string]$e.Payer).Trim() -eq 'ACOR';$due=$false;if($lastAcv){$due=$(if($acor){$lastAcv -le (Get-Date).AddDays(-366)}else{$lastAcv -lt (Get-Date -Day 1 -Month 1)})};$nextAcv=$null;if($rp){$nextAcv=ConvertTo-DateValue $rp.'Next Acv'};if($nextAcv -and $nextAcv.Date -ge (Get-Date).Date){$due=$false}
   $vis=@((ConvertTo-DateValue $e.'Last QEM date with non-PCP'),(ConvertTo-DateValue $e.'Last ACV Date'),(ConvertTo-DateValue $e.'Last QEM Visit Date with any PCP in assigned TIN'))|Where-Object{$_};$last=$(if($vis){$vis|Sort-Object -Descending|Select-Object -First 1}else{$null});$serialLast=$(if($s){Get-LatestDateFromText ([string]$s.'PCP Visit Dates')}else{$null})
   $mrn='';foreach($cand in @($(if($d){$d.Mrn}else{''}),$(if($s){$s.MRN}else{''}),$(if($rp){$rp.Mrn}else{''}))){$c=([string]$cand).Trim();if($c -and $c -ne '0'){$mrn=$c;break}}
-  $patients+=[pscustomobject][ordered]@{MemberID=$id;MRN=$mrn;First=[string]$e.'First Name';Last=[string]$e.'Last Name';DOB=$(ConvertTo-DateText $e.'Date of Birth');ACOR=$acor;ACVDue=$due;Attest=((ConvertTo-NumberValue $e.'Completed Attestations')+(ConvertTo-NumberValue $e.'Incompleted Attestations')) -gt 0;OpenICD=[string]$e.'Open ICDs';NewPatient=(Test-TrueValue $e.'New Patient');OpenHedis=($open -join ', ');ClosedHedis=($closed -join ', ');HighRisk=$high;LastVisit=$last;SerialLast=$serialLast;A1cDate=$(if($s){ConvertTo-DateValue $s.'A1c Date'}else{$null});FutureVisits=$(if($s){[string]$s.'Future PCP Visits 2026'}else{''});NextAppt=$(if($d){ConvertTo-DateValue $d.'Next Appt Date'}else{$null});NextApptSpecialty=$(if($d){([string]$d.'Next Appt Specialty').Trim()}else{''});A1c=$(if($d){ConvertTo-NumberOrNull $d.'Avg Last A1c'}else{$null});A1cText=$(if($d){([string]$d.'Avg Last A1c').Trim()}else{''});Diabetic=($null -ne $d);EyeOpen=[bool]($d -and (([string]$d.'Eye Exam Gap Status').Trim() -eq 'Open'));EyeDate=$(if($d){ConvertTo-DateValue $d.'Eye Exam Date'}else{$null});EgfrNeeded=[bool]($d -and ((ConvertTo-NumberValue $d.'% eGFR last 12 mo.') -lt 100));UacrNeeded=[bool]($d -and ((ConvertTo-NumberValue $d.'% uACR last 12 mo.') -lt 100));MedAdhDM=$(if($d){([string]$d.'Med Adherence DM').Trim()}else{''});OmwDue=$(if($q){ConvertTo-DateText $q.'OMW Critical Due Date'}else{''});TotalGaps=(ConvertTo-NumberValue $e.'Total Care Gaps');IncompleteAttest=(ConvertTo-NumberValue $e.'Incompleted Attestations');OpenIcdCount=@(([string]$e.'Open ICDs') -split ','|Where-Object{$_.Trim() -and $_.Trim() -ne '0'}).Count;Tcm=[bool]((Test-TrueValue $e.TCM) -or ((ConvertTo-NumberValue $e.TCM) -gt 0));RiskContract=$true;DSC=$d}
+  $patients+=[pscustomobject][ordered]@{MemberID=$id;MRN=$mrn;First=[string]$e.'First Name';Last=[string]$e.'Last Name';DOB=$(ConvertTo-DateText $e.'Date of Birth');ACOR=$acor;ACVDue=$due;Attest=((ConvertTo-NumberValue $e.'Completed Attestations')+(ConvertTo-NumberValue $e.'Incompleted Attestations')) -gt 0;OpenICD=[string]$e.'Open ICDs';NewPatient=(Test-TrueValue $e.'New Patient');OpenHedis=($open -join ', ');ClosedHedis=($closed -join ', ');HighRisk=$high;LastVisit=$last;SerialLast=$serialLast;A1cDate=$(if($s){ConvertTo-DateValue $s.'A1c Date'}else{$null});FutureVisits=$(if($s){[string]$s.'Future PCP Visits 2026'}else{''});NextAppt=$(if($d){ConvertTo-DateValue $d.'Next Appt Date'}else{$null});NextApptSpecialty=$(if($d){([string]$d.'Next Appt Specialty').Trim()}else{''});A1c=$(if($d){ConvertTo-NumberOrNull $d.'Avg Last A1c'}else{$null});A1cText=$(if($d){([string]$d.'Avg Last A1c').Trim()}else{''});Diabetic=($null -ne $d);EyeOpen=[bool]($d -and (([string]$d.'Eye Exam Gap Status').Trim() -eq 'Open'));EyeDate=$(if($d){ConvertTo-DateValue $d.'Eye Exam Date'}else{$null});EgfrNeeded=[bool]($d -and ((ConvertTo-NumberValue $d.'% eGFR last 12 mo.') -lt 100));UacrNeeded=[bool]($d -and ((ConvertTo-NumberValue $d.'% uACR last 12 mo.') -lt 100));MedAdhDM=$(if($d){([string]$d.'Med Adherence DM').Trim()}else{''});OmwDue=$(if($q){ConvertTo-DateText $q.'OMW Critical Due Date'}else{''});TotalGaps=(ConvertTo-NumberValue $e.'Total Care Gaps');IncompleteAttest=(ConvertTo-NumberValue $e.'Incompleted Attestations');OpenIcdCount=@(([string]$e.'Open ICDs') -split ','|Where-Object{$_.Trim() -and $_.Trim() -ne '0'}).Count;Tcm=[bool]((Test-TrueValue $e.TCM) -or ((ConvertTo-NumberValue $e.TCM) -gt 0));RiskContract=$true;DSC=$d;Payer=([string]$e.Payer).Trim();Phone=([string](Get-Field $e 'Phone Number' '')).Trim();ActiveDate=(ConvertTo-DateText (Get-Field $e 'Active Date' ''));PcpVisit=(ConvertTo-DateValue $e.'Last QEM Visit Date with any PCP in assigned TIN');NextAcv=$nextAcv}
  }
- foreach($hid in $unmatchedHr.Keys){$x=$unmatchedHr[$hid];$patients+=[pscustomobject][ordered]@{MemberID=$hid;MRN='';First=[string]$x.'Patient First Name';Last=[string]$x.'Patient Last Name';DOB=$(ConvertTo-DateText $x.DOB);ACOR=$null;ACVDue=$false;Attest=$false;OpenICD='';NewPatient=$false;OpenHedis='';ClosedHedis='';HighRisk=$true;LastVisit=$null;SerialLast=$null;A1cDate=$null;FutureVisits='';NextAppt=$null;NextApptSpecialty='';A1c=$null;A1cText='';Diabetic=$false;EyeOpen=$false;EyeDate=$null;EgfrNeeded=$false;UacrNeeded=$false;MedAdhDM='';OmwDue='';TotalGaps=0;IncompleteAttest=0;OpenIcdCount=0;Tcm=$false;RiskContract=$true;DSC=$null}}
+ foreach($hid in $unmatchedHr.Keys){$x=$unmatchedHr[$hid];$patients+=[pscustomobject][ordered]@{MemberID=$hid;MRN='';First=[string]$x.'Patient First Name';Last=[string]$x.'Patient Last Name';DOB=$(ConvertTo-DateText $x.DOB);ACOR=$null;ACVDue=$false;Attest=$false;OpenICD='';NewPatient=$false;OpenHedis='';ClosedHedis='';HighRisk=$true;LastVisit=$null;SerialLast=$null;A1cDate=$null;FutureVisits='';NextAppt=$null;NextApptSpecialty='';A1c=$null;A1cText='';Diabetic=$false;EyeOpen=$false;EyeDate=$null;EgfrNeeded=$false;UacrNeeded=$false;MedAdhDM='';OmwDue='';TotalGaps=0;IncompleteAttest=0;OpenIcdCount=0;Tcm=$false;RiskContract=$true;DSC=$null;Payer='';Phone='';ActiveDate='';PcpVisit=$null;NextAcv=$null}}
  return [ordered]@{asOf=(Get-Date).ToString('o');riskPool=$(if($exports.Count){[string]$exports[0].'Risk Pool'}else{''});patients=@($patients);scorecardNonRisk=@($dsc|Where-Object{([string]$_.Risk) -match 'Non-Risk Population'})}
 }
-$script:PatientDateFields=@('LastVisit','SerialLast','A1cDate','NextAppt','EyeDate')
+$script:PatientDateFields=@('LastVisit','SerialLast','A1cDate','NextAppt','EyeDate','PcpVisit','NextAcv')
 function ConvertFrom-PatientFacts($Stored){
  # Rebuilds patient facts from analysis-<jobId>.json (dates come back as strings or DateTime depending on the PowerShell version).
  if($null -eq $Stored){throw 'This report was generated before flag support was added; generate a new report for this provider first.'}
@@ -1704,16 +1708,16 @@ function Get-OverviewAlias($Aliases,[string]$Key){
  return (Get-Alias $Aliases $Key).Trim()
 }
 function Get-GroupedRows($Groups,[string]$Key,[string]$Alias){if(!$Alias -or !$Groups.ContainsKey($Key)){return @()};$g=$Groups[$Key];if($g.ContainsKey($Alias)){return @($g[$Alias].ToArray())};return @()}
-function Get-FactsKpi($Facts,[object[]]$Flags){
- # Same counts as the report's top section: flagged patients are resolved exactly as New-AnalysisModel does and left out.
+function Get-ActivePatients($Facts,[object[]]$Flags){
+ # Flagged patients are resolved exactly as New-AnalysisModel does and left out; returns the rest and how many were flagged.
  $patients=@(Get-Field $Facts 'patients' @()|Where-Object{$null -ne $_});$applied=@{}
  if(@($Flags|Where-Object{$null -ne $_}).Count -gt 0){
   $prev=$script:AsOf;$script:AsOf=$(ConvertTo-DateValue (Get-Field $Facts 'asOf' $null))
   try{foreach($p in $patients){Set-P $p 'Items' (Get-PatientItems $p);Set-P $p 'Needs' @(Get-PatientNeeds $p);Set-P $p 'Urgency' (Get-PatientUrgency $p)};$nonRisk=@(Get-Field $Facts 'scorecardNonRisk' @()|Where-Object{$null -ne $_});$applied=(Resolve-ProviderFlags $Flags $patients $nonRisk).applied}finally{$script:AsOf=$prev}
  }
- $active=@($patients|Where-Object{!$applied.ContainsKey([string]$_.MemberID)})
- return (New-KpiSummary $active $applied.Count)
+ return [ordered]@{active=@($patients|Where-Object{!$applied.ContainsKey([string]$_.MemberID)});flagged=$applied.Count}
 }
+function Get-FactsKpi($Facts,[object[]]$Flags){$a=Get-ActivePatients $Facts $Flags;return (New-KpiSummary @($a.active) $a.flagged)}   # same counts as the report's top section
 function New-KpiTotal([object[]]$Rows){
  $t=[ordered]@{};foreach($c in $script:KpiColumns){$t[$c[0]]=0};$n=0
  foreach($r in @($Rows)){if($null -eq $r){continue};$k=Get-Field $r 'kpi' $null;if($null -eq $k){continue};$n++;foreach($c in $script:KpiColumns){$t[$c[0]]+=[int](Get-Field $k $c[0] 0)}}
@@ -1721,51 +1725,65 @@ function New-KpiTotal([object[]]$Rows){
 }
 $script:GroupSort=@(@{Expression={([string]$_).StartsWith('(')}},@{Expression={[string]$_}})   # named groups alphabetically, then '(No location)' / '(No risk pool)'
 $script:OverviewLastSave=[DateTime]::MinValue
-function Set-OverviewProgress($Overview,[string]$Path,[int]$Percent,[string]$Stage){
- # Progress is written at most once a second (a large pool counts many providers per second); the start and the final stages always are.
- $Overview.state='Running';$Overview.percent=$Percent;$Overview.stage=$Stage
+function Set-RunProgress($Run,[string]$Path,[int]$Percent,[string]$Stage){
+ # Progress of an overview or list worker is written at most once a second (a large pool counts many providers per second); the start and the final stages always are.
+ $Run.state='Running';$Run.percent=$Percent;$Run.stage=$Stage
  if($Percent -gt 5 -and $Percent -lt 94 -and ([DateTime]::UtcNow-$script:OverviewLastSave).TotalMilliseconds -lt 1000){return}
- Save-JsonAtomic $Path $Overview;$script:OverviewLastSave=[DateTime]::UtcNow
+ Save-JsonAtomic $Path $Run;$script:OverviewLastSave=[DateTime]::UtcNow
+}
+function Get-ChosenProfiles([object[]]$Npis){
+ $byNpi=@{};foreach($p in @(Get-ProviderProfiles)){if($null -ne $p){$byNpi[[string](Get-P $p 'npi' '')]=$p}}
+ $chosen=@();foreach($n in @($Npis)){$n=[string]$n;if($byNpi.ContainsKey($n)){$chosen+=$byNpi[$n]}}
+ if($chosen.Count -eq 0){throw 'None of the chosen providers has a saved profile any more.'}
+ return @($chosen)
+}
+function Read-GroupSources([object[]]$Chosen,$Run,[string]$Path,[int]$From,[int]$Span){
+ # Reads each source once for every chosen provider and groups its rows by the source's provider column (progress runs From..From+Span).
+ $groups=@{};$read=@();$step=0;$status=@{};foreach($s in @(Status)){$status[[string]$s.sourceKey]=$s}
+ foreach($key in $script:OverviewSources){
+  $step++;$set=@{};foreach($p in $Chosen){$al=Get-OverviewAlias (Get-P $p 'aliases' $null) $key;if($al){$set[$al]=$true}}
+  if($set.Count -eq 0){continue}
+  $fieldKey=$(if($key -like 'HR-*'){'HR'}else{$key});$filter=[string]$script:FactFilters[$fieldKey];$name=$(if($status.ContainsKey($key)){[string]$status[$key].displayName}else{$key})
+  Set-RunProgress $Run $Path ([int]($From+$Span*($step-1)/$script:OverviewSources.Count)) ('Reading '+$name+' for '+$Chosen.Count+' provider'+$(if($Chosen.Count -eq 1){''}else{'s'}))
+  $rows=@(Get-SourceRows $key $script:FactFields[$fieldKey] $filter '' -FilterSet $set)
+  $g=@{};foreach($r in $rows){$v=([string]$r.$filter).Trim();if(!$g.ContainsKey($v)){$g[$v]=New-Object Collections.Generic.List[object]};$g[$v].Add($r)}
+  $groups[$key]=$g
+  $st=$(if($status.ContainsKey($key)){$status[$key]}else{$null});$read+=[ordered]@{sourceKey=$key;displayName=$name;importedUtc=$(if($st){ConvertTo-IsoText (Get-Field $st 'importedUtc' '')}else{''});lastWriteTime=$(if($st){ConvertTo-IsoText (Get-Field $st 'lastWriteTime' '')}else{''})}
+ }
+ return [ordered]@{groups=$groups;sources=@($read)}
+}
+function Get-ProviderFactsFromGroups($Groups,$P){
+ # One provider's patient facts from rows read by Read-GroupSources, joined exactly as a single report joins them.
+ $a=Get-P $P 'aliases' $null;$exportAlias=Get-OverviewAlias $a 'Export';$hrKey=Get-HrSourceKey $a
+ $exports=@(Get-GroupedRows $Groups 'Export' $exportAlias)
+ $facts=New-PatientFacts $exports @(Get-GroupedRows $Groups 'PtListQuality' (Get-OverviewAlias $a 'PtListQuality')) @(Get-GroupedRows $Groups 'DiabetesScorecard' (Get-OverviewAlias $a 'DiabetesScorecard')) @(Get-GroupedRows $Groups 'SerialScheduling' (Get-OverviewAlias $a 'SerialScheduling')) @(Get-GroupedRows $Groups 'RiskPopulationOutreach' (Get-OverviewAlias $a 'RiskPopulationOutreach')) @($(if($hrKey){Get-GroupedRows $Groups $hrKey (Get-OverviewAlias $a $hrKey)}))
+ $note=$(if($exports.Count -eq 0){'No Export rows for "'+$exportAlias+'"; the name may have changed in the latest export. Check the profile in the Provider Wizard.'}else{''})
+ return [ordered]@{facts=$facts;note=$note}
 }
 function Invoke-OverviewRun([string]$Id){
  # Runs in its own worker process: reads each source once for every selected provider, then counts per provider exactly as a report would.
  $path=Get-OverviewPath $Id;$ov=Json $path;if(!$ov){throw 'Overview was not found.'}
  $sw=[Diagnostics.Stopwatch]::StartNew()
  try{
-  Set-P $ov 'workerPid' $PID;Set-P $ov 'startedUtc' ([DateTime]::UtcNow.ToString('o'));Set-OverviewProgress $ov $path 3 'Reading provider profiles'
-  $byNpi=@{};foreach($p in @(Get-ProviderProfiles)){if($null -ne $p){$byNpi[[string](Get-P $p 'npi' '')]=$p}}
-  $chosen=@();foreach($n in @($ov.npis)){$n=[string]$n;if($byNpi.ContainsKey($n)){$chosen+=$byNpi[$n]}}
-  if($chosen.Count -eq 0){throw 'None of the chosen providers has a saved profile any more.'}
-  $groups=@{};$read=@();$step=0;$status=@{};foreach($s in @(Status)){$status[[string]$s.sourceKey]=$s}
-  foreach($key in $script:OverviewSources){
-   $step++;$set=@{};foreach($p in $chosen){$al=Get-OverviewAlias (Get-P $p 'aliases' $null) $key;if($al){$set[$al]=$true}}
-   if($set.Count -eq 0){continue}
-   $fieldKey=$(if($key -like 'HR-*'){'HR'}else{$key});$filter=[string]$script:FactFilters[$fieldKey];$name=$(if($status.ContainsKey($key)){[string]$status[$key].displayName}else{$key})
-   Set-OverviewProgress $ov $path ([int](5+60*($step-1)/$script:OverviewSources.Count)) ('Reading '+$name+' for '+$chosen.Count+' provider'+$(if($chosen.Count -eq 1){''}else{'s'}))
-   $rows=@(Get-SourceRows $key $script:FactFields[$fieldKey] $filter '' -FilterSet $set)
-   $g=@{};foreach($r in $rows){$v=([string]$r.$filter).Trim();if(!$g.ContainsKey($v)){$g[$v]=New-Object Collections.Generic.List[object]};$g[$v].Add($r)}
-   $groups[$key]=$g
-   $st=$(if($status.ContainsKey($key)){$status[$key]}else{$null});$read+=[ordered]@{sourceKey=$key;displayName=$name;importedUtc=$(if($st){ConvertTo-IsoText (Get-Field $st 'importedUtc' '')}else{''});lastWriteTime=$(if($st){ConvertTo-IsoText (Get-Field $st 'lastWriteTime' '')}else{''})}
-  }
+  Set-P $ov 'workerPid' $PID;Set-P $ov 'startedUtc' ([DateTime]::UtcNow.ToString('o'));Set-RunProgress $ov $path 3 'Reading provider profiles'
+  $chosen=@(Get-ChosenProfiles @($ov.npis))
+  $src=Read-GroupSources $chosen $ov $path 5 60;$groups=$src.groups;$read=@($src.sources)
   $rowsOut=@();$i=0
   foreach($p in $chosen){
    $i++;$a=Get-P $p 'aliases' $null;$npi=[string](Get-P $p 'npi' '');$display=[string](Get-P $p 'displayName' $npi)
    $loc=([string](Get-P $p 'location' '')).Trim();$pool=([string](Get-P $p 'riskPool' '')).Trim()
-   Set-OverviewProgress $ov $path ([int](65+28*($i-1)/$chosen.Count)) ('Counting patients for '+$display+' ('+$i+' of '+$chosen.Count+')')
+   Set-RunProgress $ov $path ([int](65+28*($i-1)/$chosen.Count)) ('Counting patients for '+$display+' ('+$i+' of '+$chosen.Count+')')
    $row=[ordered]@{npi=$npi;displayName=$display;location=$(if($loc){$loc}else{'(No location)'});riskPool=$(if($pool){$pool}else{'(No risk pool)'});kpi=$null;note='';error=''}
    try{
-    $exportAlias=Get-OverviewAlias $a 'Export';$hrKey=Get-HrSourceKey $a
-    $exports=@(Get-GroupedRows $groups 'Export' $exportAlias)
-    $facts=New-PatientFacts $exports @(Get-GroupedRows $groups 'PtListQuality' (Get-OverviewAlias $a 'PtListQuality')) @(Get-GroupedRows $groups 'DiabetesScorecard' (Get-OverviewAlias $a 'DiabetesScorecard')) @(Get-GroupedRows $groups 'SerialScheduling' (Get-OverviewAlias $a 'SerialScheduling')) @(Get-GroupedRows $groups 'RiskPopulationOutreach' (Get-OverviewAlias $a 'RiskPopulationOutreach')) @($(if($hrKey){Get-GroupedRows $groups $hrKey (Get-OverviewAlias $a $hrKey)}))
-    $row.kpi=Get-FactsKpi $facts @(Get-ProviderFlags $npi)
-    if($exports.Count -eq 0){$row.note=('No Export rows for "'+$exportAlias+'"; the name may have changed in the latest export. Check the profile in the Provider Wizard.')}
+    $pf=Get-ProviderFactsFromGroups $groups $p
+    $row.kpi=Get-FactsKpi $pf.facts @(Get-ProviderFlags $npi);$row.note=$pf.note
    }catch{$row.error=$_.Exception.Message;Log 'OVERVIEW_PROVIDER' 'FAILED' ($npi+' '+$_.Exception.Message)}
    $rowsOut+=$row
   }
   $locations=@();foreach($ln in @($rowsOut|ForEach-Object{$_.location}|Select-Object -Unique|Sort-Object -Property $script:GroupSort)){$members=@($rowsOut|Where-Object{$_.location -eq $ln}|Sort-Object -Property @{Expression={$_.displayName}});$locations+=[ordered]@{location=$ln;rows=$members;total=(New-KpiTotal $members)}}
   $pools=@();foreach($pn in @($rowsOut|ForEach-Object{$_.riskPool}|Select-Object -Unique|Sort-Object -Property $script:GroupSort)){$t=New-KpiTotal @($rowsOut|Where-Object{$_.riskPool -eq $pn});$pools+=[ordered]@{riskPool=$pn;providers=$t.providers;kpi=$t.kpi}}
   Set-P $ov 'locations' $locations;Set-P $ov 'pools' $pools;Set-P $ov 'total' (New-KpiTotal $rowsOut);Set-P $ov 'sources' $read;Set-P $ov 'asOf' ([DateTime]::Now.ToString('o'));Set-P $ov 'failedProviders' @($rowsOut|Where-Object{$_.error}).Count
-  Set-OverviewProgress $ov $path 94 'Rendering PDF'
+  Set-RunProgress $ov $path 94 'Rendering PDF'
   $ov=Json $path;$stageHtml=Join-Path $script:Paths.Staging ('overview-'+$Id+'.html')
   try{
    [IO.File]::WriteAllText($stageHtml,(ConvertTo-OverviewDocument $ov),(New-Object Text.UTF8Encoding($false)))
@@ -1777,19 +1795,25 @@ function Invoke-OverviewRun([string]$Id){
   Log 'OVERVIEW_COMPLETED' 'OK' ($chosen.Count.ToString()+' providers in '+[Math]::Round($sw.Elapsed.TotalSeconds,1)+'s')
  }catch{$msg=$_.Exception.Message;$cur=Json $path;if(!$cur){$cur=$ov};$cur.state='Failed';$cur.stage='Overview failed';Set-P $cur 'errorSummary' $msg;Set-P $cur 'completedUtc' ([DateTime]::UtcNow.ToString('o'));Save-JsonAtomic $path $cur;Log 'OVERVIEW_FAILED' 'FAILED' $msg}
 }
-function Start-OverviewWorker([string]$Id){
+function Start-RunWorker([string]$Switch,[string]$Id,[string]$LogName){
+ # A background copy of this script for one overview or list run; its output goes to logs\<LogName>.out.log / .err.log.
  $exe=(Get-Process -Id $PID).Path
- $opt=@{FilePath=$exe;ArgumentList=@('-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+$PSCommandPath+'"'),'-RunOverviewId',$Id,'-NoBrowser');RedirectStandardOutput=(Join-Path $script:Paths.Logs ('overview-'+$Id+'.out.log'));RedirectStandardError=(Join-Path $script:Paths.Logs ('overview-'+$Id+'.err.log'));PassThru=$true}
+ $opt=@{FilePath=$exe;ArgumentList=@('-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+$PSCommandPath+'"'),('-'+$Switch),$Id,'-NoBrowser');RedirectStandardOutput=(Join-Path $script:Paths.Logs ($LogName+'.out.log'));RedirectStandardError=(Join-Path $script:Paths.Logs ($LogName+'.err.log'));PassThru=$true}
  if([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT){$opt['WindowStyle']='Hidden'}
  return (Start-Process @opt)
 }
+function Start-OverviewWorker([string]$Id){return (Start-RunWorker 'RunOverviewId' $Id ('overview-'+$Id))}
 function Get-Overviews{return @(Get-ChildItem $script:Paths.State -Filter 'overview-*.json' -File -ErrorAction SilentlyContinue|ForEach-Object{Json $_.FullName}|Where-Object{$null -ne $_}|Sort-Object -Property @{Expression={ConvertTo-IsoText (Get-P $_ 'requestedUtc' '')}} -Descending)}
+function Get-RunStallReason($Run,[string]$Id,[string]$Noun,[string]$Again,[string]$LogName){
+ # A worker that died (server or computer restarted) would otherwise leave its run "Running" forever; returns why it stopped, or ''.
+ $state=[string](Get-P $Run 'state' '');if($state -ne 'Starting' -and $state -ne 'Running'){return ''}
+ $workerPid=[int](Get-P $Run 'workerPid' 0)
+ if($workerPid -gt 0){if(!(Test-WorkerAlive ([pscustomobject]@{workerPid=$workerPid;jobId=$Id}))){return ('The '+$Noun+' worker stopped before finishing (the server or computer may have restarted). '+$Again)};return ''}
+ $req=ConvertTo-DateValue (Get-P $Run 'requestedUtc' $null);if($req -and ([DateTime]::UtcNow-$req.ToUniversalTime()).TotalSeconds -gt 120){return ('The '+$Noun+' worker did not start; see logs\'+$LogName+'.err.log.')}
+ return ''
+}
 function Update-OverviewLiveness($Ov){
- # A worker that died (server or computer restarted) would otherwise leave the overview "Running" forever.
- $state=[string](Get-P $Ov 'state' '');if($state -ne 'Starting' -and $state -ne 'Running'){return $false}
- $workerPid=[int](Get-P $Ov 'workerPid' 0);$reason=''
- if($workerPid -gt 0){if(!(Test-WorkerAlive ([pscustomobject]@{workerPid=$workerPid;jobId=[string]$Ov.overviewId}))){$reason='The overview worker stopped before finishing (the server or computer may have restarted). Build the overview again.'}}
- else{$req=ConvertTo-DateValue (Get-P $Ov 'requestedUtc' $null);if($req -and ([DateTime]::UtcNow-$req.ToUniversalTime()).TotalSeconds -gt 120){$reason=('The overview worker did not start; see logs\overview-'+[string]$Ov.overviewId+'.err.log.')}}
+ $id=[string]$Ov.overviewId;$reason=Get-RunStallReason $Ov $id 'overview' 'Build the overview again.' ('overview-'+$id)
  if(!$reason){return $false}
  $Ov.state='Failed';$Ov.stage='Overview failed';Set-P $Ov 'errorSummary' $reason;Save-JsonAtomic (Get-OverviewPath ([string]$Ov.overviewId)) $Ov;Log 'OVERVIEW_INTERRUPTED' 'WARN' ([string]$Ov.overviewId);return $true
 }
@@ -1822,14 +1846,19 @@ function Get-OverviewSelectionText($Ov){
  $locs=@(foreach($l in @(Get-P $Ov 'locations' @())){if($l){[ordered]@{name=[string](Get-Field $l 'location' '');selected=@(Get-Field $l 'rows' @()).Count;total=0}}})
  return [ordered]@{riskPools=(& $fmt $pools);locations=(& $fmt $locs)}
 }
-function New-OverviewRun($Body){
+function Get-RequestedProviders($Body){
+ # The picked NPIs (each must have a saved profile) and, per risk pool and location, how many of its providers were picked.
  $npis=@(@(Get-P $Body 'npis' @())|ForEach-Object{([string]$_).Trim()}|Where-Object{$_ -match '^\d{10}$'}|Select-Object -Unique)
  if($npis.Count -eq 0){throw 'Choose at least one provider.'}
- $known=@{};foreach($p in @(Get-OverviewProviders)){$known[$p.npi]=$true}
+ $all=@(Get-OverviewProviders);$known=@{};foreach($p in $all){$known[$p.npi]=$true}
  $missing=@($npis|Where-Object{!$known.ContainsKey($_)});if($missing.Count -gt 0){throw ('No saved profile for NPI '+($missing -join ', ')+'; reload the page.')}
+ $chosen=@{};foreach($n in $npis){$chosen[$n]=$true}
+ return [ordered]@{npis=@($npis);selection=[ordered]@{riskPools=@(New-SelectionSummary $all $chosen 'riskPool');locations=@(New-SelectionSummary $all $chosen 'location')}}
+}
+function New-OverviewRun($Body){
+ $req=Get-RequestedProviders $Body;$npis=@($req.npis);$selection=$req.selection
  foreach($o in @(Get-Overviews)){if([string](Get-P $o 'state' '') -in @('Starting','Running') -and !(Update-OverviewLiveness $o)){throw 'An overview is already being built; wait for it to finish.'}}
  $id=[Guid]::NewGuid().ToString('N');$path=Get-OverviewPath $id
- $all=@(Get-OverviewProviders);$chosen=@{};foreach($n in $npis){$chosen[$n]=$true};$selection=[ordered]@{riskPools=@(New-SelectionSummary $all $chosen 'riskPool');locations=@(New-SelectionSummary $all $chosen 'location')}
  $ov=[ordered]@{overviewVersion=1;overviewId=$id;state='Starting';percent=1;stage='Launching overview worker';requestedUtc=[DateTime]::UtcNow.ToString('o');npis=$npis;selection=$selection;workerPid=0}
  Save-JsonAtomic $path $ov;Log 'OVERVIEW_REQUESTED' 'OK' ($npis.Count.ToString()+' providers')
  if($script:OverviewInline){Invoke-OverviewRun $id}
@@ -1898,6 +1927,32 @@ function Send-OverviewFile($Context,[string]$Id,[string]$Type){
  if(!$full -or !$full.StartsWith($root,[StringComparison]::OrdinalIgnoreCase) -or !(Test-Path -LiteralPath $full)){throw 'The PDF for this overview is not available.'}
  Send-Bytes $Context 'application/pdf' ([IO.File]::ReadAllBytes($full)) ('inline; filename="'+[IO.Path]::GetFileName($full)+'"')
 }
+# Shared by the Overview and New Patients pages: provider picker (risk pool / location chips, providers by location), progress bar and history table.
+$script:RunPageCss='.chips{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 10px}.chip{border:1px solid #c8d2e0;border-radius:16px;padding:4px 10px;background:#f8fafc;cursor:pointer;user-select:none}.chip input{margin:0 5px 0 0;vertical-align:-1px}.grp{font-weight:600;color:#17365d;margin-top:10px}.provs{columns:3 260px;column-gap:18px;margin-top:6px}.locgrp{break-inside:avoid;margin:0 0 10px}.lochead{font-weight:600;color:#17365d;border-bottom:1px solid #dce4ef;margin-bottom:3px}.prov{display:block;padding:2px 0;cursor:pointer}.prov input{margin:0 6px 0 0}.progress{height:10px;background:#e4e9f0;border-radius:6px;overflow:hidden;margin:6px 0;max-width:600px}.progress span{display:block;height:100%;background:#1769aa;transition:width .3s}.scroll{overflow-x:auto}table.hist{border-collapse:collapse;width:100%}table.hist th,table.hist td{padding:6px 8px;border-bottom:1px solid #dce4ef;text-align:left;vertical-align:top}table.hist th{background:#eaf1f8}table.hist .n{text-align:right}table.hist tr.showing td{background:#f4f9ff}'
+$script:PickerJs=@'
+const el=id=>document.getElementById(id);
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+async function api(u,o){const r=await fetch(u,o);const text=await r.text();let j=null;try{j=text?JSON.parse(text):null}catch(e){throw Error('Server returned invalid JSON: '+text.slice(0,200))}if(!r.ok)throw Error((j&&j.error)||('Request failed ('+r.status+')'));return j}
+function when(iso){if(!iso)return '';const d=new Date(iso);return isNaN(d)?iso:d.toLocaleString()}
+let providers=[],sel=new Set();
+function sortKey(a,b){const x=(a.startsWith('(')?'~':'')+a.toLowerCase(),y=(b.startsWith('(')?'~':'')+b.toLowerCase();return x<y?-1:x>y?1:0}
+function groups(field){const g={};providers.forEach(p=>{(g[p[field]]=g[p[field]]||[]).push(p)});return Object.keys(g).sort(sortKey).map(k=>({name:k,list:g[k].sort((a,b)=>sortKey(a.displayName,b.displayName))}))}
+function chips(field){return '<div class="chips">'+groups(field).map(g=>'<label class="chip"><input type="checkbox" data-field="'+field+'" data-name="'+esc(g.name)+'">'+esc(g.name)+' <span class="muted">('+g.list.length+')</span></label>').join('')+'</div>'}
+function renderPicker(){
+ if(!providers.length){el('picker').innerHTML='<span class="muted">No saved provider profiles yet. Map providers in the Provider Wizard and save their profiles first.</span>';syncChecks();return}
+ el('picker').innerHTML='<div class="grp">Risk pools</div>'+chips('riskPool')+'<div class="grp">Locations</div>'+chips('location')+'<div class="grp">Providers</div><div class="provs">'+groups('location').map(g=>'<div class="locgrp"><div class="lochead">'+esc(g.name)+'</div>'+g.list.map(p=>'<label class="prov"><input type="checkbox" data-npi="'+esc(p.npi)+'">'+esc(p.displayName)+' <span class="muted">'+esc(p.riskPool)+'</span></label>').join('')+'</div>').join('')+'</div>';
+ syncChecks();
+}
+function members(field,name){return providers.filter(p=>p[field]===name).map(p=>p.npi)}
+function pickerSync(){
+ el('picker').querySelectorAll('input[data-npi]').forEach(cb=>{cb.checked=sel.has(cb.dataset.npi)});
+ el('picker').querySelectorAll('input[data-field]').forEach(cb=>{const m=members(cb.dataset.field,cb.dataset.name);const n=m.filter(x=>sel.has(x)).length;cb.checked=n>0&&n===m.length;cb.indeterminate=n>0&&n<m.length});
+ el('count').textContent=sel.size?sel.size+' of '+providers.length+' provider'+(providers.length===1?'':'s')+' selected':'No providers selected';
+}
+el('picker').addEventListener('change',e=>{const cb=e.target;if(cb.dataset.npi){if(cb.checked)sel.add(cb.dataset.npi);else sel.delete(cb.dataset.npi)}else if(cb.dataset.field){members(cb.dataset.field,cb.dataset.name).forEach(n=>{if(cb.checked)sel.add(n);else sel.delete(n)})}syncChecks()});
+el('all').onclick=()=>{providers.forEach(p=>sel.add(p.npi));syncChecks()};
+el('none').onclick=()=>{sel.clear();syncChecks()};
+'@
 function OverviewPage{
  $html=@'
 <!doctype html><html><head><meta charset="utf-8"><title>Overview</title>
@@ -1907,10 +1962,7 @@ __TABCSS__
 .card{background:white;border:1px solid #dce4ef;border-radius:8px;padding:18px;margin:14px 0}.card h2{margin:0 0 8px;font-size:17px;color:#17365d}.muted{color:#667085}.error{color:#a61b1b}.warn{color:#9a5b00}
 .row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:8px 0}
 button,a.btn{padding:7px 12px;cursor:pointer;background:#1769aa;color:#fff;border:0;border-radius:5px;font:inherit;text-decoration:none;display:inline-block}button:disabled{opacity:.5;cursor:default}button.alt{background:#e4e9f0;color:#172033}button.go{background:#1d7a3a;font-weight:600;padding:10px 16px}
-.chips{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 10px}.chip{border:1px solid #c8d2e0;border-radius:16px;padding:4px 10px;background:#f8fafc;cursor:pointer;user-select:none}.chip input{margin:0 5px 0 0;vertical-align:-1px}.grp{font-weight:600;color:#17365d;margin-top:10px}
-.provs{columns:3 260px;column-gap:18px;margin-top:6px}.locgrp{break-inside:avoid;margin:0 0 10px}.lochead{font-weight:600;color:#17365d;border-bottom:1px solid #dce4ef;margin-bottom:3px}.prov{display:block;padding:2px 0;cursor:pointer}.prov input{margin:0 6px 0 0}
-.progress{height:10px;background:#e4e9f0;border-radius:6px;overflow:hidden;margin:6px 0;max-width:600px}.progress span{display:block;height:100%;background:#1769aa;transition:width .3s}
-.scroll{overflow-x:auto}table.hist{border-collapse:collapse;width:100%}table.hist th,table.hist td{padding:6px 8px;border-bottom:1px solid #dce4ef;text-align:left;vertical-align:top}table.hist th{background:#eaf1f8}table.hist .n{text-align:right}table.hist tr.showing td{background:#f4f9ff}
+__RUNCSS__
 __OVCSS__
 </style></head><body>
 <header><h1>Overview</h1><p>Draft 5.5 - the dashboard's top-section counts for a group of providers: one row per provider, subtotals by location and risk pool, grand total at the bottom</p></header>__NAV__
@@ -1925,32 +1977,15 @@ __OVCSS__
 <section class="card"><h2>Previous overviews</h2><p class="muted">The last 30 overviews, newest first. View shows one again and restores its provider selection; its Excel and PDF are kept as built.</p><div id="history"><span class="muted">Loading...</span></div></section>
 </main>
 <script>
-const el=id=>document.getElementById(id);
-function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
-async function api(u,o){const r=await fetch(u,o);const text=await r.text();let j=null;try{j=text?JSON.parse(text):null}catch(e){throw Error('Server returned invalid JSON: '+text.slice(0,200))}if(!r.ok)throw Error((j&&j.error)||('Request failed ('+r.status+')'));return j}
-function when(iso){if(!iso)return '';const d=new Date(iso);return isNaN(d)?iso:d.toLocaleString()}
-let providers=[],sel=new Set(),current=null,timer=null;
-function sortKey(a,b){const x=(a.startsWith('(')?'~':'')+a.toLowerCase(),y=(b.startsWith('(')?'~':'')+b.toLowerCase();return x<y?-1:x>y?1:0}
-function groups(field){const g={};providers.forEach(p=>{(g[p[field]]=g[p[field]]||[]).push(p)});return Object.keys(g).sort(sortKey).map(k=>({name:k,list:g[k].sort((a,b)=>sortKey(a.displayName,b.displayName))}))}
-function chips(field){return '<div class="chips">'+groups(field).map(g=>'<label class="chip"><input type="checkbox" data-field="'+field+'" data-name="'+esc(g.name)+'">'+esc(g.name)+' <span class="muted">('+g.list.length+')</span></label>').join('')+'</div>'}
-function renderPicker(){
- if(!providers.length){el('picker').innerHTML='<span class="muted">No saved provider profiles yet. Map providers in the Provider Wizard and save their profiles first.</span>';syncChecks();return}
- el('picker').innerHTML='<div class="grp">Risk pools</div>'+chips('riskPool')+'<div class="grp">Locations</div>'+chips('location')+'<div class="grp">Providers</div><div class="provs">'+groups('location').map(g=>'<div class="locgrp"><div class="lochead">'+esc(g.name)+'</div>'+g.list.map(p=>'<label class="prov"><input type="checkbox" data-npi="'+esc(p.npi)+'">'+esc(p.displayName)+' <span class="muted">'+esc(p.riskPool)+'</span></label>').join('')+'</div>').join('')+'</div>';
- syncChecks();
-}
-function members(field,name){return providers.filter(p=>p[field]===name).map(p=>p.npi)}
+__PICKERJS__
+let current=null,timer=null;
 function busy(){return !!current&&(current.state==='Starting'||current.state==='Running')}
 function syncChecks(){
- el('picker').querySelectorAll('input[data-npi]').forEach(cb=>{cb.checked=sel.has(cb.dataset.npi)});
- el('picker').querySelectorAll('input[data-field]').forEach(cb=>{const m=members(cb.dataset.field,cb.dataset.name);const n=m.filter(x=>sel.has(x)).length;cb.checked=n>0&&n===m.length;cb.indeterminate=n>0&&n<m.length});
- el('count').textContent=sel.size?sel.size+' of '+providers.length+' provider'+(providers.length===1?'':'s')+' selected':'No providers selected';
+ pickerSync();
  el('build').disabled=!sel.size||busy();el('build').textContent=busy()?'Building...':'Build overview';
  const note=el('selNote');if(note)note.style.display=selectionChanged()?'':'none';
 }
 function selectionChanged(){if(!current||current.state!=='Completed')return false;const a=[...sel].sort().join(','),b=[...current.npis].sort().join(',');return a!==b}
-el('picker').addEventListener('change',e=>{const cb=e.target;if(cb.dataset.npi){if(cb.checked)sel.add(cb.dataset.npi);else sel.delete(cb.dataset.npi)}else if(cb.dataset.field){members(cb.dataset.field,cb.dataset.name).forEach(n=>{if(cb.checked)sel.add(n);else sel.delete(n)})}syncChecks()});
-el('all').onclick=()=>{providers.forEach(p=>sel.add(p.npi));syncChecks()};
-el('none').onclick=()=>{sel.clear();syncChecks()};
 function showResult(o){
  current=o;
  if(!o){el('result').innerHTML='<span class="muted">No overview built yet. Choose providers above and select Build overview.</span>';syncChecks();return}
@@ -1973,7 +2008,313 @@ el('build').onclick=async()=>{if(!sel.size||busy())return;el('build').disabled=t
 (async()=>{try{const m=await api('/api/overview');providers=m.providers;const last=m.latest;if(last)last.npis.forEach(n=>{if(providers.some(p=>p.npi===n))sel.add(n)});renderPicker();showResult(last);history=m.history;renderHistory();if(busy())startPoll(last.overviewId)}catch(e){el('picker').innerHTML='<p class="error">'+esc(e.message)+'</p>'}})();
 </script></body></html>
 '@
- return $html.Replace('__NAV__',(Get-NavHtml 'overview')).Replace('__TABCSS__',$script:TabCss).Replace('__OVCSS__',$script:OverviewCss)
+ return $html.Replace('__NAV__',(Get-NavHtml 'overview')).Replace('__TABCSS__',$script:TabCss).Replace('__OVCSS__',$script:OverviewCss).Replace('__RUNCSS__',$script:RunPageCss).Replace('__PICKERJS__',$script:PickerJs)
+}
+# --- Draft 5.6: New Patients tab - per-provider lists of patients marked New Patient with no PCP visit in the last 12 months ---
+$script:NewListKeep=30;$script:NewListInline=$false;$script:NewListMonths=12;$script:NewListTitle='New Patients Not Seen'
+$script:NewListFormats=[ordered]@{pdf='PDF';html='HTML';xlsx='Excel';csv='CSV'}
+$script:NewListGroupings=[ordered]@{combined='Combined';provider='Per provider';both='Combined and per provider'}
+$script:NewListColumns=@('Last Name','First Name','DOB','MRN','Member ID','Payer','Phone','Active Date','Last PCP Visit (TIN)','Last Serial PCP Visit','Last Visit (Any)','Next ACV','Next Appt','Future PCP Visits')
+$script:NewListDateColumns=@('DOB','Active Date','Last PCP Visit (TIN)','Last Serial PCP Visit','Last Visit (Any)','Next ACV','Next Appt')
+$script:NewListProviderColumns=@('Location','Provider','NPI','Risk Pool')
+function Get-NewListPath([string]$Id){if($Id -notmatch '^[a-f0-9]{32}$'){throw 'Invalid list ID.'};return (Join-Path $script:Paths.State ('newlist-'+$Id+'.json'))}
+function Get-NewListVisit($p){
+ # The visits that count: Export's last QEM visit with any PCP in the assigned TIN, and the latest past Serial Scheduling PCP visit date.
+ $d=@(@((Get-P $p 'PcpVisit' $null),(Get-P $p 'SerialLast' $null))|Where-Object{$_});if($d.Count -eq 0){return $null};return ($d|Sort-Object -Descending|Select-Object -First 1)
+}
+function Test-NewUnseen($p,[DateTime]$Cutoff){if(!(Get-P $p 'NewPatient' $false)){return $false};$v=Get-NewListVisit $p;return (!$v -or ([DateTime]$v).Date -lt $Cutoff.Date)}
+function New-NewListRow($p){
+ return [ordered]@{'Last Name'=[string]$p.Last;'First Name'=[string]$p.First;'DOB'=[string]$p.DOB;'MRN'=[string]$p.MRN;'Member ID'=[string]$p.MemberID;'Payer'=[string](Get-P $p 'Payer' '');'Phone'=[string](Get-P $p 'Phone' '');'Active Date'=[string](Get-P $p 'ActiveDate' '');'Last PCP Visit (TIN)'=(Get-P $p 'PcpVisit' $null);'Last Serial PCP Visit'=(Get-P $p 'SerialLast' $null);'Last Visit (Any)'=(Get-PatientLastVisit $p);'Next ACV'=(Get-P $p 'NextAcv' $null);'Next Appt'=(Get-P $p 'NextAppt' $null);'Future PCP Visits'=[string](Get-P $p 'FutureVisits' '')}
+}
+function Get-NewListCell($Row,[string]$Col){$v=$Row[$Col];if($null -eq $v){return ''};if($v -is [DateTime]){return $v.ToString('M/d/yyyy')};return [string]$v}
+function New-NewListTotal([object[]]$Rows){$t=[ordered]@{providers=0;newPatients=0;notSeen=0};foreach($r in @($Rows)){if($null -eq $r -or [string](Get-Field $r 'error' '')){continue};$t.providers++;$t.newPatients+=[int](Get-Field $r 'newPatients' 0);$t.notSeen+=[int](Get-Field $r 'notSeen' 0)};return $t}
+function Get-NewListOrderedRows($Run){return @(foreach($l in @(Get-P $Run 'locations' @())){if($null -ne $l){@(Get-Field $l 'rows' @()|Where-Object{$null -ne $_})}})}
+function Get-NewListRowsFor([hashtable]$Lists,[string]$Npi){if($Lists.ContainsKey($Npi)){return @($Lists[$Npi]|Where-Object{$null -ne $_})};return @()}
+function Get-NewListCriteriaText($Run){
+ $c=ConvertTo-DateValue (Get-P $Run 'cutoff' $null);$m=[int](Get-P $Run 'months' $script:NewListMonths)
+ return ('Patients marked New Patient in Export with no visit on or after '+$(if($c){$c.ToString('M/d/yyyy')}else{'the cutoff'})+' ('+$m+' months before the list was built) in either Export "Last QEM Visit Date with any PCP in assigned TIN" or the Serial Scheduling "PCP Visit Dates". Flagged patients are excluded, as on each dashboard.')
+}
+function Get-SafeFileName([string]$Name){$n=(($Name -replace '[\\/:*?"<>|\x00-\x1f]',' ') -replace '\s+',' ').Trim().TrimEnd('.').Trim();if(!$n){$n='Provider'};if($n.Length -gt 60){$n=$n.Substring(0,60).Trim()};return $n}
+function ConvertTo-NewListSummaryHtml($Run){
+ # Providers grouped by location with a subtotal under each and a grand total; shared by the page and the combined files.
+ $m=[int](Get-P $Run 'months' $script:NewListMonths);$body=''
+ foreach($l in @(Get-P $Run 'locations' @())){
+  if($null -eq $l){continue};$ln=[string](Get-Field $l 'location' '');$lt=Get-Field $l 'total' $null;$lp=[int](Get-Field $lt 'providers' 0)
+  $body+='<tr class="loc"><th colspan="4">'+(ConvertTo-HtmlEncoded $ln)+'</th></tr>'
+  foreach($r in @(Get-Field $l 'rows' @()|Where-Object{$null -ne $_})){$err=[string](Get-Field $r 'error' '');$note=[string](Get-Field $r 'note' '');$body+='<tr><td>'+(ConvertTo-HtmlEncoded (Get-Field $r 'displayName' ''))+$(if($err){'<div class="rowerr">Not listed: '+(ConvertTo-HtmlEncoded $err)+'</div>'}elseif($note){'<div class="rownote">'+(ConvertTo-HtmlEncoded $note)+'</div>'}else{''})+'</td><td class="pool">'+(ConvertTo-HtmlEncoded (Get-Field $r 'riskPool' ''))+'</td><td class="n">'+$(if($err){'-'}else{[int](Get-Field $r 'newPatients' 0)})+'</td><td class="n">'+$(if($err){'-'}else{[int](Get-Field $r 'notSeen' 0)})+'</td></tr>'}
+  $body+='<tr class="sub"><td>'+(ConvertTo-HtmlEncoded $ln)+' total</td><td>'+$lp+' provider'+$(if($lp -eq 1){''}else{'s'})+'</td><td class="n">'+[int](Get-Field $lt 'newPatients' 0)+'</td><td class="n">'+[int](Get-Field $lt 'notSeen' 0)+'</td></tr>'
+ }
+ $t=Get-P $Run 'total' $null;$tn=[int](Get-Field $t 'providers' 0)
+ $body+='<tr class="grand"><td>All providers</td><td>'+$tn+' provider'+$(if($tn -eq 1){''}else{'s'})+'</td><td class="n">'+[int](Get-Field $t 'newPatients' 0)+'</td><td class="n">'+[int](Get-Field $t 'notSeen' 0)+'</td></tr>'
+ return '<table class="ov np"><thead><tr><th>Provider</th><th>Risk pool</th><th class="n">New patients</th><th class="n">Not seen in '+$m+' months</th></tr></thead><tbody>'+$body+'</tbody></table>'
+}
+function ConvertTo-NewListPatientsHtml([object[]]$Rows){
+ $Rows=@($Rows|Where-Object{$null -ne $_});if($Rows.Count -eq 0){return '<p class="none">No new patients without a qualifying visit in the window.</p>'}
+ $h='<table class="pl"><thead><tr><th class="i">#</th>';foreach($c in $script:NewListColumns){$h+='<th>'+(ConvertTo-HtmlEncoded $c)+'</th>'};$h+='</tr></thead><tbody>';$i=0
+ foreach($r in $Rows){$i++;$h+='<tr><td class="i">'+$i+'</td>';foreach($c in $script:NewListColumns){$v=Get-NewListCell $r $c;$h+='<td>'+$(if($v){ConvertTo-HtmlEncoded $v}elseif($c -in @('Last PCP Visit (TIN)','Last Visit (Any)')){'<span class="none">None</span>'}else{''})+'</td>'};$h+='</tr>'}
+ return ($h+'</tbody></table>')
+}
+function ConvertTo-NewListSectionHtml($Row,[object[]]$Patients,[bool]$Break,[bool]$Heading){
+ $err=[string](Get-Field $Row 'error' '');$note=[string](Get-Field $Row 'note' '');$n=[int](Get-Field $Row 'notSeen' 0);$tot=[int](Get-Field $Row 'newPatients' 0)
+ $h='<section class="prov'+$(if($Break){' brk'}else{''})+'">'+$(if($Heading){'<h2>'+(ConvertTo-HtmlEncoded (Get-Field $Row 'displayName' ''))+'</h2>'}else{''})
+ $h+='<div class="muted">'+(ConvertTo-HtmlEncoded (Get-Field $Row 'location' ''))+' &middot; '+(ConvertTo-HtmlEncoded (Get-Field $Row 'riskPool' ''))+' &middot; NPI '+(ConvertTo-HtmlEncoded (Get-Field $Row 'npi' ''))+$(if($err){''}else{' &middot; <b>'+$n+' of '+$tot+' new patient'+$(if($tot -eq 1){''}else{'s'})+' not seen</b>'})+'</div>'
+ if($err){return ($h+'<p class="rowerr">Not listed: '+(ConvertTo-HtmlEncoded $err)+'</p></section>')}
+ if($note){$h+='<p class="rownote">'+(ConvertTo-HtmlEncoded $note)+'</p>'}
+ return ($h+(ConvertTo-NewListPatientsHtml $Patients)+'</section>')
+}
+$script:NewListCss='body{font:11px Segoe UI,Arial;color:#172033;margin:16px}h1{font-size:18px;color:#17365d;margin:0 0 3px}h2{font-size:15px;color:#17365d;margin:18px 0 2px}.muted,.none{color:#667085}p.crit{margin:4px 0 10px}table.pl{border-collapse:collapse;width:100%;margin-top:6px}table.pl th,table.pl td{padding:4px 6px;border-bottom:1px solid #dce4ef;text-align:left;vertical-align:top}table.pl thead th{background:#17365d;color:#fff;font-weight:600;vertical-align:bottom}table.pl .i{color:#667085;text-align:right}table.pl tbody tr:nth-child(even) td{background:#f8fafc}p.rownote,p.rowerr{margin:6px 0}table.ov.np{width:auto;min-width:55%}@page{size:letter landscape;margin:.4in}@media print{body{margin:0;font-size:9px}section.brk{page-break-before:always}table.pl tr,table.ov tr{page-break-inside:avoid}table.pl thead,table.ov thead{display:table-header-group}}'
+function ConvertTo-NewListDocument($Run,[object[]]$Rows,[hashtable]$Lists,[string]$Npi=''){
+ # The HTML and PDF files: combined (summary first, then each provider on its own printed page) or one provider's list.
+ $asOf=ConvertTo-DateValue (Get-P $Run 'asOf' $null);$when=$(if($asOf){$asOf.ToString('g')}else{''});$m=[int](Get-P $Run 'months' $script:NewListMonths)
+ $sub='<div class="muted">Generated '+(ConvertTo-HtmlEncoded $when)+' &middot; '+(ConvertTo-HtmlEncoded (Get-OverviewSourcesText $Run))+'</div><p class="crit muted">'+(ConvertTo-HtmlEncoded (Get-NewListCriteriaText $Run))+'</p>'
+ if($Npi){
+  $row=@($Rows|Where-Object{[string](Get-Field $_ 'npi' '') -eq $Npi})[0]
+  $body='<h1>'+(ConvertTo-HtmlEncoded (Get-Field $row 'displayName' ''))+' - new patients not seen in '+$m+' months</h1>'+$sub+(ConvertTo-NewListSectionHtml $row (Get-NewListRowsFor $Lists $Npi) $false $false)
+ }else{
+  $body='<h1>New patients not seen in '+$m+' months</h1>'+$sub+(ConvertTo-NewListSummaryHtml $Run)
+  foreach($r in $Rows){$body+=ConvertTo-NewListSectionHtml $r (Get-NewListRowsFor $Lists ([string](Get-Field $r 'npi' ''))) $true $true}
+ }
+ return ('<!doctype html><html><head><meta charset="utf-8"><title>'+(ConvertTo-HtmlEncoded $script:NewListTitle)+'</title><style>'+$script:OverviewCss+$script:NewListCss+'</style></head><body>'+$body+'</body></html>')
+}
+function ConvertTo-CsvLine([object[]]$Values){return ((@($Values)|ForEach-Object{'"'+([string]$_).Replace('"','""')+'"'}) -join ',')}
+function New-NewListCsv([object[]]$Rows,[hashtable]$Lists,[string]$Npi=''){
+ # Combined: one flat list with the provider columns first; per provider: that provider's patients only.
+ $sb=New-Object Text.StringBuilder;$heads=$(if($Npi){$script:NewListColumns}else{$script:NewListProviderColumns+$script:NewListColumns});[void]$sb.Append((ConvertTo-CsvLine $heads)+"`r`n")
+ foreach($r in $Rows){$rn=[string](Get-Field $r 'npi' '');if($Npi -and $rn -ne $Npi){continue};foreach($x in @(Get-NewListRowsFor $Lists $rn)){$vals=@();if(!$Npi){$vals+=@((Get-Field $r 'location' ''),(Get-Field $r 'displayName' ''),$rn,(Get-Field $r 'riskPool' ''))};foreach($c in $script:NewListColumns){$vals+=(Get-NewListCell $x $c)};[void]$sb.Append((ConvertTo-CsvLine $vals)+"`r`n")}}
+ return $sb.ToString()
+}
+function New-NewListWorkbook($Run,[object[]]$Rows,[hashtable]$Lists,[string]$Npi=''){
+ # Combined: a Summary sheet (providers by location with subtotals) and one filterable patient sheet; per provider: that provider's sheet.
+ try{Add-Type -AssemblyName System.Drawing -ErrorAction Stop}catch{}
+ $pkg=New-Object OfficeOpenXml.ExcelPackage;$asOf=ConvertTo-DateValue (Get-P $Run 'asOf' $null);$m=[int](Get-P $Run 'months' $script:NewListMonths)
+ $fill={param($Ws,$Row,[int]$LastCol,[string]$Hex,[bool]$Bold)$rng=$Ws.Cells[$Row,1,$Row,$LastCol];$rng.Style.Fill.PatternType=[OfficeOpenXml.Style.ExcelFillStyle]::Solid;$h=$Hex.TrimStart('#');$rng.Style.Fill.BackgroundColor.SetColor([Drawing.Color]::FromArgb([Convert]::ToInt32($h.Substring(0,2),16),[Convert]::ToInt32($h.Substring(2,2),16),[Convert]::ToInt32($h.Substring(4,2),16)));if($Bold){$rng.Style.Font.Bold=$true}}
+ $head={param($Ws,$Row,[string[]]$Names)for($c=0;$c -lt $Names.Count;$c++){$Ws.Cells[$Row,($c+1)].Value=$Names[$c]};& $fill $Ws $Row $Names.Count '#17365D' $true;$Ws.Cells[$Row,1,$Row,$Names.Count].Style.Font.Color.SetColor([Drawing.Color]::White);$Ws.Cells[$Row,1,$Row,$Names.Count].Style.WrapText=$true}
+ $row0=$null;if($Npi){$row0=@($Rows|Where-Object{[string](Get-Field $_ 'npi' '') -eq $Npi})[0]}
+ $title=$(if($Npi){[string](Get-Field $row0 'displayName' '')+' - new patients not seen in '+$m+' months'}else{'New patients not seen in '+$m+' months'})
+ $intro={param($Ws)$Ws.Cells[1,1].Value=$title;$Ws.Cells[1,1].Style.Font.Bold=$true;$Ws.Cells[1,1].Style.Font.Size=14;$Ws.Cells[2,1].Value=('Generated '+$(if($asOf){$asOf.ToString('g')}else{''})+'. '+(Get-OverviewSourcesText $Run)+'.');$Ws.Cells[3,1].Value=(Get-NewListCriteriaText $Run)}
+ if(!$Npi){
+  $ws=$pkg.Workbook.Worksheets.Add('Summary');& $intro $ws;$r=5;$sh=@('Location','Provider','NPI','Risk Pool','New Patients','Not Seen','Note');& $head $ws $r $sh;$sumHead=$r
+  foreach($l in @(Get-P $Run 'locations' @())){
+   if($null -eq $l){continue};$ln=[string](Get-Field $l 'location' '')
+   foreach($x in @(Get-Field $l 'rows' @()|Where-Object{$null -ne $_})){$r++;$err=[string](Get-Field $x 'error' '');$ws.Cells[$r,1].Value=$ln;$ws.Cells[$r,2].Value=[string](Get-Field $x 'displayName' '');$ws.Cells[$r,3].Value=[string](Get-Field $x 'npi' '');$ws.Cells[$r,4].Value=[string](Get-Field $x 'riskPool' '');if($err){$ws.Cells[$r,7].Value=('Not listed: '+$err)}else{$ws.Cells[$r,5].Value=[int](Get-Field $x 'newPatients' 0);$ws.Cells[$r,6].Value=[int](Get-Field $x 'notSeen' 0);$note=[string](Get-Field $x 'note' '');if($note){$ws.Cells[$r,7].Value=$note}}}
+   $lt=Get-Field $l 'total' $null;$r++;$ws.Cells[$r,1].Value=$ln;$ws.Cells[$r,2].Value=($ln+' total ('+[int](Get-Field $lt 'providers' 0)+')');$ws.Cells[$r,5].Value=[int](Get-Field $lt 'newPatients' 0);$ws.Cells[$r,6].Value=[int](Get-Field $lt 'notSeen' 0);& $fill $ws $r 6 '#F4F7FB' $true
+  }
+  $t=Get-P $Run 'total' $null;$r++;$ws.Cells[$r,1].Value='All locations';$ws.Cells[$r,2].Value=('All providers ('+[int](Get-Field $t 'providers' 0)+')');$ws.Cells[$r,5].Value=[int](Get-Field $t 'newPatients' 0);$ws.Cells[$r,6].Value=[int](Get-Field $t 'notSeen' 0);& $fill $ws $r 6 '#DFE9F5' $true
+  $ws.Column(1).Width=24;$ws.Column(2).Width=30;$ws.Column(3).Width=13;$ws.Column(4).Width=18;$ws.Column(5).Width=12;$ws.Column(6).Width=12;$ws.Column(7).Width=60;$ws.View.FreezePanes(($sumHead+1),3)
+ }
+ $ws=$pkg.Workbook.Worksheets.Add('New Patients');& $intro $ws
+ $lead=@();if(!$Npi){$lead=@($script:NewListProviderColumns)};$heads=@($lead+$script:NewListColumns);$r=5;& $head $ws $r $heads;$headRow=$r;$off=$lead.Count
+ foreach($x in $Rows){
+  $rn=[string](Get-Field $x 'npi' '');if($Npi -and $rn -ne $Npi){continue}
+  foreach($pt in @(Get-NewListRowsFor $Lists $rn)){
+   $r++;if(!$Npi){$ws.Cells[$r,1].Value=[string](Get-Field $x 'location' '');$ws.Cells[$r,2].Value=[string](Get-Field $x 'displayName' '');$ws.Cells[$r,3].Value=$rn;$ws.Cells[$r,4].Value=[string](Get-Field $x 'riskPool' '')}
+   for($c=0;$c -lt $script:NewListColumns.Count;$c++){$col=$script:NewListColumns[$c];$v=$pt[$col];if($script:NewListDateColumns -contains $col){$d=ConvertTo-DateValue $v;if($d){$ws.Cells[$r,($off+$c+1)].Value=$d.Date;$ws.Cells[$r,($off+$c+1)].Style.Numberformat.Format='m/d/yyyy'};continue};$s=Get-NewListCell $pt $col;if($s){$ws.Cells[$r,($off+$c+1)].Value=$s}}
+  }
+ }
+ $ws.Cells[$headRow,1,[Math]::Max($r,$headRow),$heads.Count].AutoFilter=$true
+ for($c=1;$c -le $heads.Count;$c++){$ws.Column($c).Width=14};if(!$Npi){$ws.Column(1).Width=22;$ws.Column(2).Width=28;$ws.Column(4).Width=18};$ws.Column($off+1).Width=18;$ws.Column($off+2).Width=16
+ $ws.View.FreezePanes(($headRow+1),($off+3))
+ try{return ,$pkg.GetAsByteArray()}finally{$pkg.Dispose()}
+}
+function Write-NewListFile($Run,[object[]]$Rows,[hashtable]$Lists,[string]$Npi,[string]$Format,[string]$Dest,[string]$StageBase){
+ switch($Format){
+  'csv'{[IO.File]::WriteAllText($Dest,(New-NewListCsv $Rows $Lists $Npi),(New-Object Text.UTF8Encoding($true)))}
+  'xlsx'{[IO.File]::WriteAllBytes($Dest,(New-NewListWorkbook $Run $Rows $Lists $Npi))}
+  'html'{[IO.File]::WriteAllText($Dest,(ConvertTo-NewListDocument $Run $Rows $Lists $Npi),(New-Object Text.UTF8Encoding($false)))}
+  'pdf'{
+   # Rendered under a space-free staging name (the browser command line is not quoted), then moved to its readable name.
+   $h=$StageBase+'.html';$pp=$StageBase+'.pdf'
+   try{[IO.File]::WriteAllText($h,(ConvertTo-NewListDocument $Run $Rows $Lists $Npi),(New-Object Text.UTF8Encoding($false)));Convert-HtmlPdf $h $pp;if([IO.File]::Exists($Dest)){[IO.File]::Delete($Dest)};[IO.File]::Move($pp,$Dest)}finally{Remove-Item -LiteralPath $h,$pp -Force -ErrorAction SilentlyContinue}
+  }
+  default{throw ('Unknown format '+$Format)}
+ }
+}
+function Invoke-NewListRun([string]$Id){
+ # Runs in its own worker process: reads each source once for every selected provider, finds the unseen new patients, then writes the chosen files.
+ $path=Get-NewListPath $Id;$run=Json $path;if(!$run){throw 'List run was not found.'}
+ $sw=[Diagnostics.Stopwatch]::StartNew()
+ try{
+  Set-P $run 'workerPid' $PID;Set-P $run 'startedUtc' ([DateTime]::UtcNow.ToString('o'));Set-RunProgress $run $path 3 'Reading provider profiles'
+  $chosen=@(Get-ChosenProfiles @($run.npis))
+  $src=Read-GroupSources $chosen $run $path 5 45;$groups=$src.groups
+  $asOf=Get-Date;$cutoff=$asOf.Date.AddMonths(-$script:NewListMonths)
+  $rowsOut=@();$lists=@{};$i=0
+  foreach($p in $chosen){
+   $i++;$npi=[string](Get-P $p 'npi' '');$display=[string](Get-P $p 'displayName' $npi);$loc=([string](Get-P $p 'location' '')).Trim();$pool=([string](Get-P $p 'riskPool' '')).Trim()
+   Set-RunProgress $run $path ([int](50+15*($i-1)/$chosen.Count)) ('Finding new patients for '+$display+' ('+$i+' of '+$chosen.Count+')')
+   $row=[ordered]@{npi=$npi;displayName=$display;location=$(if($loc){$loc}else{'(No location)'});riskPool=$(if($pool){$pool}else{'(No risk pool)'});newPatients=0;notSeen=0;note='';error=''};$lists[$npi]=@()
+   try{
+    $pf=Get-ProviderFactsFromGroups $groups $p;$act=Get-ActivePatients $pf.facts @(Get-ProviderFlags $npi)
+    $new=@($act.active|Where-Object{Get-P $_ 'NewPatient' $false})
+    $unseen=@($new|Where-Object{Test-NewUnseen $_ $cutoff}|Sort-Object -Property @{Expression={[string]$_.Last}},@{Expression={[string]$_.First}})
+    $row.newPatients=$new.Count;$row.notSeen=$unseen.Count;$row.note=$pf.note;$lists[$npi]=@($unseen|ForEach-Object{New-NewListRow $_})
+   }catch{$row.error=$_.Exception.Message;Log 'NEWLIST_PROVIDER' 'FAILED' ($npi+' '+$_.Exception.Message)}
+   $rowsOut+=$row
+  }
+  $locations=@();foreach($ln in @($rowsOut|ForEach-Object{$_.location}|Select-Object -Unique|Sort-Object -Property $script:GroupSort)){$members=@($rowsOut|Where-Object{$_.location -eq $ln}|Sort-Object -Property @{Expression={$_.displayName}});$locations+=[ordered]@{location=$ln;rows=$members;total=(New-NewListTotal $members)}}
+  Set-P $run 'locations' $locations;Set-P $run 'total' (New-NewListTotal $rowsOut);Set-P $run 'sources' @($src.sources);Set-P $run 'asOf' ($asOf.ToString('o'));Set-P $run 'cutoff' ($cutoff.ToString('o'));Set-P $run 'months' $script:NewListMonths;Set-P $run 'failedProviders' @($rowsOut|Where-Object{$_.error}).Count
+  $ordered=@(Get-NewListOrderedRows $run)
+  # Files: <lists folder>\New Patients Not Seen - <stamp>\ holds the combined files and the zip; per-provider files go in its "By provider" folder.
+  $stamp=$asOf.ToString('yyyy-MM-dd HHmmss');$folder=Join-Path $script:Paths.NewLists ($script:NewListTitle+' - '+$stamp);$byDir=Join-Path $folder 'By provider';$null=New-Item -ItemType Directory -Path $folder -Force
+  $formats=@(@($run.formats)|ForEach-Object{[string]$_});$grouping=[string]$run.grouping;$plan=New-Object Collections.Generic.List[object]
+  if($grouping -in @('combined','both')){foreach($fmt in $formats){$plan.Add([ordered]@{kind='combined';npi='';displayName='All providers';format=$fmt;path=(Join-Path $folder ($script:NewListTitle+' - '+$stamp+'.'+$fmt))})}}
+  if($grouping -in @('provider','both')){
+   $null=New-Item -ItemType Directory -Path $byDir -Force;$used=@{}
+   foreach($r in $ordered){if([string]$r.error){continue};$base=Get-SafeFileName ([string]$r.displayName);if($used.ContainsKey($base.ToUpperInvariant())){$base=$base+' ('+$r.npi+')'};$used[$base.ToUpperInvariant()]=$true
+    foreach($fmt in $formats){$plan.Add([ordered]@{kind='provider';npi=[string]$r.npi;displayName=[string]$r.displayName;format=$fmt;path=(Join-Path $byDir ($base+' - '+$script:NewListTitle+' - '+$stamp+'.'+$fmt))})}}
+  }
+  $files=@();$k=0;$pdfError=''
+  foreach($f in $plan){
+   $k++;Set-RunProgress $run $path ([int](66+30*($k-1)/[Math]::Max(1,$plan.Count))) ('Writing '+$script:NewListFormats[[string]$f.format]+' for '+$f.displayName+' (file '+$k+' of '+$plan.Count+')')
+   $entry=[ordered]@{kind=$f.kind;npi=$f.npi;displayName=$f.displayName;format=$f.format;path=$f.path;error=''}
+   # After one PDF fails (no Edge/Chrome, or a timeout) the rest are skipped rather than failing one by one.
+   if($f.format -eq 'pdf' -and $pdfError){$entry.error=$pdfError}
+   else{try{Write-NewListFile $run $ordered $lists $f.npi $f.format $f.path (Join-Path $script:Paths.Staging ('newlist-'+$Id+'-'+$k))}catch{$entry.error=$_.Exception.Message;Remove-Item -LiteralPath $f.path -Force -ErrorAction SilentlyContinue;if($f.format -eq 'pdf'){$pdfError=$entry.error};Log 'NEWLIST_FILE' 'WARN' ([string]$f.path+' '+$entry.error)}}
+   $files+=$entry
+  }
+  $made=@($files|Where-Object{$_.kind -eq 'provider' -and !$_.error}).Count
+  if($made -gt 0){
+   Set-RunProgress $run $path 97 'Zipping the per-provider files'
+   $zip=Join-Path $folder ($script:NewListTitle+' by provider - '+$stamp+'.zip');$entry=[ordered]@{kind='zip';npi='';displayName='All providers';format='zip';path=$zip;error='';count=$made}
+   try{try{Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop}catch{};[IO.Compression.ZipFile]::CreateFromDirectory($byDir,$zip)}catch{$entry.error=$_.Exception.Message;Log 'NEWLIST_ZIP' 'WARN' $entry.error}
+   $files+=$entry
+  }
+  Set-P $run 'folder' $folder;Set-P $run 'files' $files;Set-P $run 'pdfError' $pdfError
+  $run.state='Completed';$run.percent=100;$run.stage='Lists complete';Set-P $run 'completedUtc' ([DateTime]::UtcNow.ToString('o'));Set-P $run 'seconds' ([Math]::Round($sw.Elapsed.TotalSeconds,1));Save-JsonAtomic $path $run
+  Log 'NEWLIST_COMPLETED' 'OK' ($chosen.Count.ToString()+' providers, '+$files.Count+' files in '+[Math]::Round($sw.Elapsed.TotalSeconds,1)+'s')
+ }catch{$msg=$_.Exception.Message;$cur=Json $path;if(!$cur){$cur=$run};$cur.state='Failed';$cur.stage='Lists failed';Set-P $cur 'errorSummary' $msg;Set-P $cur 'completedUtc' ([DateTime]::UtcNow.ToString('o'));Save-JsonAtomic $path $cur;Log 'NEWLIST_FAILED' 'FAILED' $msg}
+}
+function Start-NewListWorker([string]$Id){return (Start-RunWorker 'RunNewListId' $Id ('newlist-'+$Id))}
+function Get-NewLists{return @(Get-ChildItem $script:Paths.State -Filter 'newlist-*.json' -File -ErrorAction SilentlyContinue|ForEach-Object{Json $_.FullName}|Where-Object{$null -ne $_}|Sort-Object -Property @{Expression={ConvertTo-IsoText (Get-P $_ 'requestedUtc' '')}} -Descending)}
+function Update-NewListLiveness($Run){
+ $id=[string]$Run.listId;$reason=Get-RunStallReason $Run $id 'list' 'Build the lists again.' ('newlist-'+$id)
+ if(!$reason){return $false}
+ $Run.state='Failed';$Run.stage='Lists failed';Set-P $Run 'errorSummary' $reason;Save-JsonAtomic (Get-NewListPath $id) $Run;Log 'NEWLIST_INTERRUPTED' 'WARN' $id;return $true
+}
+function Get-NewListOutputText($Run){$g=[string](Get-P $Run 'grouping' '');$f=@(@(Get-P $Run 'formats' @())|ForEach-Object{[string]$script:NewListFormats[[string]$_]});return ([string]$script:NewListGroupings[$g]+': '+($f -join ', '))}
+function Get-NewListModel([string]$Id,[switch]$Summary){
+ $run=Json (Get-NewListPath $Id);if(!$run){throw 'List run was not found.'}
+ $null=Update-NewListLiveness $run
+ $c=ConvertTo-DateValue (Get-P $run 'cutoff' $null)
+ $m=[ordered]@{listId=[string]$run.listId;state=[string]$run.state;percent=[int](Get-P $run 'percent' 0);stage=[string](Get-P $run 'stage' '');requestedUtc=(ConvertTo-IsoText (Get-P $run 'requestedUtc' ''));completedUtc=(ConvertTo-IsoText (Get-P $run 'completedUtc' ''));asOf=(ConvertTo-IsoText (Get-P $run 'asOf' ''));seconds=(Get-P $run 'seconds' $null);npis=@(Get-P $run 'npis' @());providerCount=@(Get-P $run 'npis' @()).Count;selection=(Get-OverviewSelectionText $run);formats=@(@(Get-P $run 'formats' @())|ForEach-Object{[string]$_});grouping=[string](Get-P $run 'grouping' '');outputText=(Get-NewListOutputText $run);errorSummary=[string](Get-P $run 'errorSummary' '');pdfError=[string](Get-P $run 'pdfError' '');failedProviders=[int](Get-P $run 'failedProviders' 0);cutoff=$(if($c){$c.ToString('M/d/yyyy')}else{''});newPatients=$null;notSeen=$null;folder='';combined=@();zip=$null;perProvider=@();tableHtml='';sourcesText='';criteriaText=''}
+ if($m.state -eq 'Completed'){
+  $t=Get-P $run 'total' $null;$m.newPatients=[int](Get-Field $t 'newPatients' 0);$m.notSeen=[int](Get-Field $t 'notSeen' 0);$m.folder=[string](Get-P $run 'folder' '')
+  $files=@(Get-P $run 'files' @());$byNpi=[ordered]@{}
+  for($n=0;$n -lt $files.Count;$n++){
+   $f=$files[$n];if($null -eq $f){continue};$kind=[string](Get-Field $f 'kind' '');if($Summary -and $kind -eq 'provider'){continue}
+   $fp=[string](Get-Field $f 'path' '');$err=[string](Get-Field $f 'error' '');if(!$err -and !(Test-Path -LiteralPath $fp)){$err='It was moved or deleted from the lists folder.'}
+   $item=[ordered]@{format=[string](Get-Field $f 'format' '');url=$(if($err){$null}else{'/new-patients.file?id='+$m.listId+'&n='+$n});error=$err;name=[IO.Path]::GetFileName($fp);count=[int](Get-Field $f 'count' 0)}
+   if($kind -eq 'combined'){$m.combined+=$item}elseif($kind -eq 'zip'){$m.zip=$item}elseif($kind -eq 'provider'){$k=[string](Get-Field $f 'npi' '');if(!$byNpi.Contains($k)){$byNpi[$k]=[ordered]@{npi=$k;displayName=[string](Get-Field $f 'displayName' '');files=@()}};$byNpi[$k].files+=$item}
+  }
+  if(!$Summary){$m.perProvider=@($byNpi.Values);$m.tableHtml=ConvertTo-NewListSummaryHtml $run;$m.sourcesText=Get-OverviewSourcesText $run;$m.criteriaText=Get-NewListCriteriaText $run}
+ }
+ return $m
+}
+function Get-NewListPageModel{
+ $all=@(Get-NewLists);$history=@(foreach($o in $all){if([string](Get-P $o 'state' '') -in @('Completed','Failed')){Get-NewListModel ([string]$o.listId) -Summary}})
+ return [ordered]@{providers=@(Get-OverviewProviders);months=$script:NewListMonths;latest=$(if($all.Count){Get-NewListModel ([string]$all[0].listId)}else{$null});history=$history}
+}
+function New-NewListRun($Body){
+ $req=Get-RequestedProviders $Body
+ $want=@(@(Get-P $Body 'formats' @())|ForEach-Object{([string]$_).Trim().ToLowerInvariant()});$formats=@(foreach($k in $script:NewListFormats.Keys){if($want -contains $k){$k}})
+ if($formats.Count -eq 0){throw 'Choose at least one format.'}
+ $grouping=([string](Get-P $Body 'grouping' '')).Trim().ToLowerInvariant();if(!$grouping -or !$script:NewListGroupings.Contains($grouping)){throw 'Choose a combined file, one file per provider, or both.'}
+ foreach($o in @(Get-NewLists)){if([string](Get-P $o 'state' '') -in @('Starting','Running') -and !(Update-NewListLiveness $o)){throw 'New patient lists are already being built; wait for them to finish.'}}
+ $id=[Guid]::NewGuid().ToString('N');$path=Get-NewListPath $id
+ $run=[ordered]@{listVersion=1;listId=$id;state='Starting';percent=1;stage='Launching list worker';requestedUtc=[DateTime]::UtcNow.ToString('o');npis=@($req.npis);selection=$req.selection;formats=$formats;grouping=$grouping;workerPid=0}
+ Save-JsonAtomic $path $run;Log 'NEWLIST_REQUESTED' 'OK' (@($req.npis).Count.ToString()+' providers, '+$grouping+', '+($formats -join '+'))
+ if($script:NewListInline){Invoke-NewListRun $id}
+ else{try{$null=Start-NewListWorker $id}catch{$run.state='Failed';$run.stage='Worker launch failed';$run['errorSummary']=$_.Exception.Message;Save-JsonAtomic $path $run;Log 'NEWLIST_FAILED' 'FAILED' $_.Exception.Message}}
+ foreach($old in @(Get-NewLists|Select-Object -Skip $script:NewListKeep)){$oid=[string](Get-P $old 'listId' '');if($oid -match '^[a-f0-9]{32}$'){Remove-Item -LiteralPath (Get-NewListPath $oid) -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath (Join-Path $script:Paths.Logs ('newlist-'+$oid+'.out.log')),(Join-Path $script:Paths.Logs ('newlist-'+$oid+'.err.log')) -Force -ErrorAction SilentlyContinue}}
+ return (Get-NewListModel $id)
+}
+function Send-NewListFile($Context,[string]$Id,[string]$N){
+ $run=Json (Get-NewListPath $Id);if(!$run -or [string](Get-P $run 'state' '') -ne 'Completed'){throw 'Those lists are not complete.'}
+ $i=0;if(![int]::TryParse($N,[ref]$i)){throw 'Invalid file number.'};$files=@(Get-P $run 'files' @());if($i -lt 0 -or $i -ge $files.Count){throw 'Invalid file number.'}
+ $f=$files[$i];$fmt=[string](Get-Field $f 'format' '');$types=@{pdf='application/pdf';html='text/html; charset=utf-8';xlsx='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';csv='text/csv; charset=utf-8';zip='application/zip'}
+ if(!$types.ContainsKey($fmt)){throw 'Invalid file.'}
+ $full=[IO.Path]::GetFullPath([string](Get-Field $f 'path' ''));$root=[IO.Path]::GetFullPath($script:Paths.NewLists).TrimEnd([IO.Path]::DirectorySeparatorChar)+[IO.Path]::DirectorySeparatorChar
+ if(!$full.StartsWith($root,[StringComparison]::OrdinalIgnoreCase) -or !(Test-Path -LiteralPath $full)){throw 'That file is not available; it may have been moved or deleted from the lists folder.'}
+ $name=[IO.Path]::GetFileName($full) -replace '[^\x20-\x7E]','_' -replace '"',''
+ Send-Bytes $Context $types[$fmt] ([IO.File]::ReadAllBytes($full)) ($(if($fmt -in @('pdf','html')){'inline'}else{'attachment'})+'; filename="'+$name+'"')
+}
+function NewPatientsPage{
+ $html=@'
+<!doctype html><html><head><meta charset="utf-8"><title>New Patients</title>
+<style>
+body{font:14px Segoe UI,Arial;margin:0;background:#f4f7fb;color:#172033}header{background:#17365d;color:white;padding:22px 22px 12px}main{padding:22px;max-width:1500px}
+__TABCSS__
+.card{background:white;border:1px solid #dce4ef;border-radius:8px;padding:18px;margin:14px 0}.card h2{margin:0 0 8px;font-size:17px;color:#17365d}.muted{color:#667085}.error{color:#a61b1b}.warn{color:#9a5b00}
+.row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:8px 0}
+button,a.btn{padding:7px 12px;cursor:pointer;background:#1769aa;color:#fff;border:0;border-radius:5px;font:inherit;text-decoration:none;display:inline-block}button:disabled{opacity:.5;cursor:default}button.alt{background:#e4e9f0;color:#172033}button.go{background:#1d7a3a;font-weight:600;padding:10px 16px}
+__RUNCSS__
+__OVCSS__
+.opts{border-top:1px solid #eef2f7;margin-top:6px;padding-top:4px}.opts b{min-width:64px;color:#17365d}.opts label{cursor:pointer}.row b.lbl{min-width:96px}table.ov.np{width:auto;min-width:55%}
+details.pp{margin:6px 0 10px}details.pp summary{cursor:pointer;color:#1769aa}table.pf{border-collapse:collapse;margin-top:6px}table.pf td{padding:3px 10px 3px 0;border-bottom:1px solid #eef2f7}code{background:#eef2f7;padding:1px 5px;border-radius:3px;word-break:break-all}
+</style></head><body>
+<header><h1>New Patients</h1><p>Draft 5.6 - patients marked New Patient with no PCP visit in the last __MONTHS__ months, listed per provider</p></header>__NAV__
+<main>
+<section class="card"><h2>Choose providers</h2>
+<p class="muted">Tick a risk pool or location to select all of its providers, or tick providers individually. Locations and risk pools come from each saved provider profile.</p>
+<div id="picker"><span class="muted">Loading profiles...</span></div>
+<div class="opts">
+<div class="row"><b>Files</b><label><input type="radio" name="grouping" value="combined"> One combined file</label><label><input type="radio" name="grouping" value="provider"> One file per provider</label><label><input type="radio" name="grouping" value="both"> Both</label></div>
+<div class="row"><b>Formats</b><label><input type="checkbox" name="fmt" value="pdf"> PDF</label><label><input type="checkbox" name="fmt" value="html"> HTML</label><label><input type="checkbox" name="fmt" value="xlsx"> Excel (.xlsx)</label><label><input type="checkbox" name="fmt" value="csv"> CSV</label></div>
+</div>
+<div class="row"><button class="alt" id="all">Select all</button><button class="alt" id="none">Clear</button><button class="go" id="build" disabled>Build lists</button><span id="count" class="muted"></span></div>
+<p class="muted">A patient is listed when Export marks them New Patient and neither Export's "Last QEM Visit Date with any PCP in assigned TIN" nor a Serial Scheduling PCP visit date falls within the last __MONTHS__ months. Flagged patients are excluded, as on each dashboard. Per-provider files also come together in one zip.</p>
+</section>
+<section class="card"><h2>Lists</h2><div id="result"><span class="muted">Loading...</span></div></section>
+<section class="card"><h2>Previous lists</h2><p class="muted">The last 30 builds, newest first. View shows one again and restores its providers and output choices; its files are kept as built.</p><div id="history"><span class="muted">Loading...</span></div></section>
+</main>
+<script>
+__PICKERJS__
+let current=null,timer=null,history=[];
+const FMT={pdf:'PDF',html:'HTML',xlsx:'Excel',csv:'CSV',zip:'Zip'};
+function busy(){return !!current&&(current.state==='Starting'||current.state==='Running')}
+function grouping(){const r=document.querySelector('input[name=grouping]:checked');return r?r.value:''}
+function formats(){return [...document.querySelectorAll('input[name=fmt]:checked')].map(c=>c.value)}
+function setOutput(g,f){document.querySelectorAll('input[name=grouping]').forEach(r=>{r.checked=r.value===g});document.querySelectorAll('input[name=fmt]').forEach(c=>{c.checked=f.includes(c.value)})}
+function changed(){if(!current||current.state!=='Completed')return false;return [...sel].sort().join(',')!==[...current.npis].sort().join(',')||grouping()!==current.grouping||formats().join(',')!==current.formats.join(',')}
+function syncChecks(){
+ pickerSync();
+ const ok=sel.size>0&&formats().length>0&&!!grouping();el('build').disabled=!ok||busy();el('build').textContent=busy()?'Building...':'Build lists';
+ const note=el('selNote');if(note)note.style.display=changed()?'':'none';
+}
+document.querySelector('.opts').addEventListener('change',syncChecks);
+function btnLinks(list){return list.map(f=>f.url?'<a class="btn" '+(f.format==='pdf'||f.format==='html'?'target="_blank" ':'')+'href="'+esc(f.url)+'">'+esc(FMT[f.format]||f.format)+'</a>':'<span class="warn" title="'+esc(f.error)+'">'+esc(FMT[f.format]||f.format)+' not available</span>').join(' ')}
+function textLinks(list){return list.map(f=>f.url?'<a '+(f.format==='pdf'||f.format==='html'?'target="_blank" ':'')+'href="'+esc(f.url)+'">'+esc(FMT[f.format]||f.format)+'</a>':'<span class="warn" title="'+esc(f.error)+'">'+esc(FMT[f.format]||f.format)+' n/a</span>').join(' &middot; ')}
+function plural(n,w){return n+' '+w+(n===1?'':'s')}
+function showResult(o){
+ current=o;
+ if(!o){el('result').innerHTML='<span class="muted">No lists built yet. Choose providers and output above, then select Build lists.</span>';syncChecks();return}
+ if(o.state==='Starting'||o.state==='Running'){el('result').innerHTML='<p>Building lists for '+plural(o.providerCount,'provider')+'... '+o.percent+'%</p><div class="progress"><span style="width:'+Math.max(0,Math.min(100,o.percent))+'%"></span></div><span class="muted">'+esc(o.stage)+'</span>';syncChecks();return}
+ if(o.state==='Failed'){el('result').innerHTML='<p class="error">The lists could not be built: '+esc(o.errorSummary)+'</p><span class="muted">Requested '+esc(when(o.requestedUtc))+'</span>';syncChecks();return}
+ let h='<div class="row"><b>'+plural(o.notSeen,'new patient')+' not seen</b><span class="muted">of '+o.newPatients+' new across '+plural(o.providerCount,'provider')+'; built '+esc(when(o.completedUtc))+(o.seconds!=null?' in '+o.seconds+' s':'')+'</span></div>';
+ if(o.combined.length)h+='<div class="row"><b class="lbl">Combined</b>'+btnLinks(o.combined)+'</div>';
+ if(o.zip||o.perProvider.length){
+  h+='<div class="row"><b class="lbl">Per provider</b>'+(o.zip?(o.zip.url?'<a class="btn" href="'+esc(o.zip.url)+'">Download all ('+plural(o.zip.count,'file')+', zip)</a>':'<span class="warn">Zip not available: '+esc(o.zip.error)+'</span>'):'')+'</div>';
+  h+='<details class="pp"><summary>Individual provider files ('+plural(o.perProvider.length,'provider')+')</summary><table class="pf">'+o.perProvider.map(p=>'<tr><td>'+esc(p.displayName)+'</td><td>'+textLinks(p.files)+'</td></tr>').join('')+'</table></details>';
+ }
+ if(o.pdfError)h+='<p class="warn">PDF files could not be made: '+esc(o.pdfError)+'</p>';
+ h+='<p class="muted">Saved in <code>'+esc(o.folder)+'</code></p><p class="muted">'+esc(o.criteriaText)+' '+esc(o.sourcesText)+'.'+(o.failedProviders?' <span class="error">'+plural(o.failedProviders,'provider')+' could not be listed; see the red notes below.</span>':'')+'</p><p class="warn" id="selNote" style="display:none">Your providers or output choices have changed since these lists were built; select Build lists to update them.</p><div class="scroll">'+o.tableHtml+'</div>';
+ el('result').innerHTML=h;syncChecks();
+}
+function historyHtml(list){
+ if(!list.length)return '<span class="muted">None yet.</span>';
+ return '<table class="hist"><thead><tr><th>Built</th><th>Providers</th><th>Risk pools</th><th>Locations</th><th class="n">Not seen</th><th>Output</th><th></th></tr></thead><tbody>'+list.map(h=>{const showing=current&&current.listId===h.listId;const s=h.selection||{};return '<tr'+(showing?' class="showing"':'')+'><td>'+esc(when(h.completedUtc||h.requestedUtc))+(showing?' <span class="muted">(shown above)</span>':'')+'</td><td>'+h.providerCount+'</td><td>'+esc(s.riskPools||'')+'</td><td>'+esc(s.locations||'')+'</td><td class="n">'+(h.notSeen!=null?h.notSeen:'')+'</td><td>'+esc(h.outputText)+'</td><td>'+(h.state==='Completed'?'<a href="#" data-view="'+esc(h.listId)+'">View</a>'+(h.combined.length?' &middot; '+textLinks(h.combined):'')+(h.zip?' &middot; '+(h.zip.url?'<a href="'+esc(h.zip.url)+'">Zip</a>':'<span class="warn" title="'+esc(h.zip.error)+'">Zip n/a</span>'):''):'<span class="error">Failed: '+esc(h.errorSummary)+'</span>')+'</td></tr>'}).join('')+'</tbody></table>';
+}
+function renderHistory(){el('history').innerHTML=historyHtml(history)}
+async function loadHistory(){try{const m=await api('/api/new-patients');history=m.history;renderHistory()}catch(e){el('history').innerHTML='<p class="error">'+esc(e.message)+'</p>'}}
+function restore(o){sel.clear();o.npis.forEach(n=>{if(providers.some(p=>p.npi===n))sel.add(n)});setOutput(o.grouping,o.formats)}
+el('history').addEventListener('click',async e=>{const a=e.target.closest('a[data-view]');if(!a)return;e.preventDefault();if(busy())return;try{const o=await api('/api/new-patients-run?id='+encodeURIComponent(a.dataset.view));restore(o);showResult(o);renderHistory();el('result').scrollIntoView({behavior:'smooth'})}catch(err){el('result').innerHTML='<p class="error">'+esc(err.message)+'</p>'}});
+let pollErrors=0;
+function startPoll(id){if(timer)clearInterval(timer);pollErrors=0;timer=setInterval(async()=>{try{const o=await api('/api/new-patients-run?id='+encodeURIComponent(id));pollErrors=0;showResult(o);if(!busy()){clearInterval(timer);timer=null;loadHistory()}}catch(e){if(++pollErrors<5)return;clearInterval(timer);timer=null;el('result').innerHTML='<p class="error">'+esc(e.message)+'</p>'}},1500)}
+el('build').onclick=async()=>{if(el('build').disabled||busy())return;el('build').disabled=true;try{const o=await api('/api/new-patients',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({npis:[...sel],grouping:grouping(),formats:formats()})});showResult(o);if(busy())startPoll(o.listId)}catch(e){el('result').innerHTML='<p class="error">'+esc(e.message)+'</p>';syncChecks()}};
+(async()=>{try{const m=await api('/api/new-patients');providers=m.providers;const last=m.latest;if(last)restore(last);else setOutput('combined',['pdf','xlsx']);renderPicker();showResult(last);history=m.history;renderHistory();if(busy())startPoll(last.listId)}catch(e){el('picker').innerHTML='<p class="error">'+esc(e.message)+'</p>'}})();
+</script></body></html>
+'@
+ return $html.Replace('__NAV__',(Get-NavHtml 'newpatients')).Replace('__TABCSS__',$script:TabCss).Replace('__OVCSS__',$script:OverviewCss).Replace('__RUNCSS__',$script:RunPageCss).Replace('__PICKERJS__',$script:PickerJs).Replace('__MONTHS__',[string]$script:NewListMonths)
 }
 # --- Draft 5.3: unattended runs - heartbeat, interrupted-worker recovery, sleep deferral ---
 $script:HeartbeatSeconds=15;$script:LastHeartbeat=[DateTime]::MinValue;$script:StallChecks=60;$script:MaxJobAttempts=2;$script:PdfTimeoutSeconds=180
@@ -2070,4 +2411,4 @@ function Invoke-AnalysisJob([string]$JobId){$path=Join-Path $script:Paths.State 
 function Invoke-NextPendingJob{$jobs=@(Get-Jobs);if(@($jobs|Where-Object{$_.state -in @('Starting','Running')}).Count -gt 0){return};$j=@($jobs|Where-Object{$_.state -eq 'Prepared' -or $_.state -eq 'Queued'}|Sort-Object queuedUtc|Select-Object -First 1);if($j.Count -ne 1){return};$job=$j[0];$job.state='Starting';$job.percent=1;$attempt=1+[int](Get-P $job 'attempts' 0);Set-P $job 'attempts' $attempt;$job.stage=$(if($attempt -gt 1){'Launching background analysis worker (attempt '+$attempt+' of '+$script:MaxJobAttempts+')'}else{'Launching background analysis worker'});$jobPath=Join-Path $script:Paths.State ('job-'+$job.jobId+'.json');Save-JsonAtomic $jobPath $job;$exe=(Get-Process -Id $PID).Path;$out=Join-Path $script:Paths.Logs ('worker-'+$job.jobId+'.out.log');$err=Join-Path $script:Paths.Logs ('worker-'+$job.jobId+'.err.log');try{$quotedScript='"'+$PSCommandPath+'"';$p=Start-Process -FilePath $exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$quotedScript,'-RunJobId',$job.jobId,'-NoBrowser') -RedirectStandardOutput $out -RedirectStandardError $err -WindowStyle Hidden -PassThru;Set-P $job 'workerPid' $p.Id;Save-JsonAtomic $jobPath $job}catch{$job.state='Failed';$job.stage='Worker launch failed';Set-P $job 'errorSummary' $_.Exception.Message;Save-JsonAtomic $jobPath $job}};function Invoke-PendingJobs{while(@(Get-Jobs|Where-Object{$_.state -eq 'Prepared' -or $_.state -eq 'Queued'}).Count -gt 0){Invoke-NextPendingJob;Start-Sleep -Milliseconds 500}}
 function Send-JobOutput($Context,[string]$JobId,[string]$Type){if($JobId -notmatch '^[a-f0-9]{32}$'){throw 'Invalid job ID.'};$job=Json (Join-Path $script:Paths.State ('job-'+$JobId+'.json'));if(!$job){throw 'Job not found.'};$path=Resolve-JobOutputPath $job $Type;if(!$path){throw 'Output is not available; the file may have been moved or deleted.'};$bytes=[IO.File]::ReadAllBytes($path);$Context.Response.StatusCode=200;$Context.Response.ContentType=$(if($Type -eq 'pdf'){'application/pdf'}else{'text/html; charset=utf-8'});$Context.Response.Headers['Content-Disposition']='inline; filename="'+[IO.Path]::GetFileName($path)+'"';$Context.Response.ContentLength64=$bytes.Length;$Context.Response.Headers['Cache-Control']='no-store';$Context.Response.OutputStream.Write($bytes,0,$bytes.Length);$Context.Response.Close()}
 function Initialize-AnalysisJobRecovery{$script:RunNext=$false;foreach($f in Get-ChildItem $script:Paths.State -Filter 'job-*.json' -File -ErrorAction SilentlyContinue){$j=Json $f.FullName;if(!$j){continue};$state=[string](Get-P $j 'state' '');$err=[string](Get-P $j 'errorSummary' '');if($state -in @('Starting','Running')){if(Test-WorkerAlive $j){$age=([DateTime]::UtcNow-(Get-Item -LiteralPath $f.FullName).LastWriteTimeUtc).TotalMinutes;if($age -lt $script:StartupStaleMinutes){continue};Stop-WorkerProcess ([int](Get-P $j 'workerPid' 0));Reset-InterruptedJob $j $f.FullName ('it had made no progress for '+[int]$age+' minutes when the server restarted')}else{Reset-InterruptedJob $j $f.FullName 'the server was restarted while the report was running'}}elseif($state -eq 'Failed' -and $err -like '*ConvertTo-NumberValue*'){$j.state='Prepared';$j.percent=0;$j.stage='Recovered after Draft 4.2 helper/queue repair';Set-P $j 'errorSummary' '';Save-JsonAtomic $f.FullName $j}}}
-if($RunJobId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-AnalysisJob $RunJobId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};if($RunOverviewId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-OverviewRun $RunOverviewId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};try{Initialize-AppFolders;Lock;Initialize-AppConfiguration;Test-ImportExcelModule;Initialize-AnalysisJobRecovery;Initialize-ProviderIndexes;Serve}catch{$detail=$_.Exception.Message+' | '+$_.ScriptStackTrace;try{Log 'APPLICATION' 'FAILED' $detail}catch{};Write-Error $detail;exit 1}finally{if($script:Listener){try{$script:Listener.Stop();$script:Listener.Close()}catch{}};if($script:Mutex){try{$script:Mutex.ReleaseMutex()}catch{};$script:Mutex.Dispose()};try{Log 'SERVER_STOP'}catch{}}
+if($RunJobId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-AnalysisJob $RunJobId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};if($RunOverviewId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-OverviewRun $RunOverviewId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};if($RunNewListId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-NewListRun $RunNewListId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};try{Initialize-AppFolders;Lock;Initialize-AppConfiguration;Test-ImportExcelModule;Initialize-AnalysisJobRecovery;Initialize-ProviderIndexes;Serve}catch{$detail=$_.Exception.Message+' | '+$_.ScriptStackTrace;try{Log 'APPLICATION' 'FAILED' $detail}catch{};Write-Error $detail;exit 1}finally{if($script:Listener){try{$script:Listener.Stop();$script:Listener.Close()}catch{}};if($script:Mutex){try{$script:Mutex.ReleaseMutex()}catch{};$script:Mutex.Dispose()};try{Log 'SERVER_STOP'}catch{}}
