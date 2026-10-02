@@ -1,10 +1,11 @@
 #requires -Version 5.1
-# ProviderAnalysisServer.ps1 - Draft 5.6 (ranked outreach lists, patient flags, Communication tab, unattended-run recovery, report server feeds, group Overview, new-patient lists)
+# ProviderAnalysisServer.ps1 - Draft 5.7 (ranked outreach lists, patient flags, Communication tab, unattended-run recovery, report server feeds, group Overview, new-patient lists, POC coding)
 # Adds provider indexes, guided cross-source mapping, fuzzy suggestions, NPI profiles, prepared job tracking, ranked outreach lists,
 # a flag mode (/flag?jobId=...) that excludes flagged patients from every list and panel on every later report for that provider,
 # and a Communication tab (/communication) that emails every provider in a risk pool a fresh report PDF via Outlook drafts.
+# The POC Coding tab (/poc-coding) analyzes point-of-care billing and coding for one department of a billing export and saves each run as an HTML report.
 [CmdletBinding()]
-param([int]$PreferredPort=8765,[switch]$NoBrowser,[switch]$SkipModuleInstallPrompt,[string]$RunJobId='',[string]$RunOverviewId='',[string]$RunNewListId='')
+param([int]$PreferredPort=8765,[switch]$NoBrowser,[switch]$SkipModuleInstallPrompt,[string]$RunJobId='',[string]$RunOverviewId='',[string]$RunNewListId='',[string]$RunPocId='')
 Set-StrictMode -Version 2.0
 $ErrorActionPreference='Stop'
 $script:Root=Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -26,6 +27,8 @@ $script:Paths=[ordered]@{
  Contacts=Join-Path $script:Root 'contacts'
  Overviews=Join-Path $script:Root 'overviews'
  NewLists=Join-Path $script:Root 'new-patient-lists'
+ Poc=Join-Path $script:Root 'poc-coding'
+ PocFiles=Join-Path (Join-Path $script:Root 'poc-coding') 'source-files'
 }
 $script:ConfigPath=Join-Path $script:Root 'config.json'
 $script:ManifestPath=Join-Path $script:Paths.State 'manifest.json'
@@ -218,7 +221,10 @@ function Request($Context){
  try{if($method -eq 'GET' -and $path -eq '/'){Send $Context 200 'text/html; charset=utf-8' (Page);return};if($method -eq 'GET' -and $path -eq '/providers'){Send $Context 200 'text/html; charset=utf-8' (ProviderPage);return};if($method -eq 'GET' -and $path -eq '/provider-index'){Send $Context 200 'text/html; charset=utf-8' (ProviderIndexPage);return};if($method -eq 'GET' -and $path -eq '/api/locations'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-KnownLocations ([string]$Context.Request.QueryString['riskPool'])) -Depth 3);return};if($method -eq 'GET' -and $path -eq '/api/provider-index'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-ProviderIndexModel) -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/profile-job'){$result=New-JobFromProfile ([string]$Context.Request.QueryString['npi']);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/health'){Send $Context 200 'application/json' '{"status":"ok","draft":4}';return};if($method -eq 'GET' -and $path -eq '/api/status'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Status) -Depth 6);return};if($method -eq 'GET' -and $path -eq '/api/provider-sources'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @((Json $script:ConfigPath).sources|Select-Object sourceKey,displayName,providerColumns) -Depth 5);return};if($method -eq 'GET' -and $path -eq '/api/providers'){$sourceKey=[string]$Context.Request.QueryString['sourceKey'];$sw=[Diagnostics.Stopwatch]::StartNew();$result=@(Get-ProviderIndexForPool $sourceKey ([string]$Context.Request.QueryString['riskPool']));Log 'PROVIDER_LIST' 'OK' ($result.Count.ToString()+' names in '+[Math]::Round($sw.Elapsed.TotalSeconds,2)+'s') $sourceKey;Send $Context 200 'application/json' (ConvertTo-Json -InputObject $result -Depth 6);return};if($method -eq 'GET' -and $path -eq '/api/suggest'){$names=@($Context.Request.QueryString.GetValues('name')|Where-Object{$_});$result=@(Get-ProviderSuggestions ([string]$Context.Request.QueryString['sourceKey']) $names ([string]$Context.Request.QueryString['riskPool']));Send $Context 200 'application/json' (ConvertTo-Json -InputObject $result -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/reindex'){$out=@();foreach($s in (Json $script:ConfigPath).sources){if(!(Test-Path -LiteralPath (Join-Path $script:Paths.CanonicalCurrent $s.canonicalFileName))){continue};$r=Update-ProviderIndexAfterImport ([string]$s.sourceKey) -Force;$out+=[ordered]@{sourceKey=$s.sourceKey;displayName=$s.displayName;count=$r.count;seconds=$r.seconds;error=$r.error}};Send $Context 200 'application/json' (ConvertTo-Json -InputObject @($out) -Depth 5);return};if($method -eq 'GET' -and $path -eq '/api/profiles'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-ProviderProfiles) -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/profile'){$result=Save-ProviderProfile (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/html'){Send-JobOutput $Context ([string]$Context.Request.QueryString['jobId']) 'html';return};if($method -eq 'GET' -and $path -eq '/pdf'){Send-JobOutput $Context ([string]$Context.Request.QueryString['jobId']) 'pdf';return};if($method -eq 'GET' -and $path -eq '/flag'){Send $Context 200 'text/html; charset=utf-8' (ConvertTo-AnalysisHtml (Get-FlagReportModel ([string]$Context.Request.QueryString['jobId'])) -Interactive);return};if($method -eq 'GET' -and $path -eq '/communication'){Send $Context 200 'text/html; charset=utf-8' (CommunicationPage);return};if($method -eq 'GET' -and $path -eq '/api/communication'){Send $Context 200 'application/json' ((Get-CommunicationModel)|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/contact-list'){$result=Select-ContactList ([string]$Context.Request.QueryString['path']);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/contact-list-upload'){$result=Receive-ContactListUpload $Context;Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return};if($method -eq 'GET' -and $path -eq '/api/recipients'){Send $Context 200 'application/json' ((Get-CommunicationRecipients ([string]$Context.Request.QueryString['riskPool']))|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/campaign'){$result=New-Campaign (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/campaign'){Send $Context 200 'application/json' ((Get-CampaignModel ([string]$Context.Request.QueryString['id']))|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/campaigns'){Send $Context 200 'application/json' ([ordered]@{queue=(Get-QueueStatus);campaigns=@(Get-CampaignList)}|ConvertTo-Json -Depth 9);return};if($method -eq 'GET' -and $path -eq '/api/queue'){Send $Context 200 'application/json' ((Get-QueueStatus)|ConvertTo-Json -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/job-reset'){$result=Reset-RunningJob ([string]$Context.Request.QueryString['jobId']);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/campaign-cancel'){$result=Stop-Campaign ([string]$Context.Request.QueryString['id']);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/campaign-drafts'){$result=Invoke-CampaignDrafts ([string]$Context.Request.QueryString['id']);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/campaign-resume'){$result=Resume-Campaign ([string]$Context.Request.QueryString['id']);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/overview'){Send $Context 200 'text/html; charset=utf-8' (OverviewPage);return};if($method -eq 'GET' -and $path -eq '/api/overview'){Send $Context 200 'application/json' ((Get-OverviewPageModel)|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/overview'){$result=New-OverviewRun (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/overview-run'){Send $Context 200 'application/json' ((Get-OverviewModel ([string]$Context.Request.QueryString['id']))|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/overview.xlsx'){Send-OverviewFile $Context ([string]$Context.Request.QueryString['id']) 'xlsx';return};if($method -eq 'GET' -and $path -eq '/overview.pdf'){Send-OverviewFile $Context ([string]$Context.Request.QueryString['id']) 'pdf';return}
   if($method -eq 'GET' -and $path -eq '/new-patients'){Send $Context 200 'text/html; charset=utf-8' (NewPatientsPage);return};if($method -eq 'GET' -and $path -eq '/api/new-patients'){Send $Context 200 'application/json' ((Get-NewListPageModel)|ConvertTo-Json -Depth 8);return}
   if($method -eq 'POST' -and $path -eq '/api/new-patients'){$result=New-NewListRun (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/new-patients-run'){Send $Context 200 'application/json' ((Get-NewListModel ([string]$Context.Request.QueryString['id']))|ConvertTo-Json -Depth 8);return}
-  if($method -eq 'GET' -and $path -eq '/new-patients.file'){Send-NewListFile $Context ([string]$Context.Request.QueryString['id']) ([string]$Context.Request.QueryString['n']);return};if($method -eq 'GET' -and $path -eq '/api/sync'){Send $Context 200 'application/json' ((Get-SyncModel)|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/sync-feed'){$b=Read-BodyJson $Context;$result=Register-ReportFeed ([string](Get-P $b 'text' ''));Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/sync-feed-remove'){$result=Remove-ReportFeed ([string]$Context.Request.QueryString['sourceKey']);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/sync-now'){$result=Invoke-FeedSync @([string]$Context.Request.QueryString['sourceKey']);Send $Context 200 'application/json' (ConvertTo-Json -InputObject @($result) -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/sync-schedule'){$result=Set-SyncSchedule (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/flags'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-ProviderFlags ([string]$Context.Request.QueryString['npi'])) -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/flag'){$result=Save-FlagFromRequest (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/run-next'){$script:RunNext=$true;Send $Context 202 'application/json' '{"status":"scheduled"}';return};if($method -eq 'GET' -and $path -eq '/api/jobs'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-Jobs) -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/job'){$result=New-PreparedJob (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/stage'){$result=Receive-Upload $Context;Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/confirm'){$result=Publish-StagedFile ([string]$Context.Request.QueryString['token']);$index=Update-ProviderIndexAfterImport ([string]$result.sourceKey) -Force;$result['providerCount']=$index.count;$result['indexSeconds']=$index.seconds;$result['indexError']=$index.error;Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/stop'){$script:Stop=$true;Send $Context 202 'application/json' '{"status":"stopping"}';return};Send $Context 404 'application/json' '{"error":"not found"}'}catch{$msg=Safe $_.Exception.Message;Log 'HTTP_REQUEST' 'FAILED' $msg;try{Send $Context 400 'application/json' (([ordered]@{error=$msg}|ConvertTo-Json -Compress))}catch{}}
+  if($method -eq 'GET' -and $path -eq '/new-patients.file'){Send-NewListFile $Context ([string]$Context.Request.QueryString['id']) ([string]$Context.Request.QueryString['n']);return};
+  if($method -eq 'GET' -and $path -eq '/poc-coding'){Send $Context 200 'text/html; charset=utf-8' (PocCodingPage);return};if($method -eq 'GET' -and $path -eq '/api/poc-coding'){Send $Context 200 'application/json' ((Get-PocPageModel)|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/poc-coding-upload'){$result=Receive-PocUpload $Context;Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/poc-coding-file'){Send $Context 200 'application/json' ((Get-PocFileModel ([string]$Context.Request.QueryString['token']))|ConvertTo-Json -Depth 8);return}
+  if($method -eq 'POST' -and $path -eq '/api/poc-coding'){$result=New-PocRun (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/poc-coding-run'){Send $Context 200 'application/json' ((Get-PocRunModel ([string]$Context.Request.QueryString['id']))|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/poc-coding.report'){Send-PocReport $Context ([string]$Context.Request.QueryString['id']) ([string]$Context.Request.QueryString['download'] -eq '1');return}
+ if($method -eq 'GET' -and $path -eq '/api/sync'){Send $Context 200 'application/json' ((Get-SyncModel)|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/sync-feed'){$b=Read-BodyJson $Context;$result=Register-ReportFeed ([string](Get-P $b 'text' ''));Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/sync-feed-remove'){$result=Remove-ReportFeed ([string]$Context.Request.QueryString['sourceKey']);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/sync-now'){$result=Invoke-FeedSync @([string]$Context.Request.QueryString['sourceKey']);Send $Context 200 'application/json' (ConvertTo-Json -InputObject @($result) -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/sync-schedule'){$result=Set-SyncSchedule (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/flags'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-ProviderFlags ([string]$Context.Request.QueryString['npi'])) -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/flag'){$result=Save-FlagFromRequest (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/run-next'){$script:RunNext=$true;Send $Context 202 'application/json' '{"status":"scheduled"}';return};if($method -eq 'GET' -and $path -eq '/api/jobs'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-Jobs) -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/job'){$result=New-PreparedJob (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/stage'){$result=Receive-Upload $Context;Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/confirm'){$result=Publish-StagedFile ([string]$Context.Request.QueryString['token']);$index=Update-ProviderIndexAfterImport ([string]$result.sourceKey) -Force;$result['providerCount']=$index.count;$result['indexSeconds']=$index.seconds;$result['indexError']=$index.error;Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/stop'){$script:Stop=$true;Send $Context 202 'application/json' '{"status":"stopping"}';return};Send $Context 404 'application/json' '{"error":"not found"}'}catch{$msg=Safe $_.Exception.Message;Log 'HTTP_REQUEST' 'FAILED' $msg;try{Send $Context 400 'application/json' (([ordered]@{error=$msg}|ConvertTo-Json -Compress))}catch{}}
 }
 
 
@@ -382,7 +388,7 @@ function New-PreparedJob($Body){if($null -eq $Body.aliases){throw 'Confirmed ali
 function Get-Jobs{return @(Get-ChildItem $script:Paths.State -Filter 'job-*.json' -File -ErrorAction SilentlyContinue|ForEach-Object{Json $_.FullName}|Sort-Object queuedUtc -Descending)}
 $script:TabCss='.tabs{display:flex;gap:4px;background:#17365d;padding:0 22px}.tabs a{color:#cfe0f5;text-decoration:none;padding:10px 18px;border-radius:8px 8px 0 0;font-weight:600}.tabs a:hover{background:#274b7a;color:#fff}.tabs a.active{background:#f4f7fb;color:#17365d}'
 function Get-NavHtml([string]$Active){
- $tabs=@(@('sources','/','Sources'),@('wizard','/providers','Provider Wizard'),@('index','/provider-index','Provider Index'),@('communication','/communication','Communication'),@('overview','/overview','Overview'),@('newpatients','/new-patients','New Patients'))
+ $tabs=@(@('sources','/','Sources'),@('wizard','/providers','Provider Wizard'),@('index','/provider-index','Provider Index'),@('communication','/communication','Communication'),@('overview','/overview','Overview'),@('newpatients','/new-patients','New Patients'),@('poc','/poc-coding','POC Coding'))
  $links=foreach($t in $tabs){'<a href="'+$t[1]+'"'+$(if($t[0] -eq $Active){' class="active"'}else{''})+'>'+$t[2]+'</a>'}
  return '<nav class="tabs">'+($links -join '')+'</nav>'
 }
@@ -1830,7 +1836,7 @@ function Get-OverviewModel([string]$Id,[switch]$Summary){
 }
 function Get-OverviewPageModel{
  $all=@(Get-Overviews);$history=@(foreach($o in $all){if([string](Get-P $o 'state' '') -in @('Completed','Failed')){Get-OverviewModel ([string]$o.overviewId) -Summary}})
- return [ordered]@{providers=@(Get-OverviewProviders);latest=$(if($all.Count){Get-OverviewModel ([string]$all[0].overviewId)}else{$null});history=$history}
+ return [ordered]@{providers=@(Get-OverviewProviders);poc=@(Get-PocLatestByLocation);latest=$(if($all.Count){Get-OverviewModel ([string]$all[0].overviewId)}else{$null});history=$history}
 }
 function New-SelectionSummary([object[]]$All,[hashtable]$Chosen,[string]$Field){
  # Per risk pool or location: how many of its saved profiles were picked (only groups with at least one pick).
@@ -1948,8 +1954,12 @@ function pickerSync(){
  el('picker').querySelectorAll('input[data-npi]').forEach(cb=>{cb.checked=sel.has(cb.dataset.npi)});
  el('picker').querySelectorAll('input[data-field]').forEach(cb=>{const m=members(cb.dataset.field,cb.dataset.name);const n=m.filter(x=>sel.has(x)).length;cb.checked=n>0&&n===m.length;cb.indeterminate=n>0&&n<m.length});
  el('count').textContent=sel.size?sel.size+' of '+providers.length+' provider'+(providers.length===1?'':'s')+' selected':'No providers selected';
+ pocLinksSync();
 }
 el('picker').addEventListener('change',e=>{const cb=e.target;if(cb.dataset.npi){if(cb.checked)sel.add(cb.dataset.npi);else sel.delete(cb.dataset.npi)}else if(cb.dataset.field){members(cb.dataset.field,cb.dataset.name).forEach(n=>{if(cb.checked)sel.add(n);else sel.delete(n)})}syncChecks()});
+let pocReports=[];
+function presetLocation(){const q=new URLSearchParams(window.location.search).get('location');if(!q)return false;const m=providers.filter(p=>p.location.toLowerCase()===q.toLowerCase());if(!m.length)return false;sel.clear();m.forEach(p=>sel.add(p.npi));return true}
+function pocLinksSync(){const box=el('pocLinks');if(!box)return;const locs=new Set(providers.filter(p=>sel.has(p.npi)).map(p=>p.location.toLowerCase()));const list=pocReports.filter(r=>locs.has(r.location.toLowerCase()));box.style.display=list.length?'':'none';box.innerHTML=list.length?'POC coding report'+(list.length===1?'':'s')+' for the selected location'+(list.length===1?'':'s')+': '+list.map(r=>'<a target="_blank" href="'+esc(r.url)+'" title="'+esc(r.department)+'">'+esc(r.location)+'</a> <span class="muted">('+esc(when(r.completedUtc))+')</span>').join(' &middot; '):''}
 el('all').onclick=()=>{providers.forEach(p=>sel.add(p.npi));syncChecks()};
 el('none').onclick=()=>{sel.clear();syncChecks()};
 '@
@@ -1971,6 +1981,7 @@ __OVCSS__
 <p class="muted">Tick a risk pool or location to select all of its providers, or tick providers individually. Locations and risk pools come from each saved provider profile.</p>
 <div id="picker"><span class="muted">Loading profiles...</span></div>
 <div class="row"><button class="alt" id="all">Select all</button><button class="alt" id="none">Clear</button><button class="go" id="build" disabled>Build overview</button><span id="count" class="muted"></span></div>
+<p id="pocLinks" style="display:none"></p>
 <p class="muted">Counts are computed from the current source files in one pass (no reports or PDFs are generated per provider), with flagged patients excluded exactly as on each dashboard.</p>
 </section>
 <section class="card"><h2>Overview</h2><div id="result"><span class="muted">Loading...</span></div></section>
@@ -2005,7 +2016,7 @@ el('history').addEventListener('click',async e=>{const a=e.target.closest('a[dat
 let pollErrors=0;
 function startPoll(id){if(timer)clearInterval(timer);pollErrors=0;timer=setInterval(async()=>{try{const o=await api('/api/overview-run?id='+encodeURIComponent(id));pollErrors=0;showResult(o);if(!busy()){clearInterval(timer);timer=null;loadHistory()}}catch(e){if(++pollErrors<5)return;clearInterval(timer);timer=null;el('result').innerHTML='<p class="error">'+esc(e.message)+'</p>'}},1500)}
 el('build').onclick=async()=>{if(!sel.size||busy())return;el('build').disabled=true;try{const o=await api('/api/overview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({npis:[...sel]})});showResult(o);if(busy())startPoll(o.overviewId)}catch(e){el('result').innerHTML='<p class="error">'+esc(e.message)+'</p>';syncChecks()}};
-(async()=>{try{const m=await api('/api/overview');providers=m.providers;const last=m.latest;if(last)last.npis.forEach(n=>{if(providers.some(p=>p.npi===n))sel.add(n)});renderPicker();showResult(last);history=m.history;renderHistory();if(busy())startPoll(last.overviewId)}catch(e){el('picker').innerHTML='<p class="error">'+esc(e.message)+'</p>'}})();
+(async()=>{try{const m=await api('/api/overview');providers=m.providers;pocReports=m.poc||[];const last=m.latest;if(!presetLocation()&&last)last.npis.forEach(n=>{if(providers.some(p=>p.npi===n))sel.add(n)});renderPicker();showResult(last);history=m.history;renderHistory();if(busy())startPoll(last.overviewId)}catch(e){el('picker').innerHTML='<p class="error">'+esc(e.message)+'</p>'}})();
 </script></body></html>
 '@
  return $html.Replace('__NAV__',(Get-NavHtml 'overview')).Replace('__TABCSS__',$script:TabCss).Replace('__OVCSS__',$script:OverviewCss).Replace('__RUNCSS__',$script:RunPageCss).Replace('__PICKERJS__',$script:PickerJs)
@@ -2212,7 +2223,7 @@ function Get-NewListModel([string]$Id,[switch]$Summary){
 }
 function Get-NewListPageModel{
  $all=@(Get-NewLists);$history=@(foreach($o in $all){if([string](Get-P $o 'state' '') -in @('Completed','Failed')){Get-NewListModel ([string]$o.listId) -Summary}})
- return [ordered]@{providers=@(Get-OverviewProviders);months=$script:NewListMonths;latest=$(if($all.Count){Get-NewListModel ([string]$all[0].listId)}else{$null});history=$history}
+ return [ordered]@{providers=@(Get-OverviewProviders);poc=@(Get-PocLatestByLocation);months=$script:NewListMonths;latest=$(if($all.Count){Get-NewListModel ([string]$all[0].listId)}else{$null});history=$history}
 }
 function New-NewListRun($Body){
  $req=Get-RequestedProviders $Body
@@ -2262,6 +2273,7 @@ details.pp{margin:6px 0 10px}details.pp summary{cursor:pointer;color:#1769aa}tab
 <div class="row"><b>Formats</b><label><input type="checkbox" name="fmt" value="pdf"> PDF</label><label><input type="checkbox" name="fmt" value="html"> HTML</label><label><input type="checkbox" name="fmt" value="xlsx"> Excel (.xlsx)</label><label><input type="checkbox" name="fmt" value="csv"> CSV</label></div>
 </div>
 <div class="row"><button class="alt" id="all">Select all</button><button class="alt" id="none">Clear</button><button class="go" id="build" disabled>Build lists</button><span id="count" class="muted"></span></div>
+<p id="pocLinks" style="display:none"></p>
 <p class="muted">A patient is listed when Export marks them New Patient and neither Export's "Last QEM Visit Date with any PCP in assigned TIN" nor a Serial Scheduling PCP visit date falls within the last __MONTHS__ months. Flagged patients are excluded, as on each dashboard. Per-provider files also come together in one zip.</p>
 </section>
 <section class="card"><h2>Lists</h2><div id="result"><span class="muted">Loading...</span></div></section>
@@ -2311,10 +2323,446 @@ el('history').addEventListener('click',async e=>{const a=e.target.closest('a[dat
 let pollErrors=0;
 function startPoll(id){if(timer)clearInterval(timer);pollErrors=0;timer=setInterval(async()=>{try{const o=await api('/api/new-patients-run?id='+encodeURIComponent(id));pollErrors=0;showResult(o);if(!busy()){clearInterval(timer);timer=null;loadHistory()}}catch(e){if(++pollErrors<5)return;clearInterval(timer);timer=null;el('result').innerHTML='<p class="error">'+esc(e.message)+'</p>'}},1500)}
 el('build').onclick=async()=>{if(el('build').disabled||busy())return;el('build').disabled=true;try{const o=await api('/api/new-patients',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({npis:[...sel],grouping:grouping(),formats:formats()})});showResult(o);if(busy())startPoll(o.listId)}catch(e){el('result').innerHTML='<p class="error">'+esc(e.message)+'</p>';syncChecks()}};
-(async()=>{try{const m=await api('/api/new-patients');providers=m.providers;const last=m.latest;if(last)restore(last);else setOutput('combined',['pdf','xlsx']);renderPicker();showResult(last);history=m.history;renderHistory();if(busy())startPoll(last.listId)}catch(e){el('picker').innerHTML='<p class="error">'+esc(e.message)+'</p>'}})();
+(async()=>{try{const m=await api('/api/new-patients');providers=m.providers;pocReports=m.poc||[];const last=m.latest;if(last)restore(last);else setOutput('combined',['pdf','xlsx']);presetLocation();renderPicker();showResult(last);history=m.history;renderHistory();if(busy())startPoll(last.listId)}catch(e){el('picker').innerHTML='<p class="error">'+esc(e.message)+'</p>'}})();
 </script></body></html>
 '@
  return $html.Replace('__NAV__',(Get-NavHtml 'newpatients')).Replace('__TABCSS__',$script:TabCss).Replace('__OVCSS__',$script:OverviewCss).Replace('__RUNCSS__',$script:RunPageCss).Replace('__PICKERJS__',$script:PickerJs).Replace('__MONTHS__',[string]$script:NewListMonths)
+}
+# --- Draft 5.7: POC Coding tab - point-of-care billing and coding behavior for one department of a billing export, each run saved as an HTML report ---
+# The billing export is chosen in the browser and kept under poc-coding\source-files (the newest few), its Department column fills the target
+# department list, and each department can be associated with a Provider Analysis location (remembered in state\poc-departments.json).
+$script:PocKeep=200;$script:PocFileKeep=10;$script:PocInline=$false
+$script:PocRequired=@('Service Prov','Service Dt','Procedure','Department','Tx ID','Diagnosis Code','Encounter Num','Work RVU','Procedure Code','Proc Mod')
+$script:PocEmPattern='^(9920[2-5]|9921[1-5])$'
+$script:PocPrevPattern='^(9938\d|9939\d)$'
+$script:PocAwvPattern='^(G0402|G0438|G0439)$'
+$script:PocFocusPattern='^(9920[2-5]|9921[1-5]|9938\d|9939\d|G0402|G0438|G0439|G2211|G0447|9940[1-4]|99406|99407|G0446|G0537|G0538|G0444|96127)$'
+$script:PocStopWords=@('CRH','PC','PRIMARY','CARE','MEDICAL','MEDICINE','FAMILY','INTERNAL','PEDIATRICS','OF','THE','AT','AND','OFFICE','CLINIC','CENTER','CTR','GROUP','PRACTICE','DEPT','DEPARTMENT','HEALTH')
+$script:PocMapPath=Join-Path $script:Paths.State 'poc-departments.json'
+function Get-PocPath([string]$Id){if($Id -notmatch '^[a-f0-9]{32}$'){throw 'Invalid analysis ID.'};return (Join-Path $script:Paths.State ('pocrun-'+$Id+'.json'))}
+function Get-PocFilePath([string]$Token){if($Token -notmatch '^[a-f0-9]{32}$'){throw 'Invalid file token.'};return (Join-Path $script:Paths.State ('pocfile-'+$Token+'.json'))}
+function Get-PocRuns{return @(Get-ChildItem $script:Paths.State -Filter 'pocrun-*.json' -File -ErrorAction SilentlyContinue|ForEach-Object{Json $_.FullName}|Where-Object{$null -ne $_}|Sort-Object -Property @{Expression={ConvertTo-IsoText (Get-P $_ 'requestedUtc' '')}} -Descending)}
+function Get-PocFiles{return @(Get-ChildItem $script:Paths.State -Filter 'pocfile-*.json' -File -ErrorAction SilentlyContinue|ForEach-Object{Json $_.FullName}|Where-Object{$null -ne $_}|Sort-Object -Property @{Expression={ConvertTo-IsoText (Get-P $_ 'loadedUtc' '')}} -Descending)}
+function Get-PocRate([double]$N,[double]$D){if($D -eq 0){return $null};return ($N/$D)}
+function Format-PocPct($Value){if($null -eq $Value){return ''};return ([double]$Value*100).ToString('0.0',[Globalization.CultureInfo]::InvariantCulture)+'%'}
+function Format-PocCount($Value){return ([double]$Value).ToString('#,0',[Globalization.CultureInfo]::InvariantCulture)}
+function Get-ColumnLetter([int]$Column){$s='';while($Column -gt 0){$m=($Column-1)%26;$s=[string][char](65+$m)+$s;$Column=[int][Math]::Floor(($Column-$m)/26)};return $s}
+function Get-PocDepartmentLabel([string]$Department){$t=($Department -replace '\s*\[[^\]]*\]\s*$','').Trim();if(!$t){$t=$Department};return $t}
+function Find-PocHeader($Worksheet){
+ # The row (within the first 25) that carries every required column, with a header -> column map; otherwise the closest row's missing names.
+ if($null -eq $Worksheet.Dimension){return $null}
+ $maxCol=[Math]::Min(200,$Worksheet.Dimension.End.Column);$limit=[Math]::Min(25,$Worksheet.Dimension.End.Row);$best=$null
+ for($row=1;$row -le $limit;$row++){
+  $map=@{};for($col=1;$col -le $maxCol;$col++){$t=([string]$Worksheet.Cells[$row,$col].Text).Trim();if($t -and !$map.ContainsKey($t)){$map[$t]=$col}}
+  if($map.Count -eq 0){continue}
+  $missing=@($script:PocRequired|Where-Object{!$map.ContainsKey($_)})
+  if($missing.Count -eq 0){return [ordered]@{row=$row;map=$map;missing=@()}}
+  if($null -eq $best -or $missing.Count -lt $best.missing.Count){$best=[ordered]@{row=$row;map=$null;missing=$missing}}
+ }
+ return $best
+}
+function Read-PocWorkbook([string]$Path,[switch]$DepartmentsOnly){
+ # The first worksheet with every required header. DepartmentsOnly reads just the Department column (for the dropdown); otherwise every
+ # required column is read in one bulk range read each, as trimmed text (index 0 = first data row).
+ $package=$null;$closest=$null
+ try{
+  $package=Open-ExcelPackage -Path $Path -ErrorAction Stop
+  foreach($ws in $package.Workbook.Worksheets){
+   $h=Find-PocHeader $ws;if($null -eq $h){continue}
+   if($null -eq $h.map){if($null -eq $closest -or $h.missing.Count -lt $closest.missing.Count){$closest=[ordered]@{sheet=$ws.Name;missing=$h.missing}};continue}
+   $first=$h.row+1;$last=$ws.Dimension.End.Row;$cols=@{}
+   $want=@($script:PocRequired);if($DepartmentsOnly){$want=@('Department')}
+   foreach($name in $want){if($last -ge $first){$cols[$name]=Get-ColumnText $ws $h.map[$name] $first $last}else{$cols[$name]=New-Object string[] 0}}
+   return [ordered]@{sheet=$ws.Name;headerRow=$h.row;rowCount=[Math]::Max(0,$last-$h.row);departmentColumn=(Get-ColumnLetter $h.map['Department']);columns=$cols}
+  }
+ }finally{if($package){Close-ExcelPackage $package -NoSave}}
+ if($closest){throw ('This does not look like the billing export: sheet "'+$closest.sheet+'" is missing '+(@($closest.missing|ForEach-Object{'"'+$_+'"'}) -join ', ')+'.')}
+ throw ('This does not look like the billing export: no sheet has the columns '+(@($script:PocRequired|ForEach-Object{'"'+$_+'"'}) -join ', ')+'.')
+}
+function Get-PocDepartmentCounts([string[]]$Values){
+ $c=@{};foreach($v in $Values){if(!$v){continue};if($c.ContainsKey($v)){$c[$v]++}else{$c[$v]=1}}
+ return @($c.Keys|Sort-Object|ForEach-Object{[ordered]@{name=$_;rows=$c[$_]}})
+}
+function Get-PocDepartmentMap{
+ $m=@{};$j=Json $script:PocMapPath
+ if($j){$d=Get-P $j 'departments' $null;if($d){foreach($p in $d.PSObject.Properties){$m[$p.Name]=[string]$p.Value}}}
+ return $m
+}
+function Set-PocDepartmentLocation([string]$Department,[string]$Location){
+ # '' is kept too: it records that the department was deliberately left unassociated, so no location is suggested for it again.
+ $m=Get-PocDepartmentMap;$m[$Department]=$Location;$o=[ordered]@{};foreach($k in @($m.Keys|Sort-Object)){$o[$k]=$m[$k]}
+ Save-JsonAtomic $script:PocMapPath ([ordered]@{pocMapVersion=1;updatedUtc=[DateTime]::UtcNow.ToString('o');departments=$o})
+}
+function Get-PocLocations{
+ # Every location Provider Analysis knows: saved provider profiles (with how many providers each has) and the per-pool location store.
+ $names=@{};$count=@{}
+ foreach($p in @(Get-OverviewProviders)){$l=[string]$p.location;if($l -eq '(No location)'){continue};if(!$names.ContainsKey($l)){$names[$l]=$l;$count[$l]=0};$count[$l]++}
+ $store=Json (Join-Path $script:Paths.State 'locations.json')
+ if($store){$pools=Get-P $store 'pools' $null;if($pools){foreach($pp in $pools.PSObject.Properties){foreach($v in @($pp.Value)){$t=([string]$v).Trim();if($t -and !$names.ContainsKey($t)){$names[$t]=$t;$count[$t]=0}}}}}
+ return @($names.Keys|Sort-Object|ForEach-Object{[ordered]@{name=$names[$_];providers=$count[$_]}})
+}
+function Get-PocTokens([string]$Text){return @((($Text -replace '\[[^\]]*\]',' ').ToUpperInvariant() -split '[^A-Z0-9]+')|Where-Object{$_ -and $script:PocStopWords -notcontains $_})}
+function Get-PocSuggestedLocation([string]$Department,[object[]]$Locations){
+ # Suggested only when every distinctive word of a location's name appears in the department name and no other location matches as well.
+ $dt=@(Get-PocTokens $Department);if($dt.Count -eq 0){return ''}
+ $best='';$bestN=0;$tie=$false
+ foreach($l in @($Locations)){
+  $lt=@(Get-PocTokens ([string]$l.name)|Select-Object -Unique);if($lt.Count -eq 0){continue}
+  $all=$true;foreach($w in $lt){if($dt -notcontains $w){$all=$false;break}};if(!$all){continue}
+  if($lt.Count -gt $bestN){$best=[string]$l.name;$bestN=$lt.Count;$tie=$false}elseif($lt.Count -eq $bestN){$tie=$true}
+ }
+ if($tie){return ''};return $best
+}
+function Remove-OldPocFiles{
+ # Keeps the newest few loaded exports (and any a running analysis is reading); older ones are deleted with their records.
+ $busy=@{};foreach($r in @(Get-PocRuns)){if([string](Get-P $r 'state' '') -in @('Starting','Running')){$busy[[string](Get-P $r 'fileToken' '')]=$true}}
+ foreach($f in @(Get-PocFiles|Select-Object -Skip $script:PocFileKeep)){
+  $t=[string](Get-P $f 'token' '');if($t -notmatch '^[a-f0-9]{32}$' -or $busy.ContainsKey($t)){continue}
+  $p=[string](Get-P $f 'path' '');if($p -and [IO.Path]::GetFullPath($p).StartsWith([IO.Path]::GetFullPath($script:Paths.PocFiles),[StringComparison]::OrdinalIgnoreCase)){Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue}
+  Remove-Item -LiteralPath (Get-PocFilePath $t) -Force -ErrorAction SilentlyContinue
+ }
+}
+function Receive-PocUpload($Context){
+ # Saves the chosen export, checks its columns and lists its departments. A file already loaded (same SHA-256) is reused.
+ $name=[Net.WebUtility]::UrlDecode([string]$Context.Request.Headers['X-File-Name']);if([string]::IsNullOrWhiteSpace($name)){throw 'Missing file name.'}
+ $name=[IO.Path]::GetFileName($name);if([IO.Path]::GetExtension($name) -ine '.xlsx'){throw 'Only .xlsx files are accepted.'}
+ $token=[Guid]::NewGuid().ToString('N');$path=Join-Path $script:Paths.PocFiles ($token+'.xlsx')
+ $stream=[IO.File]::Create($path);try{$buffer=New-Object byte[] 1048576;$total=0;while(($read=$Context.Request.InputStream.Read($buffer,0,$buffer.Length)) -gt 0){$total+=$read;if($total -gt 2147483648){throw 'Upload exceeds 2 GB limit.'};$stream.Write($buffer,0,$read)}}finally{$stream.Dispose()}
+ try{
+  $hash=Get-FileHash256 $path
+  foreach($f in @(Get-PocFiles)){
+   if([string](Get-P $f 'sha256' '') -ne $hash -or !(Test-Path -LiteralPath ([string](Get-P $f 'path' '')))){continue}
+   Remove-Item -LiteralPath $path -Force;Set-P $f 'originalName' $name;Set-P $f 'loadedUtc' ([DateTime]::UtcNow.ToString('o'));Save-JsonAtomic (Get-PocFilePath ([string]$f.token)) $f
+   Log 'POC_FILE_LOADED' 'OK' ($name+' (already loaded)');return (Get-PocFileModel ([string]$f.token))
+  }
+  $wb=Read-PocWorkbook $path -DepartmentsOnly
+  $depts=@(Get-PocDepartmentCounts $wb.columns['Department']);if($depts.Count -eq 0){throw ('The Department column (column '+$wb.departmentColumn+') has no values.')}
+  $rec=[ordered]@{pocFileVersion=1;token=$token;originalName=$name;path=$path;sha256=$hash;byteLength=(Get-Item -LiteralPath $path).Length;loadedUtc=[DateTime]::UtcNow.ToString('o');sheet=$wb.sheet;headerRow=$wb.headerRow;rowCount=$wb.rowCount;departmentColumn=$wb.departmentColumn;departments=$depts}
+  Save-JsonAtomic (Get-PocFilePath $token) $rec
+ }catch{Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue;Log 'POC_FILE' 'FAILED' $_.Exception.Message;throw}
+ Log 'POC_FILE_LOADED' 'OK' ($name+'; '+$rec.rowCount+' rows, '+$depts.Count+' departments')
+ Remove-OldPocFiles
+ return (Get-PocFileModel $token)
+}
+function Get-PocFileModel([string]$Token){
+ $f=Json (Get-PocFilePath $Token);if(!$f){throw 'That file is no longer loaded; choose it again.'}
+ if(!(Test-Path -LiteralPath ([string](Get-P $f 'path' '')))){throw 'That file was removed from the poc-coding folder; choose it again.'}
+ $map=Get-PocDepartmentMap;$locs=@(Get-PocLocations)
+ $last='';foreach($r in @(Get-PocRuns)){if([string](Get-P $r 'fileToken' '') -eq $Token){$last=[string](Get-P $r 'department' '');break}}
+ $depts=@(foreach($d in @(Get-P $f 'departments' @())){
+  $n=[string]$d.name;$mapped=$map.ContainsKey($n);$loc='';if($mapped){$loc=[string]$map[$n]}else{$loc=Get-PocSuggestedLocation $n $locs}
+  [ordered]@{name=$n;rows=[int]$d.rows;location=$loc;mapped=$mapped;suggested=(!$mapped -and [bool]$loc)}
+ })
+ return [ordered]@{token=[string]$f.token;originalName=[string]$f.originalName;loadedUtc=(ConvertTo-IsoText (Get-P $f 'loadedUtc' ''));sheet=[string]$f.sheet;rowCount=[int]$f.rowCount;departmentColumn=[string](Get-P $f 'departmentColumn' 'E');departments=$depts;lastDepartment=$last}
+}
+function Invoke-PocAnalysis($Columns,[string]$Department,$Run=$null,[string]$Path=''){
+ # Ported from POC-Coding-Server.ps1. Per encounter in the department: within each procedure code + modifier, the latest transaction
+ # (highest Tx ID) with a non-zero wRVU is the active line, or the latest line of a tracked code when none is non-zero; more than one
+ # E/M (or preventive) line keeps only the latest. Diagnosis and procedure text from every row of the encounter feeds the condition proxies.
+ $inv=[Globalization.CultureInfo]::InvariantCulture;$ns=[Globalization.NumberStyles]::Any
+ $dept=$Columns['Department'];$enc=$Columns['Encounter Num'];$code=$Columns['Procedure Code'];$mod=$Columns['Proc Mod'];$txt=$Columns['Tx ID'];$rvt=$Columns['Work RVU']
+ $dx=$Columns['Diagnosis Code'];$proc=$Columns['Procedure'];$prov=$Columns['Service Prov'];$sdt=$Columns['Service Dt'];$n=$dept.Length
+ $diag=@{};for($i=0;$i -lt $n;$i++){$e=$enc[$i];if(!$e){continue};$t=' '+$dx[$i]+' '+$proc[$i];if($diag.ContainsKey($e)){[void]$diag[$e].Append($t)}else{$diag[$e]=[Text.StringBuilder]::new($t)}}
+ $byEnc=@{};$order=[Collections.Generic.List[string]]::new();$scope=0;$noEnc=0;$tx=New-Object double[] $n;$rvu=New-Object double[] $n;$cd=New-Object string[] $n
+ for($i=0;$i -lt $n;$i++){
+  if($dept[$i] -ne $Department){continue};$scope++;$e=$enc[$i];if(!$e){$noEnc++;continue}
+  $v=0.0;if([double]::TryParse($txt[$i],$ns,$inv,[ref]$v)){$tx[$i]=$v};$v=0.0;if([double]::TryParse($rvt[$i],$ns,$inv,[ref]$v)){$rvu[$i]=$v};$cd[$i]=$code[$i].ToUpperInvariant()
+  if(!$byEnc.ContainsKey($e)){$byEnc[$e]=[Collections.Generic.List[int]]::new();$order.Add($e)};$byEnc[$e].Add($i)
+ }
+ $encs=[Collections.Generic.List[object]]::new();$confEM=0;$confPrev=0;$base=0.0;$k=0
+ foreach($e in $order){
+  $k++;if($Run -and $Path -and $k%500 -eq 0){Set-RunProgress $Run $Path ([int](55+30*$k/$order.Count)) ('Analyzing encounter '+$k+' of '+$order.Count)}
+  $rows=$byEnc[$e];$groups=@{};$gorder=[Collections.Generic.List[string]]::new();$newest=-1
+  foreach($i in $rows){$key=$cd[$i]+'|'+$mod[$i].ToUpperInvariant();if(!$groups.ContainsKey($key)){$groups[$key]=[Collections.Generic.List[int]]::new();$gorder.Add($key)};$groups[$key].Add($i);if($newest -lt 0 -or $tx[$i] -gt $tx[$newest]){$newest=$i}}
+  $active=[Collections.Generic.List[int]]::new()
+  foreach($key in $gorder){
+   $latest=-1;$latestNz=-1
+   foreach($i in $groups[$key]){if($latest -lt 0 -or $tx[$i] -gt $tx[$latest]){$latest=$i};if($rvu[$i] -ne 0 -and ($latestNz -lt 0 -or $tx[$i] -gt $tx[$latestNz])){$latestNz=$i}}
+   if($latestNz -ge 0){$active.Add($latestNz)}elseif($cd[$latest] -match $script:PocFocusPattern){$active.Add($latest)}
+  }
+  $em=-1;$emN=0;$pv=-1;$pvN=0
+  foreach($i in $active){if($cd[$i] -match $script:PocEmPattern){$emN++;if($em -lt 0 -or $tx[$i] -gt $tx[$em]){$em=$i}}elseif($cd[$i] -match $script:PocPrevPattern){$pvN++;if($pv -lt 0 -or $tx[$i] -gt $tx[$pv]){$pv=$i}}}
+  if($emN -gt 1){$confEM++};if($pvN -gt 1){$confPrev++}
+  $codes=[Collections.Generic.List[string]]::new()
+  foreach($i in $active){$c=$cd[$i];if($c -match $script:PocEmPattern -and $i -ne $em){continue};if($c -match $script:PocPrevPattern -and $i -ne $pv){continue};$base+=$rvu[$i];$codes.Add($c)}
+  $t=$(if($diag.ContainsKey($e)){$diag[$e].ToString()}else{''})
+  $ob=$t -match '(?i)\bE66\b|obesity';$tob=$t -match '(?i)\bF17\b|\bZ72\.0\b|nicotine|tobacco'
+  $asc=$t -match '(?i)\bI10\b|\bE78\b|\bE11\b|\bE66\b|\bF17\b|hypertension|hyperlipidemia|diabetes|obesity|nicotine|tobacco';$mh=$t -match '(?i)\bF32\b|\bF33\b|\bF41\b|\bZ13\.31\b|\bZ13\.32\b|depression|anxiety'
+  $obc=$false;$tc=$false;$ac=$false;$mc=$false;$hasG=$false;$awv=[Collections.Generic.List[string]]::new()
+  foreach($c in $codes){
+   if($c -eq 'G2211'){$hasG=$true}
+   if($c -eq 'G0447' -or ($ob -and $c -match '^9940[1-4]$')){$obc=$true}
+   if($c -eq '99406' -or $c -eq '99407'){$tc=$true}
+   if($c -eq 'G0446' -or $c -eq 'G0537' -or $c -eq 'G0538'){$ac=$true}
+   if($c -eq 'G0444' -or $c -eq '96127'){$mc=$true}
+   if($c -match $script:PocAwvPattern -and !$awv.Contains($c)){$awv.Add($c)}
+  }
+  $emCode='';$emMod='';$has25=$false;if($em -ge 0){$emCode=$cd[$em];$emMod=$mod[$em];$has25=$emMod -match '(^|[,;\s])25($|[,;\s])'}
+  $pvCode='';if($pv -ge 0){$pvCode=$cd[$pv]}
+  $provider=(($prov[$newest] -replace '\s*\[[^\]]*\]\s*$','').Trim());if(!$provider){$provider='(No provider)'}
+  $date=ConvertTo-DateValue $sdt[$newest]
+  $encs.Add([pscustomobject]@{Encounter=$e;Date=$date;Provider=$provider;EM=$emCode;EMMod=$emMod;Has25=$has25;Prev=$pvCode;AWV=($awv -join ', ');G2211=$hasG;P25=[bool]($pvCode -and $emCode -and $has25);P25G=[bool]($pvCode -and $emCode -and $has25 -and $hasG);ObCode=$obc;TobCode=$tc;AscCode=$ac;MHCode=$mc;Ob=$ob;Tob=$tob;Asc=$asc;MH=$mh})
+ }
+ return [ordered]@{rawRows=$n;scopeRows=$scope;noEncounterRows=$noEnc;encounters=$encs;base=$base;emConflicts=$confEM;prevConflicts=$confPrev}
+}
+function New-PocSummary($A){
+ # Department totals, the G2211 opportunity counts behind the calculator, and the provider scorecard (peer rate = every other provider's E/M encounters).
+ $prov=@{};$em=0;$g=0;$pv=0;$p25=0;$p25g=0;$opp1=0;$opp2=0;$from=$null;$to=$null
+ foreach($x in $A.encounters){
+  if(!$prov.ContainsKey($x.Provider)){$prov[$x.Provider]=[ordered]@{Provider=$x.Provider;Enc=0;EM=0;G=0;Prev=0;P25=0;P25G=0;ObC=0;Ob=0;TobC=0;Tob=0;AscC=0;Asc=0;MHC=0;MH=0}}
+  $r=$prov[$x.Provider];$r['Enc']+=1
+  if($x.EM){$em++;$r['EM']+=1;if($x.G2211){$g++;$r['G']+=1}}
+  if($x.Prev){$pv++;$r['Prev']+=1};if($x.P25){$p25++;$r['P25']+=1};if($x.P25G){$p25g++;$r['P25G']+=1}
+  foreach($f in @(@('ObCode','ObC'),@('Ob','Ob'),@('TobCode','TobC'),@('Tob','Tob'),@('AscCode','AscC'),@('Asc','Asc'),@('MHCode','MHC'),@('MH','MH'))){if($x.($f[0])){$r[$f[1]]+=1}}
+  if(($x.Prev -or $x.AWV) -and $x.EM -and $x.Has25 -and !$x.G2211){$opp1++}
+  if(!$x.Prev -and !$x.AWV -and $x.EM -eq '99214' -and !$x.G2211){$opp2++}
+  if($x.Date){if($null -eq $from -or $x.Date -lt $from){$from=$x.Date};if($null -eq $to -or $x.Date -gt $to){$to=$x.Date}}
+ }
+ $score=@(foreach($r in $prov.Values){
+  $otherEm=$em-$r.EM;$rate=Get-PocRate $r.G $r.EM;$peer=Get-PocRate ($g-$r.G) $otherEm
+  $r['Rate']=$rate;$r['Peer']=$peer;$r['Gap']=$(if($r.EM -gt 0 -and $otherEm -gt 0){$rate-$peer}else{$null});$r
+ })
+ $score=@($score|Sort-Object -Property @{Expression={$null -eq $_.Rate}},@{Expression={if($null -eq $_.Rate){0}else{-[double]$_.Rate}}},@{Expression={$_.Provider}})
+ return [ordered]@{rawRows=$A.rawRows;scopeRows=$A.scopeRows;noEncounterRows=$A.noEncounterRows;encounters=$A.encounters.Count;providers=$score.Count;em=$em;g2211=$g;rate=(Get-PocRate $g $em);prev=$pv;p25=$p25;p25g=$p25g;wrvu=[Math]::Round($A.base,2);emConflicts=$A.emConflicts;prevConflicts=$A.prevConflicts;opp1=$opp1;opp2=$opp2;dateFrom=$(if($from){$from.ToString('yyyy-MM-dd')}else{''});dateTo=$(if($to){$to.ToString('yyyy-MM-dd')}else{''});scorecard=$score}
+}
+$script:PocReportCss=':root{--navy:#17365d;--teal:#1f6d7a;--pale:#eaf3f5;--ink:#243447}*{box-sizing:border-box}body{margin:0;background:#f4f7f9;font:14px Segoe UI,Arial,sans-serif;color:var(--ink)}header{background:var(--navy);color:#fff;padding:22px 4vw}header h1{margin:0 0 6px}header .meta{opacity:.9;line-height:1.6}main{padding:20px 4vw 40px}.caveat{background:#fff6da;border-left:5px solid #d7a900;padding:12px;margin:0 0 16px}.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.tile,.card{background:#fff;border-radius:8px;padding:16px;box-shadow:0 1px 5px #ccd}.tile b{display:block;font-size:26px;color:var(--teal);font-variant-numeric:tabular-nums}.tile small{color:#667085}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}.card{margin-top:16px}.grid .card{margin-top:0}h2{color:var(--navy);margin:0 0 10px;font-size:18px}table{width:100%;border-collapse:collapse;background:#fff}th{background:var(--teal);color:#fff;position:sticky;top:0}th,td{padding:7px 8px;border-bottom:1px solid #dde5e8;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}th:first-child,td:first-child{text-align:left}.scroll{overflow:auto;max-height:560px}.pos{color:#087830}.neg{color:#b42318}.muted{color:#667085}input[type=range]{width:100%}label{display:block;margin:6px 0}.bars{margin-top:6px}.bar{display:grid;grid-template-columns:minmax(120px,230px) 1fr 130px;align-items:center;gap:10px;padding:3px 0}.bn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.bt{position:relative;height:14px;background:var(--pale)}.bf{position:absolute;left:0;top:0;bottom:0;background:var(--teal);border-radius:0 4px 4px 0;min-width:2px}.bf.zero{background:none}.ref{position:absolute;top:-4px;bottom:-4px;border-left:2px dashed var(--navy)}.bv{text-align:right;font-variant-numeric:tabular-nums}.bv small{color:#667085}.key{color:#667085;margin:4px 0 8px}.key i{display:inline-block;width:0;height:12px;border-left:2px dashed var(--navy);margin:0 6px -1px 0}ul.notes{margin:6px 0 0 18px;padding:0;line-height:1.6}@media(max-width:900px){.kpis,.grid{grid-template-columns:1fr 1fr}.bar{grid-template-columns:110px 1fr 100px}}@media print{th{position:static}.scroll{max-height:none;overflow:visible}}'
+function ConvertTo-PocBarsHtml([object[]]$Items,$Reference){
+ # One horizontal bar per item (label, share 0..1, value text, hover text); Reference draws the dashed department line on every track.
+ $out=''
+ foreach($it in $Items){
+  $w=[Math]::Max(0,[Math]::Min(100,100*[double]$it.share));$ws=$w.ToString('0.0',[Globalization.CultureInfo]::InvariantCulture)
+  $ref='';if($null -ne $Reference){$ref='<span class="ref" style="left:'+(100*[double]$Reference).ToString('0.0',[Globalization.CultureInfo]::InvariantCulture)+'%"></span>'}
+  $out+='<div class="bar" title="'+(ConvertTo-HtmlEncoded $it.title)+'"><span class="bn">'+(ConvertTo-HtmlEncoded $it.label)+'</span><span class="bt"><span class="bf'+$(if($w -eq 0){' zero'}else{''})+'" style="width:'+$ws+'%"></span>'+$ref+'</span><span class="bv">'+$it.value+'</span></div>'
+ }
+ return '<div class="bars">'+$out+'</div>'
+}
+function ConvertTo-PocReport($Run){
+ # The saved report: header, caveat, KPI tiles, preventive adoption, G2211 calculator, charts and the provider scorecard.
+ $s=Get-P $Run 'summary' $null;$e={param($v)ConvertTo-HtmlEncoded $v}
+ $em=[int]$s.em;$g=[int]$s.g2211;$pv=[int]$s.prev;$p25=[int]$s.p25;$p25g=[int]$s.p25g;$opp1=[int]$s.opp1;$opp2=[int]$s.opp2;$rate=Get-P $s 'rate' $null
+ $score=@(Get-P $s 'scorecard' @()|Where-Object{$null -ne $_})
+ $loc=[string](Get-P $Run 'location' '');$locProv=@(Get-P $Run 'locationProviders' @())
+ $locText=$(if($loc){'Provider Analysis location: <b>'+(& $e $loc)+'</b>'+$(if($locProv.Count){' ('+$locProv.Count+' provider'+$(if($locProv.Count -eq 1){''}else{'s'})+' with profiles)'}else{''})}else{'Not associated with a Provider Analysis location'})
+ $range='';if([string]$s.dateFrom){$range='Services '+(ConvertTo-DateText $s.dateFrom)+' - '+(ConvertTo-DateText $s.dateTo)+' &middot; '}
+ $built=ConvertTo-DateValue (Get-P $Run 'asOf' $null);if(!$built){$built=Get-Date}
+ $meta='Department: <b>'+(& $e $Run.department)+'</b> &middot; '+$locText+'<br>'+$range+'File: '+(& $e $Run.fileName)+' (sheet '+(& $e (Get-P $Run 'sheet' ''))+') &middot; '+(Format-PocCount $s.scopeRows)+' department rows of '+(Format-PocCount $s.rawRows)+' &middot; '+(Format-PocCount $s.encounters)+' encounters &middot; '+$s.providers+' providers &middot; Built '+$built.ToString('M/d/yyyy h:mm tt')
+ $tiles=@(@('Eligible encounters',(Format-PocCount $s.encounters),''),@('E/M encounters',(Format-PocCount $em),''),@('G2211 with E/M',(Format-PocCount $g),''),@('Department G2211 rate',(Format-PocPct $rate),'of E/M encounters'),@('Preventive encounters',(Format-PocCount $pv),''),@('Preventive + E/M with 25',(Format-PocCount $p25),(Format-PocPct (Get-PocRate $p25 $pv))+' of preventive'),@('+ G2211 nested',(Format-PocCount $p25g),(Format-PocPct (Get-PocRate $p25g $pv))+' of preventive'),@('Active wRVUs',([double]$s.wrvu).ToString('#,0.0',[Globalization.CultureInfo]::InvariantCulture),''))
+ $tilesHtml=($tiles|ForEach-Object{'<div class="tile">'+$_[0]+'<b>'+$_[1]+'</b>'+$(if($_[2]){'<small>'+$_[2]+'</small>'}else{''})+'</div>'}) -join ''
+ $funnel=ConvertTo-PocBarsHtml @(
+  [ordered]@{label='Any annual preventive';share=$(if($pv){1}else{0});value=(Format-PocCount $pv)+' <small>'+(Format-PocPct (Get-PocRate $pv $pv))+'</small>';title=''+$pv+' preventive encounters'},
+  [ordered]@{label='+ E/M with modifier 25';share=$(if($pv){$p25/$pv}else{0});value=(Format-PocCount $p25)+' <small>'+(Format-PocPct (Get-PocRate $p25 $pv))+'</small>';title=''+$p25+' of '+$pv+' preventive encounters also billed an E/M with 25'},
+  [ordered]@{label='+ G2211 as well';share=$(if($pv){$p25g/$pv}else{0});value=(Format-PocCount $p25g)+' <small>'+(Format-PocPct (Get-PocRate $p25g $pv))+'</small>';title=''+$p25g+' of '+$pv+' preventive encounters billed preventive + E/M/25 + G2211'}) $null
+ $withEm=@($score|Where-Object{[int]$_.EM -gt 0})
+ $gBars=$(if($withEm.Count){'<p class="key"><i></i>Department rate '+(Format-PocPct $rate)+'</p>'+(ConvertTo-PocBarsHtml @($withEm|ForEach-Object{[ordered]@{label=[string]$_.Provider;share=[double]$_.Rate;value=(Format-PocPct $_.Rate)+' <small>'+$_.G+' / '+$_.EM+'</small>';title=[string]$_.Provider+': G2211 on '+$_.G+' of '+$_.EM+' E/M encounters ('+(Format-PocPct $_.Rate)+'); peers '+(Format-PocPct $_.Peer)}}) $rate)}else{'<p class="muted">No E/M encounters in this department.</p>'})
+ $rows=($score|ForEach-Object{$gap=Get-P $_ 'Gap' $null;$cls=$(if($null -eq $gap){''}elseif([double]$gap -ge 0){'pos'}else{'neg'});'<tr><td>'+(& $e $_.Provider)+'</td><td>'+$_.Enc+'</td><td>'+$_.EM+'</td><td>'+$_.G+'</td><td>'+(Format-PocPct $_.Rate)+'</td><td>'+(Format-PocPct $_.Peer)+'</td><td class="'+$cls+'">'+(Format-PocPct $gap)+'</td><td>'+$_.Prev+'</td><td>'+$_.P25+'</td><td>'+(Format-PocPct (Get-PocRate $_.P25 $_.Prev))+'</td><td>'+$_.P25G+'</td><td>'+(Format-PocPct (Get-PocRate $_.P25G $_.Prev))+'</td><td>'+$_.ObC+' / '+$_.Ob+'</td><td>'+$_.TobC+' / '+$_.Tob+'</td><td>'+$_.AscC+' / '+$_.Asc+'</td><td>'+$_.MHC+' / '+$_.MH+'</td></tr>'}) -join ''
+ $notes='<li>Rows without an encounter number: '+(Format-PocCount $s.noEncounterRows)+' (left out).</li><li>Encounters with more than one active E/M line: '+$s.emConflicts+'; with more than one preventive line: '+$s.prevConflicts+'. Only the latest (highest Tx ID) is kept.</li><li>E/M = 99202-99205, 99211-99215. Preventive = 99381-99397. AWV = G0402, G0438, G0439.</li><li>Obesity code = G0447, or 99401-99404 with an obesity diagnosis. Tobacco = 99406/99407. ASCVD = G0446, G0537, G0538. Mental health screening = G0444, 96127. Each proxy is a diagnosis-text match on the encounter (code / proxy columns count encounters).</li><li>Calculator: "Preventive/AWV + E/M/25" = preventive or AWV encounters with an E/M carrying modifier 25 and no G2211; "Non-preventive 99214" = 99214 encounters without preventive, AWV or G2211.</li>'
+ $html=@'
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>POC Coding - __TITLE__</title><style>__CSS__</style></head><body>
+<header><h1>Point-of-Care Coding Behavior</h1><div class="meta">__META__</div></header><main>
+<div class="caveat">Diagnosis-text proxies are broad discussion signals only - not confirmed eligibility, medical necessity, denial risk, compliance findings, or proof of incorrect coding. Latest active state uses Tx ID ordering; zero wRVU alone does not erase an earlier non-zero transaction.</div>
+<section class="kpis">__TILES__</section>
+<section class="grid"><div class="card"><h2>Preventive adoption</h2><table><tr><th>Stage</th><th>Encounters</th><th>% preventive</th></tr><tr><td>Any annual preventive</td><td>__PV__</td><td>__PVPCT__</td></tr><tr><td>Preventive + E/M with 25</td><td>__P25__</td><td>__P25PCT__</td></tr><tr><td>Preventive + E/M/25 + G2211</td><td>__P25G__</td><td>__P25GPCT__</td></tr></table>__FUNNEL__</div>
+<div class="card"><h2>G2211 increased-usage calculator</h2><label>Increase dial: <b id="dialOut">100%</b><input id="dial" type="range" min="0" max="100" value="100"></label><label>wRVU per G2211 <input id="wrvu" type="number" step=".01" value=".33" style="width:80px"></label><table><tr><th>Opportunity</th><th>Without G2211</th><th>Added G2211</th><th>Added wRVU</th></tr><tr><td>Preventive/AWV + E/M/25</td><td>__OPP1__</td><td id="a1"></td><td id="w1"></td></tr><tr><td>Non-preventive 99214</td><td>__OPP2__</td><td id="a2"></td><td id="w2"></td></tr><tr><td>Total</td><td>__OPPT__</td><td id="at"></td><td id="wt"></td></tr></table></div></section>
+<section class="card"><h2>G2211 with E/M by provider</h2>__GBARS__</section>
+<section class="card"><h2>Provider coding scorecard</h2><div class="scroll"><table><thead><tr><th>Provider</th><th>Encounters</th><th>E/M</th><th>G2211</th><th>G2211 rate</th><th>Peer rate</th><th>Gap</th><th>Preventive</th><th>Prev+E/M/25</th><th>Adoption</th><th>+G2211</th><th>Nested rate</th><th>Obesity code/proxy</th><th>Tobacco code/proxy</th><th>ASCVD code/proxy</th><th>Mental health code/proxy</th></tr></thead><tbody>__ROWS__</tbody></table></div></section>
+<section class="card"><h2>How this was counted</h2><ul class="notes">__NOTES__</ul></section>
+<script>const d=document.getElementById('dial'),w=document.getElementById('wrvu'),O1=__OPP1__,O2=__OPP2__;function put(id,v){document.getElementById(id).textContent=v}function calc(){const p=d.value/100,v=+w.value||0,x1=Math.round(O1*p),x2=Math.round(O2*p);put('dialOut',d.value+'%');put('a1',x1);put('a2',x2);put('at',x1+x2);put('w1',(x1*v).toFixed(1));put('w2',(x2*v).toFixed(1));put('wt',((x1+x2)*v).toFixed(1))}d.oninput=calc;w.oninput=calc;calc()</script>
+</main></body></html>
+'@
+ return $html.Replace('__TITLE__',(& $e (Get-PocDepartmentLabel ([string]$Run.department)))).Replace('__CSS__',$script:PocReportCss).Replace('__META__',$meta).Replace('__TILES__',$tilesHtml).Replace('__PVPCT__',(Format-PocPct (Get-PocRate $pv $pv))).Replace('__P25PCT__',(Format-PocPct (Get-PocRate $p25 $pv))).Replace('__P25GPCT__',(Format-PocPct (Get-PocRate $p25g $pv))).Replace('__PV__',[string]$pv).Replace('__P25G__',[string]$p25g).Replace('__P25__',[string]$p25).Replace('__FUNNEL__',$funnel).Replace('__OPPT__',[string]($opp1+$opp2)).Replace('__OPP1__',[string]$opp1).Replace('__OPP2__',[string]$opp2).Replace('__GBARS__',$gBars).Replace('__ROWS__',$rows).Replace('__NOTES__',$notes)
+}
+function Invoke-PocRun([string]$Id){
+ # Runs in its own worker process: reads the export, analyzes the chosen department and writes the HTML report into the poc-coding folder.
+ $path=Get-PocPath $Id;$run=Json $path;if(!$run){throw 'Analysis was not found.'}
+ $sw=[Diagnostics.Stopwatch]::StartNew()
+ try{
+  Set-P $run 'workerPid' $PID;Set-P $run 'startedUtc' ([DateTime]::UtcNow.ToString('o'));Set-RunProgress $run $path 3 'Opening the billing export'
+  $f=Json (Get-PocFilePath ([string]$run.fileToken));$src=$(if($f){[string](Get-P $f 'path' '')}else{''})
+  if(!$src -or !(Test-Path -LiteralPath $src)){throw 'The billing export is no longer kept; choose the file again.'}
+  Set-RunProgress $run $path 8 ('Reading '+(Format-PocCount (Get-P $f 'rowCount' 0))+' rows from '+[string]$run.fileName)
+  $wb=Read-PocWorkbook $src
+  Set-RunProgress $run $path 55 ('Analyzing '+[string]$run.department)
+  $a=Invoke-PocAnalysis $wb.columns ([string]$run.department) $run $path
+  if($a.encounters.Count -eq 0){throw ('No encounters were found for '+[string]$run.department+' ('+$a.scopeRows+' rows).')}
+  Set-RunProgress $run $path 88 'Summarizing providers'
+  Set-P $run 'summary' (New-PocSummary $a);Set-P $run 'sheet' $wb.sheet;Set-P $run 'asOf' ([DateTime]::Now.ToString('o'))
+  Set-RunProgress $run $path 94 'Writing the report';$run=Json $path
+  $built=ConvertTo-DateValue (Get-P $run 'asOf' $null);if(!$built){$built=Get-Date}
+  $base='POC Coding - '+(Get-SafeFileName (Get-PocDepartmentLabel ([string]$run.department)))+' - '+$built.ToString('yyyy-MM-dd HHmmss');$out=Join-Path $script:Paths.Poc ($base+'.html');$n=2
+  while(Test-Path -LiteralPath $out){$out=Join-Path $script:Paths.Poc ($base+' ('+$n+').html');$n++}
+  [IO.File]::WriteAllText($out,(ConvertTo-PocReport $run),(New-Object Text.UTF8Encoding($false)))
+  Set-P $run 'reportPath' $out;$run.state='Completed';$run.percent=100;$run.stage='Analysis complete';Set-P $run 'completedUtc' ([DateTime]::UtcNow.ToString('o'));Set-P $run 'seconds' ([Math]::Round($sw.Elapsed.TotalSeconds,1));Save-JsonAtomic $path $run
+  Log 'POC_COMPLETED' 'OK' ([string]$run.department+'; '+$run.summary.encounters+' encounters in '+[Math]::Round($sw.Elapsed.TotalSeconds,1)+'s')
+ }catch{$msg=$_.Exception.Message;$cur=Json $path;if(!$cur){$cur=$run};$cur.state='Failed';$cur.stage='Analysis failed';Set-P $cur 'errorSummary' $msg;Set-P $cur 'completedUtc' ([DateTime]::UtcNow.ToString('o'));Save-JsonAtomic $path $cur;Log 'POC_FAILED' 'FAILED' $msg}
+}
+function Start-PocWorker([string]$Id){return (Start-RunWorker 'RunPocId' $Id ('poc-'+$Id))}
+function Update-PocLiveness($Run){
+ $id=[string]$Run.pocId;$reason=Get-RunStallReason $Run $id 'POC coding' 'Run the analysis again.' ('poc-'+$id)
+ if(!$reason){return $false}
+ $Run.state='Failed';$Run.stage='Analysis failed';Set-P $Run 'errorSummary' $reason;Save-JsonAtomic (Get-PocPath $id) $Run;Log 'POC_INTERRUPTED' 'WARN' $id;return $true
+}
+function Get-PocLocationUrls([string]$Location){$q=[Uri]::EscapeDataString($Location);return [ordered]@{overviewUrl='/overview?location='+$q;newPatientsUrl='/new-patients?location='+$q}}
+function Get-PocRunModel([string]$Id,[switch]$Summary){
+ $run=Json (Get-PocPath $Id);if(!$run){throw 'That analysis was not found.'}
+ $null=Update-PocLiveness $run
+ $loc=[string](Get-P $run 'location' '');$token=[string](Get-P $run 'fileToken' '')
+ $m=[ordered]@{pocId=[string]$run.pocId;state=[string]$run.state;percent=[int](Get-P $run 'percent' 0);stage=[string](Get-P $run 'stage' '');requestedUtc=(ConvertTo-IsoText (Get-P $run 'requestedUtc' ''));completedUtc=(ConvertTo-IsoText (Get-P $run 'completedUtc' ''));seconds=(Get-P $run 'seconds' $null);errorSummary=[string](Get-P $run 'errorSummary' '');fileName=[string](Get-P $run 'fileName' '');fileToken=$token;fileKept=($token -match '^[a-f0-9]{32}$' -and (Test-Path -LiteralPath (Get-PocFilePath $token)));department=[string](Get-P $run 'department' '');location=$loc;locationProviders=@();overviewUrl=$null;newPatientsUrl=$null;summary=$null;reportUrl=$null;reportFile='';reportError='';folder=$script:Paths.Poc}
+ if($loc){$u=Get-PocLocationUrls $loc;$m.overviewUrl=$u.overviewUrl;$m.newPatientsUrl=$u.newPatientsUrl;if(!$Summary){$m.locationProviders=@(Get-OverviewProviders|Where-Object{$_.location -eq $loc}|ForEach-Object{[string]$_.displayName}|Sort-Object)}}
+ if($m.state -eq 'Completed'){
+  $s=Get-P $run 'summary' $null
+  if($s){$m.summary=[ordered]@{rawRows=[int]$s.rawRows;scopeRows=[int]$s.scopeRows;encounters=[int]$s.encounters;providers=[int]$s.providers;em=[int]$s.em;g2211=[int]$s.g2211;rate=(Get-P $s 'rate' $null);prev=[int]$s.prev;p25=[int]$s.p25;p25g=[int]$s.p25g;wrvu=[double]$s.wrvu;opp1=[int]$s.opp1;opp2=[int]$s.opp2;dateFrom=[string]$s.dateFrom;dateTo=[string]$s.dateTo}}
+  $rp=[string](Get-P $run 'reportPath' '');if($rp -and (Test-Path -LiteralPath $rp)){$m.reportUrl='/poc-coding.report?id='+$m.pocId;$m.reportFile=$rp}else{$m.reportError='The report was moved or deleted from the poc-coding folder.'}
+ }
+ return $m
+}
+function Get-PocLatestByLocation{
+ # The newest completed report per associated location, for the cross-links on the Overview and New Patients pages.
+ $seen=@{};$out=@()
+ foreach($r in @(Get-PocRuns)){
+  $loc=[string](Get-P $r 'location' '');if(!$loc -or $seen.ContainsKey($loc) -or [string](Get-P $r 'state' '') -ne 'Completed'){continue}
+  $rp=[string](Get-P $r 'reportPath' '');if(!$rp -or !(Test-Path -LiteralPath $rp)){continue}
+  $seen[$loc]=$true;$out+=[ordered]@{location=$loc;department=[string](Get-P $r 'department' '');completedUtc=(ConvertTo-IsoText (Get-P $r 'completedUtc' ''));url='/poc-coding.report?id='+[string]$r.pocId}
+ }
+ return @($out)
+}
+function Get-PocPageModel{
+ $runs=@(Get-PocRuns);$history=@(foreach($r in $runs){if([string](Get-P $r 'state' '') -in @('Completed','Failed')){Get-PocRunModel ([string]$r.pocId) -Summary}})
+ $latest=$null;if($runs.Count){$latest=Get-PocRunModel ([string]$runs[0].pocId)}
+ $files=@(foreach($f in @(Get-PocFiles)){if(Test-Path -LiteralPath ([string](Get-P $f 'path' ''))){[ordered]@{token=[string]$f.token;originalName=[string]$f.originalName;loadedUtc=(ConvertTo-IsoText (Get-P $f 'loadedUtc' ''));rowCount=[int]$f.rowCount;departments=@(Get-P $f 'departments' @()).Count}}})
+ # The file shown first: the latest run's export if it is still kept, otherwise the most recently loaded one.
+ $current=$null;$want='';if($latest -and $latest.fileKept){$want=$latest.fileToken}elseif($files.Count){$want=$files[0].token}
+ if($want){try{$current=Get-PocFileModel $want}catch{$current=$null}}
+ return [ordered]@{locations=@(Get-PocLocations);files=$files;currentFile=$current;latest=$latest;history=$history}
+}
+function New-PocRun($Body){
+ $token=[string](Get-P $Body 'token' '');$f=Json (Get-PocFilePath $token);if(!$f -or !(Test-Path -LiteralPath ([string](Get-P $f 'path' '')))){throw 'That file is no longer loaded; choose it again.'}
+ $want=([string](Get-P $Body 'department' '')).Trim();if(!$want){throw 'Choose a target department.'}
+ $dept='';foreach($d in @(Get-P $f 'departments' @())){if([string]$d.name -eq $want){$dept=[string]$d.name;break}};if(!$dept){throw ('"'+$want+'" is not a department in this file.')}
+ $locWant=([string](Get-P $Body 'location' '')).Trim();$loc=''
+ if($locWant){foreach($l in @(Get-PocLocations)){if([string]$l.name -eq $locWant){$loc=[string]$l.name;break}};if(!$loc){$map=Get-PocDepartmentMap;if($map.ContainsKey($dept) -and $map[$dept] -eq $locWant){$loc=[string]$map[$dept]}};if(!$loc){throw ('"'+$locWant+'" is not a Provider Analysis location; reload the page.')}}
+ foreach($r in @(Get-PocRuns)){if([string](Get-P $r 'state' '') -in @('Starting','Running') -and !(Update-PocLiveness $r)){throw 'An analysis is already running; wait for it to finish.'}}
+ Set-PocDepartmentLocation $dept $loc
+ $locProv=@();if($loc){$locProv=@(Get-OverviewProviders|Where-Object{$_.location -eq $loc}|ForEach-Object{[string]$_.displayName}|Sort-Object)}
+ $id=[Guid]::NewGuid().ToString('N');$path=Get-PocPath $id
+ $run=[ordered]@{pocVersion=1;pocId=$id;state='Starting';percent=1;stage='Launching analysis worker';requestedUtc=[DateTime]::UtcNow.ToString('o');fileToken=$token;fileName=[string]$f.originalName;fileSha256=[string](Get-P $f 'sha256' '');department=$dept;location=$loc;locationProviders=$locProv;workerPid=0}
+ Save-JsonAtomic $path $run;Log 'POC_REQUESTED' 'OK' ($dept+$(if($loc){' -> '+$loc}else{''}))
+ if($script:PocInline){Invoke-PocRun $id}
+ else{try{$null=Start-PocWorker $id}catch{$run.state='Failed';$run.stage='Worker launch failed';$run['errorSummary']=$_.Exception.Message;Save-JsonAtomic $path $run;Log 'POC_FAILED' 'FAILED' $_.Exception.Message}}
+ # Old run records drop off the list; their HTML reports stay in the poc-coding folder.
+ foreach($old in @(Get-PocRuns|Select-Object -Skip $script:PocKeep)){$oid=[string](Get-P $old 'pocId' '');if($oid -match '^[a-f0-9]{32}$'){Remove-Item -LiteralPath (Get-PocPath $oid) -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath (Join-Path $script:Paths.Logs ('poc-'+$oid+'.out.log')),(Join-Path $script:Paths.Logs ('poc-'+$oid+'.err.log')) -Force -ErrorAction SilentlyContinue}}
+ return (Get-PocRunModel $id)
+}
+function Send-PocReport($Context,[string]$Id,[bool]$Download){
+ $run=Json (Get-PocPath $Id);if(!$run -or [string](Get-P $run 'state' '') -ne 'Completed'){throw 'That analysis is not complete.'}
+ $full=[IO.Path]::GetFullPath([string](Get-P $run 'reportPath' ''));$root=[IO.Path]::GetFullPath($script:Paths.Poc).TrimEnd([IO.Path]::DirectorySeparatorChar)+[IO.Path]::DirectorySeparatorChar
+ if(!$full.StartsWith($root,[StringComparison]::OrdinalIgnoreCase) -or !(Test-Path -LiteralPath $full)){throw 'The report is not available; it may have been moved or deleted from the poc-coding folder.'}
+ $name=[IO.Path]::GetFileName($full) -replace '[^\x20-\x7E]','_' -replace '"',''
+ Send-Bytes $Context 'text/html; charset=utf-8' ([IO.File]::ReadAllBytes($full)) ($(if($Download){'attachment'}else{'inline'})+'; filename="'+$name+'"')
+}
+function PocCodingPage{
+ $html=@'
+<!doctype html><html><head><meta charset="utf-8"><title>POC Coding</title>
+<style>
+body{font:14px Segoe UI,Arial;margin:0;background:#f4f7fb;color:#172033}header{background:#17365d;color:white;padding:22px 22px 12px}main{padding:22px;max-width:1500px}
+__TABCSS__
+.card{background:white;border:1px solid #dce4ef;border-radius:8px;padding:18px;margin:14px 0}.card h2{margin:0 0 8px;font-size:17px;color:#17365d}.muted{color:#667085}.error{color:#a61b1b}.warn{color:#9a5b00}
+.row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:8px 0}.row b.lbl{min-width:96px;color:#17365d}select{font:inherit;padding:5px;max-width:100%}
+button,a.btn{padding:7px 12px;cursor:pointer;background:#1769aa;color:#fff;border:0;border-radius:5px;font:inherit;text-decoration:none;display:inline-block}button:disabled{opacity:.5;cursor:default}button.alt,a.btn.alt{background:#e4e9f0;color:#172033}button.go{background:#1d7a3a;font-weight:600;padding:10px 16px}
+__RUNCSS__
+.tiles{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:10px;margin:10px 0}.tile{border:1px solid #dce4ef;border-radius:8px;padding:10px 12px}.tile b{display:block;font-size:22px;color:#1f6d7a}.tile small{color:#667085}
+.xref{background:#f4f9ff;border:1px solid #cfe0f5;border-radius:8px;padding:10px 12px;margin:10px 0}code{background:#eef2f7;padding:1px 5px;border-radius:3px;word-break:break-all}.sugg{color:#9a5b00}
+@media(max-width:800px){.tiles{grid-template-columns:1fr 1fr}}
+</style></head><body>
+<header><h1>POC Coding</h1><p>Draft 5.7 - point-of-care billing and coding behavior (E/M, G2211, preventive, counseling and screening codes) for one department of a billing export</p></header>__NAV__
+<main>
+<section class="card"><h2>1. Choose a billing export</h2>
+<p class="muted">An .xlsx with the columns Service Prov, Service Dt, Department, Encounter Num, Tx ID, Procedure Code, Proc Mod, Procedure, Diagnosis Code and Work RVU. The file is kept (the newest __FILEKEEP__) so another department can be analyzed without choosing it again.</p>
+<div class="row"><button id="pick">Choose file...</button><input id="file" type="file" accept=".xlsx" hidden><span id="recentWrap" style="display:none" class="muted">or a recent file <select id="recent"></select></span></div>
+<div id="fileInfo" class="muted">Loading...</div>
+</section>
+<section class="card"><h2>2. Target department</h2>
+<div class="row"><b class="lbl">Department</b><select id="dept" disabled><option value="">Load a file first</option></select></div>
+<div class="row"><b class="lbl">Location</b><select id="loc"></select><span id="locNote" class="muted"></span></div>
+<p class="muted">Departments come from the file's Department column. The location ties the department to a location in Provider Analysis (from saved provider profiles), so its report links to that location's Overview and New Patients lists. It is remembered for the department and saved with each run. Providers are not matched yet.</p>
+<div class="row"><button class="go" id="run" disabled>Analyze department</button></div>
+</section>
+<section class="card"><h2>Analysis</h2><div id="result"><span class="muted">Loading...</span></div></section>
+<section class="card"><h2>Previous runs</h2><p class="muted">Every run, newest first. Each report is saved as an HTML file in the poc-coding folder. View shows a run again and restores its file, department and location.</p><div id="history"><span class="muted">Loading...</span></div></section>
+</main>
+<script>
+const el=id=>document.getElementById(id);
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+async function api(u,o){const r=await fetch(u,o);const text=await r.text();let j=null;try{j=text?JSON.parse(text):null}catch(e){throw Error('Server returned invalid JSON: '+text.slice(0,200))}if(!r.ok)throw Error((j&&j.error)||('Request failed ('+r.status+')'));return j}
+function when(iso){if(!iso)return '';const d=new Date(iso);return isNaN(d)?iso:d.toLocaleString()}
+function day(s){if(!s)return '';const p=s.split('-');return p.length===3?(+p[1])+'/'+(+p[2])+'/'+p[0]:s}
+function num(n){return n==null?'':Number(n).toLocaleString()}
+function pct(v){return v==null?'':(v*100).toFixed(1)+'%'}
+function plural(n,w){return num(n)+' '+w+(n===1?'':'s')}
+let file=null,files=[],locations=[],current=null,timer=null,history=[];
+function busy(){return !!current&&(current.state==='Starting'||current.state==='Running')}
+function sync(){el('run').disabled=!file||!el('dept').value||busy();el('run').textContent=busy()?'Analyzing...':'Analyze department'}
+function fillLocations(){el('loc').innerHTML='<option value="">(not associated)</option>'+locations.map(l=>'<option value="'+esc(l.name)+'">'+esc(l.name)+(l.providers?' ('+plural(l.providers,'provider')+')':'')+'</option>').join('')}
+function fillRecent(){el('recentWrap').style.display=files.length?'':'none';el('recent').innerHTML='<option value="">Choose...</option>'+files.map(f=>'<option value="'+esc(f.token)+'">'+esc(f.originalName)+' - '+esc(when(f.loadedUtc))+'</option>').join('');el('recent').value=file?file.token:''}
+function deptInfo(){return file?file.departments.find(d=>d.name===el('dept').value):null}
+function setLocation(v){if(v&&![...el('loc').options].some(o=>o.value===v)){el('loc').add(new Option(v+' (no longer in Provider Analysis)',v))}el('loc').value=v||''}
+function deptLabel(x){return x.name+' - '+plural(x.rows,'row')+(x.mapped&&x.location?' - '+x.location:'')}
+function showFile(f,dept,loc){
+ file=f;
+ if(!f){el('fileInfo').textContent='No file loaded yet.';el('dept').disabled=true;el('dept').innerHTML='<option value="">Load a file first</option>';el('locNote').textContent='';fillRecent();sync();return}
+ el('fileInfo').innerHTML='<b>'+esc(f.originalName)+'</b> &middot; sheet '+esc(f.sheet)+' &middot; '+plural(f.rowCount,'row')+' &middot; '+plural(f.departments.length,'department')+' in column '+esc(f.departmentColumn)+' &middot; loaded '+esc(when(f.loadedUtc));
+ const d=el('dept');d.disabled=false;d.innerHTML='<option value="">Choose a department...</option>'+f.departments.map(x=>'<option value="'+esc(x.name)+'">'+esc(deptLabel(x))+'</option>').join('');
+ const want=dept||f.lastDepartment||'';d.value=f.departments.some(x=>x.name===want)?want:'';
+ deptChanged(loc);fillRecent();
+}
+function deptChanged(loc){
+ const x=deptInfo();
+ if(!x){setLocation('');el('locNote').textContent='';sync();return}
+ setLocation(loc!==undefined?loc:x.location);
+ el('locNote').className=x.suggested&&loc===undefined?'sugg':'muted';
+ el('locNote').textContent=loc!==undefined?(x.mapped&&(x.location||'')===(loc||'')?'remembered for this department':'as used in that run'):x.mapped?(x.location?'remembered for this department':'remembered: not associated'):(x.suggested?'suggested from the department name - check it':'no match found; choose one if it applies');
+ sync();
+}
+el('dept').onchange=()=>deptChanged();
+el('loc').onchange=()=>{el('locNote').className='muted';el('locNote').textContent='saved with the next run';sync()};
+el('pick').onclick=()=>{el('file').value='';el('file').click()};
+el('file').onchange=async()=>{const f=el('file').files[0];if(!f)return;el('fileInfo').textContent='Loading '+f.name+' and reading its departments (large files can take a minute)...';el('dept').disabled=true;el('run').disabled=true;try{const j=await api('/api/poc-coding-upload',{method:'POST',headers:{'X-File-Name':encodeURIComponent(f.name)},body:f});await loadPage(false);showFile(j)}catch(e){el('fileInfo').innerHTML='<span class="error">'+esc(e.message)+'</span>';file=null;el('dept').innerHTML='<option value="">Load a file first</option>';fillRecent();sync()}};
+el('recent').onchange=async()=>{const t=el('recent').value;if(!t)return;try{showFile(await api('/api/poc-coding-file?token='+encodeURIComponent(t)))}catch(e){el('fileInfo').innerHTML='<span class="error">'+esc(e.message)+'</span>'}};
+function tile(label,value,note){return '<div class="tile">'+esc(label)+'<b>'+value+'</b>'+(note?'<small>'+esc(note)+'</small>':'')+'</div>'}
+function xrefHtml(o){
+ if(!o.location)return '<div class="xref">Not associated with a Provider Analysis location. Choose a location above and analyze again to link this department to its Overview and New Patients lists.</div>';
+ const p=o.locationProviders||[];
+ return '<div class="xref"><b>Provider Analysis location: '+esc(o.location)+'</b> <span class="muted">'+(p.length?plural(p.length,'provider')+' with profiles: '+esc(p.join(', ')):'no saved provider profiles at this location yet')+'</span><div class="row"><a class="btn alt" id="ovLink" href="'+esc(o.overviewUrl)+'">Overview for '+esc(o.location)+'</a><a class="btn alt" id="npLink" href="'+esc(o.newPatientsUrl)+'">New patient lists for '+esc(o.location)+'</a></div></div>';
+}
+function showResult(o){
+ current=o;
+ if(!o){el('result').innerHTML='<span class="muted">No analysis yet. Choose a file and a department above, then select Analyze department.</span>';sync();return}
+ if(busy()){el('result').innerHTML='<p>Analyzing '+esc(o.department)+'... '+o.percent+'%</p><div class="progress"><span style="width:'+Math.max(0,Math.min(100,o.percent))+'%"></span></div><span class="muted">'+esc(o.stage)+'</span>';sync();return}
+ if(o.state==='Failed'){el('result').innerHTML='<p class="error">The analysis could not be completed: '+esc(o.errorSummary)+'</p><span class="muted">'+esc(o.department)+' &middot; '+esc(o.fileName)+' &middot; requested '+esc(when(o.requestedUtc))+'</span>';sync();return}
+ const s=o.summary||{};
+ let h='<div class="row"><b>'+esc(o.department)+'</b><span class="muted">built '+esc(when(o.completedUtc))+(o.seconds!=null?' in '+o.seconds+' s':'')+'</span>'+(o.reportUrl?'<a class="btn" id="open" target="_blank" href="'+esc(o.reportUrl)+'">Open report</a><a class="btn alt" href="'+esc(o.reportUrl)+'&download=1">Download HTML</a>':'<span class="warn">'+esc(o.reportError)+'</span>')+'</div>';
+ h+='<div class="tiles">'+tile('Eligible encounters',num(s.encounters))+tile('E/M encounters',num(s.em))+tile('G2211 with E/M',num(s.g2211),pct(s.rate)+' of E/M')+tile('Preventive encounters',num(s.prev))+tile('Preventive + E/M with 25',num(s.p25),s.prev?pct(s.p25/s.prev)+' of preventive':'')+tile('+ G2211 nested',num(s.p25g),s.prev?pct(s.p25g/s.prev)+' of preventive':'')+tile('Active wRVUs',s.wrvu==null?'':Number(s.wrvu).toLocaleString(undefined,{minimumFractionDigits:1,maximumFractionDigits:1}))+tile('Providers',num(s.providers))+'</div>';
+ h+=xrefHtml(o);
+ h+='<p class="muted">'+esc(o.fileName)+(s.dateFrom?' &middot; services '+esc(day(s.dateFrom))+' - '+esc(day(s.dateTo)):'')+' &middot; '+plural(s.scopeRows,'row')+' in this department of '+num(s.rawRows)+(o.reportFile?'<br>Saved as <code>'+esc(o.reportFile)+'</code>':'')+'</p>';
+ el('result').innerHTML=h;sync();
+}
+function historyHtml(list){
+ if(!list.length)return '<span class="muted">None yet.</span>';
+ return '<table class="hist"><thead><tr><th>Built</th><th>Department</th><th>Location</th><th>File</th><th class="n">Encounters</th><th class="n">G2211 rate</th><th></th></tr></thead><tbody>'+list.map(r=>{const showing=current&&current.pocId===r.pocId;const s=r.summary||{};return '<tr'+(showing?' class="showing"':'')+'><td>'+esc(when(r.completedUtc||r.requestedUtc))+(showing?' <span class="muted">(shown above)</span>':'')+'</td><td>'+esc(r.department)+'</td><td>'+(r.location?'<a href="'+esc(r.overviewUrl)+'" title="Overview for this location">'+esc(r.location)+'</a>':'<span class="muted">-</span>')+'</td><td>'+esc(r.fileName)+'</td><td class="n">'+num(s.encounters)+'</td><td class="n">'+pct(s.rate)+'</td><td>'+(r.state==='Completed'?'<a href="#" data-view="'+esc(r.pocId)+'">View</a>'+(r.reportUrl?' &middot; <a target="_blank" href="'+esc(r.reportUrl)+'">Report</a>':' &middot; <span class="warn">report missing</span>'):'<span class="error">Failed: '+esc(r.errorSummary)+'</span>')+'</td></tr>'}).join('')+'</tbody></table>';
+}
+function renderHistory(){el('history').innerHTML=historyHtml(history)}
+el('history').addEventListener('click',async e=>{const a=e.target.closest('a[data-view]');if(!a)return;e.preventDefault();if(busy())return;try{const o=await api('/api/poc-coding-run?id='+encodeURIComponent(a.dataset.view));if(o.fileKept){try{showFile(await api('/api/poc-coding-file?token='+encodeURIComponent(o.fileToken)),o.department,o.location)}catch(x){}}showResult(o);renderHistory();el('result').scrollIntoView({behavior:'smooth'})}catch(err){el('result').innerHTML='<p class="error">'+esc(err.message)+'</p>'}});
+let pollErrors=0;
+function startPoll(id){if(timer)clearInterval(timer);pollErrors=0;timer=setInterval(async()=>{try{const o=await api('/api/poc-coding-run?id='+encodeURIComponent(id));pollErrors=0;showResult(o);if(!busy()){clearInterval(timer);timer=null;const keep=el('dept').value,loc=el('loc').value;await loadPage(false);if(file&&o.fileToken===file.token){try{showFile(await api('/api/poc-coding-file?token='+encodeURIComponent(file.token)),keep,loc)}catch(x){}}}}catch(e){if(++pollErrors<5)return;clearInterval(timer);timer=null;el('result').innerHTML='<p class="error">'+esc(e.message)+'</p>'}},1500)}
+el('run').onclick=async()=>{if(el('run').disabled||busy())return;el('run').disabled=true;try{const o=await api('/api/poc-coding',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:file.token,department:el('dept').value,location:el('loc').value})});showResult(o);if(busy())startPoll(o.pocId);else{await loadPage(false)}}catch(e){el('result').innerHTML='<p class="error">'+esc(e.message)+'</p>';sync()}};
+async function loadPage(first){
+ const m=await api('/api/poc-coding');files=m.files;history=m.history;
+ if(first){locations=m.locations;fillLocations();const l=m.latest;showFile(m.currentFile,l&&m.currentFile&&l.fileToken===m.currentFile.token?l.department:'',undefined);showResult(l);if(busy())startPoll(l.pocId)}
+ fillRecent();renderHistory();
+}
+loadPage(true).catch(e=>{el('fileInfo').innerHTML='<p class="error">'+esc(e.message)+'</p>'});
+</script></body></html>
+'@
+ return $html.Replace('__NAV__',(Get-NavHtml 'poc')).Replace('__TABCSS__',$script:TabCss).Replace('__RUNCSS__',$script:RunPageCss).Replace('__FILEKEEP__',[string]$script:PocFileKeep)
 }
 # --- Draft 5.3: unattended runs - heartbeat, interrupted-worker recovery, sleep deferral ---
 $script:HeartbeatSeconds=15;$script:LastHeartbeat=[DateTime]::MinValue;$script:StallChecks=60;$script:MaxJobAttempts=2;$script:PdfTimeoutSeconds=180
@@ -2411,4 +2859,4 @@ function Invoke-AnalysisJob([string]$JobId){$path=Join-Path $script:Paths.State 
 function Invoke-NextPendingJob{$jobs=@(Get-Jobs);if(@($jobs|Where-Object{$_.state -in @('Starting','Running')}).Count -gt 0){return};$j=@($jobs|Where-Object{$_.state -eq 'Prepared' -or $_.state -eq 'Queued'}|Sort-Object queuedUtc|Select-Object -First 1);if($j.Count -ne 1){return};$job=$j[0];$job.state='Starting';$job.percent=1;$attempt=1+[int](Get-P $job 'attempts' 0);Set-P $job 'attempts' $attempt;$job.stage=$(if($attempt -gt 1){'Launching background analysis worker (attempt '+$attempt+' of '+$script:MaxJobAttempts+')'}else{'Launching background analysis worker'});$jobPath=Join-Path $script:Paths.State ('job-'+$job.jobId+'.json');Save-JsonAtomic $jobPath $job;$exe=(Get-Process -Id $PID).Path;$out=Join-Path $script:Paths.Logs ('worker-'+$job.jobId+'.out.log');$err=Join-Path $script:Paths.Logs ('worker-'+$job.jobId+'.err.log');try{$quotedScript='"'+$PSCommandPath+'"';$p=Start-Process -FilePath $exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$quotedScript,'-RunJobId',$job.jobId,'-NoBrowser') -RedirectStandardOutput $out -RedirectStandardError $err -WindowStyle Hidden -PassThru;Set-P $job 'workerPid' $p.Id;Save-JsonAtomic $jobPath $job}catch{$job.state='Failed';$job.stage='Worker launch failed';Set-P $job 'errorSummary' $_.Exception.Message;Save-JsonAtomic $jobPath $job}};function Invoke-PendingJobs{while(@(Get-Jobs|Where-Object{$_.state -eq 'Prepared' -or $_.state -eq 'Queued'}).Count -gt 0){Invoke-NextPendingJob;Start-Sleep -Milliseconds 500}}
 function Send-JobOutput($Context,[string]$JobId,[string]$Type){if($JobId -notmatch '^[a-f0-9]{32}$'){throw 'Invalid job ID.'};$job=Json (Join-Path $script:Paths.State ('job-'+$JobId+'.json'));if(!$job){throw 'Job not found.'};$path=Resolve-JobOutputPath $job $Type;if(!$path){throw 'Output is not available; the file may have been moved or deleted.'};$bytes=[IO.File]::ReadAllBytes($path);$Context.Response.StatusCode=200;$Context.Response.ContentType=$(if($Type -eq 'pdf'){'application/pdf'}else{'text/html; charset=utf-8'});$Context.Response.Headers['Content-Disposition']='inline; filename="'+[IO.Path]::GetFileName($path)+'"';$Context.Response.ContentLength64=$bytes.Length;$Context.Response.Headers['Cache-Control']='no-store';$Context.Response.OutputStream.Write($bytes,0,$bytes.Length);$Context.Response.Close()}
 function Initialize-AnalysisJobRecovery{$script:RunNext=$false;foreach($f in Get-ChildItem $script:Paths.State -Filter 'job-*.json' -File -ErrorAction SilentlyContinue){$j=Json $f.FullName;if(!$j){continue};$state=[string](Get-P $j 'state' '');$err=[string](Get-P $j 'errorSummary' '');if($state -in @('Starting','Running')){if(Test-WorkerAlive $j){$age=([DateTime]::UtcNow-(Get-Item -LiteralPath $f.FullName).LastWriteTimeUtc).TotalMinutes;if($age -lt $script:StartupStaleMinutes){continue};Stop-WorkerProcess ([int](Get-P $j 'workerPid' 0));Reset-InterruptedJob $j $f.FullName ('it had made no progress for '+[int]$age+' minutes when the server restarted')}else{Reset-InterruptedJob $j $f.FullName 'the server was restarted while the report was running'}}elseif($state -eq 'Failed' -and $err -like '*ConvertTo-NumberValue*'){$j.state='Prepared';$j.percent=0;$j.stage='Recovered after Draft 4.2 helper/queue repair';Set-P $j 'errorSummary' '';Save-JsonAtomic $f.FullName $j}}}
-if($RunJobId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-AnalysisJob $RunJobId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};if($RunOverviewId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-OverviewRun $RunOverviewId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};if($RunNewListId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-NewListRun $RunNewListId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};try{Initialize-AppFolders;Lock;Initialize-AppConfiguration;Test-ImportExcelModule;Initialize-AnalysisJobRecovery;Initialize-ProviderIndexes;Serve}catch{$detail=$_.Exception.Message+' | '+$_.ScriptStackTrace;try{Log 'APPLICATION' 'FAILED' $detail}catch{};Write-Error $detail;exit 1}finally{if($script:Listener){try{$script:Listener.Stop();$script:Listener.Close()}catch{}};if($script:Mutex){try{$script:Mutex.ReleaseMutex()}catch{};$script:Mutex.Dispose()};try{Log 'SERVER_STOP'}catch{}}
+if($RunJobId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-AnalysisJob $RunJobId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};if($RunOverviewId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-OverviewRun $RunOverviewId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};if($RunNewListId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-NewListRun $RunNewListId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};if($RunPocId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-PocRun $RunPocId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};try{Initialize-AppFolders;Lock;Initialize-AppConfiguration;Test-ImportExcelModule;Initialize-AnalysisJobRecovery;Initialize-ProviderIndexes;Serve}catch{$detail=$_.Exception.Message+' | '+$_.ScriptStackTrace;try{Log 'APPLICATION' 'FAILED' $detail}catch{};Write-Error $detail;exit 1}finally{if($script:Listener){try{$script:Listener.Stop();$script:Listener.Close()}catch{}};if($script:Mutex){try{$script:Mutex.ReleaseMutex()}catch{};$script:Mutex.Dispose()};try{Log 'SERVER_STOP'}catch{}}
