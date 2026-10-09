@@ -1,11 +1,13 @@
 #requires -Version 5.1
-# ProviderAnalysisServer.ps1 - Draft 5.7 (ranked outreach lists, patient flags, Communication tab, unattended-run recovery, report server feeds, group Overview, new-patient lists, POC coding)
+# ProviderAnalysisServer.ps1 - Draft 6.0 (ranked outreach lists, patient flags, Communication tab, unattended-run recovery, report server feeds, group Overview, new-patient lists, POC coding, Combine)
 # Adds provider indexes, guided cross-source mapping, fuzzy suggestions, NPI profiles, prepared job tracking, ranked outreach lists,
 # a flag mode (/flag?jobId=...) that excludes flagged patients from every list and panel on every later report for that provider,
 # and a Communication tab (/communication) that emails every provider in a risk pool a fresh report PDF via Outlook drafts.
 # The POC Coding tab (/poc-coding) analyzes point-of-care billing and coding for one department of a billing export and saves each run as an HTML report.
+# The Combine tab (/combine) fingerprints loaded .xlsx/.csv exports and combines them into one row per patient (plus summary views) under an
+# editable, auditable JSON config, with a copy-paste round trip through an enterprise LLM.
 [CmdletBinding()]
-param([int]$PreferredPort=8765,[switch]$NoBrowser,[switch]$SkipModuleInstallPrompt,[string]$RunJobId='',[string]$RunOverviewId='',[string]$RunNewListId='',[string]$RunPocId='')
+param([int]$PreferredPort=8765,[switch]$NoBrowser,[switch]$SkipModuleInstallPrompt,[string]$RunJobId='',[string]$RunOverviewId='',[string]$RunNewListId='',[string]$RunPocId='',[string]$RunCombineId='')
 Set-StrictMode -Version 2.0
 $ErrorActionPreference='Stop'
 $script:Root=Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -29,6 +31,11 @@ $script:Paths=[ordered]@{
  NewLists=Join-Path $script:Root 'new-patient-lists'
  Poc=Join-Path $script:Root 'poc-coding'
  PocFiles=Join-Path (Join-Path $script:Root 'poc-coding') 'source-files'
+ Combine=Join-Path $script:Root 'combine'
+ CombineFiles=Join-Path (Join-Path $script:Root 'combine') 'source-files'
+ CombineConfigs=Join-Path (Join-Path $script:Root 'combine') 'configs'
+ CombineHistory=Join-Path (Join-Path (Join-Path $script:Root 'combine') 'configs') 'history'
+ CombineOutputs=Join-Path (Join-Path $script:Root 'combine') 'outputs'
 }
 $script:ConfigPath=Join-Path $script:Root 'config.json'
 $script:ManifestPath=Join-Path $script:Paths.State 'manifest.json'
@@ -222,6 +229,7 @@ function Request($Context){
   if($method -eq 'GET' -and $path -eq '/new-patients'){Send $Context 200 'text/html; charset=utf-8' (NewPatientsPage);return};if($method -eq 'GET' -and $path -eq '/api/new-patients'){Send $Context 200 'application/json' ((Get-NewListPageModel)|ConvertTo-Json -Depth 8);return}
   if($method -eq 'POST' -and $path -eq '/api/new-patients'){$result=New-NewListRun (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/new-patients-run'){Send $Context 200 'application/json' ((Get-NewListModel ([string]$Context.Request.QueryString['id']))|ConvertTo-Json -Depth 8);return}
   if($method -eq 'GET' -and $path -eq '/new-patients.file'){Send-NewListFile $Context ([string]$Context.Request.QueryString['id']) ([string]$Context.Request.QueryString['n']);return};
+  if($path -eq '/combine' -or $path.StartsWith('/combine/') -or $path.StartsWith('/api/combine/')){if(Invoke-CmbRequest $Context $method $path){return}}
   if($method -eq 'GET' -and $path -eq '/poc-coding'){Send $Context 200 'text/html; charset=utf-8' (PocCodingPage);return};if($method -eq 'GET' -and $path -eq '/api/poc-coding'){Send $Context 200 'application/json' ((Get-PocPageModel)|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/poc-coding-upload'){$result=Receive-PocUpload $Context;Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/poc-coding-file'){Send $Context 200 'application/json' ((Get-PocFileModel ([string]$Context.Request.QueryString['token']))|ConvertTo-Json -Depth 8);return}
   if($method -eq 'POST' -and $path -eq '/api/poc-coding'){$result=New-PocRun (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/poc-coding-run'){Send $Context 200 'application/json' ((Get-PocRunModel ([string]$Context.Request.QueryString['id']))|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/poc-coding.report'){Send-PocReport $Context ([string]$Context.Request.QueryString['id']) ([string]$Context.Request.QueryString['download'] -eq '1');return}
  if($method -eq 'GET' -and $path -eq '/api/sync'){Send $Context 200 'application/json' ((Get-SyncModel)|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/sync-feed'){$b=Read-BodyJson $Context;$result=Register-ReportFeed ([string](Get-P $b 'text' ''));Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/sync-feed-remove'){$result=Remove-ReportFeed ([string]$Context.Request.QueryString['sourceKey']);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/sync-now'){$result=Invoke-FeedSync @([string]$Context.Request.QueryString['sourceKey']);Send $Context 200 'application/json' (ConvertTo-Json -InputObject @($result) -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/sync-schedule'){$result=Set-SyncSchedule (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/flags'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-ProviderFlags ([string]$Context.Request.QueryString['npi'])) -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/flag'){$result=Save-FlagFromRequest (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/run-next'){$script:RunNext=$true;Send $Context 202 'application/json' '{"status":"scheduled"}';return};if($method -eq 'GET' -and $path -eq '/api/jobs'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-Jobs) -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/job'){$result=New-PreparedJob (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/stage'){$result=Receive-Upload $Context;Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/confirm'){$result=Publish-StagedFile ([string]$Context.Request.QueryString['token']);$index=Update-ProviderIndexAfterImport ([string]$result.sourceKey) -Force;$result['providerCount']=$index.count;$result['indexSeconds']=$index.seconds;$result['indexError']=$index.error;Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/stop'){$script:Stop=$true;Send $Context 202 'application/json' '{"status":"stopping"}';return};Send $Context 404 'application/json' '{"error":"not found"}'}catch{$msg=Safe $_.Exception.Message;Log 'HTTP_REQUEST' 'FAILED' $msg;try{Send $Context 400 'application/json' (([ordered]@{error=$msg}|ConvertTo-Json -Compress))}catch{}}
@@ -388,7 +396,7 @@ function New-PreparedJob($Body){if($null -eq $Body.aliases){throw 'Confirmed ali
 function Get-Jobs{return @(Get-ChildItem $script:Paths.State -Filter 'job-*.json' -File -ErrorAction SilentlyContinue|ForEach-Object{Json $_.FullName}|Sort-Object queuedUtc -Descending)}
 $script:TabCss='.tabs{display:flex;gap:4px;background:#17365d;padding:0 22px}.tabs a{color:#cfe0f5;text-decoration:none;padding:10px 18px;border-radius:8px 8px 0 0;font-weight:600}.tabs a:hover{background:#274b7a;color:#fff}.tabs a.active{background:#f4f7fb;color:#17365d}'
 function Get-NavHtml([string]$Active){
- $tabs=@(@('sources','/','Sources'),@('wizard','/providers','Provider Wizard'),@('index','/provider-index','Provider Index'),@('communication','/communication','Communication'),@('overview','/overview','Overview'),@('newpatients','/new-patients','New Patients'),@('poc','/poc-coding','POC Coding'))
+ $tabs=@(@('sources','/','Sources'),@('wizard','/providers','Provider Wizard'),@('index','/provider-index','Provider Index'),@('communication','/communication','Communication'),@('overview','/overview','Overview'),@('newpatients','/new-patients','New Patients'),@('poc','/poc-coding','POC Coding'),@('combine','/combine','Combine'))
  $links=foreach($t in $tabs){'<a href="'+$t[1]+'"'+$(if($t[0] -eq $Active){' class="active"'}else{''})+'>'+$t[2]+'</a>'}
  return '<nav class="tabs">'+($links -join '')+'</nav>'
 }
@@ -2764,6 +2772,2298 @@ loadPage(true).catch(e=>{el('fileInfo').innerHTML='<p class="error">'+esc(e.mess
 '@
  return $html.Replace('__NAV__',(Get-NavHtml 'poc')).Replace('__TABCSS__',$script:TabCss).Replace('__RUNCSS__',$script:RunPageCss).Replace('__FILEKEEP__',[string]$script:PocFileKeep)
 }
+# --- Draft 6.0: Combine tab - load and fingerprint exports, combine them into one row per patient with an editable, auditable JSON config ---
+# A config is a JSON array with one rule object per line (combine\configs\<name>.json), so it survives a round trip through Excel and an
+# enterprise LLM: the Rules page copies a JSON request (how the system works, the current config, the files' fingerprints) to the clipboard,
+# and the LLM's answer (one rule per row) is pasted back, checked and diffed before it is saved. Every save keeps the previous version.
+# Runs happen in a worker and write one workbook: the patient sheet, one sheet per summary view, and audit sheets tracing every value.
+$script:CmbFileKeep=40;$script:CmbRunKeep=100;$script:CmbInline=$false;$script:CmbPreviewRows=50
+$script:CmbExtensions=@('.xlsx','.csv','.txt','.tsv')
+$script:CmbRuleOrder=@('config','source','map','filter','key','field','derive','lookup','sort','output','view','measure')
+$script:CmbHows=@('priority','latest','earliest','max','min','sum','avg','count','countDistinct','list','mostCommon','any','all','exists')
+$script:CmbAggs=@('count','sum','avg','min','max','countDistinct','percent')
+$script:CmbBuiltins=@('_key','_sources','_rows','_matchedBy')
+$script:CmbRuleSpec=[ordered]@{
+ config=[ordered]@{purpose='Settings for the whole config. Exactly one, normally the first row.';props=[ordered]@{name='required. Name of the config; also its file name.';description='optional. What the config produces.';asOf='optional. Date (YYYY-MM-DD) that today() returns, so a rerun gives the same answer. Default: the day the output is built.';sheet='optional. Name of the patient sheet in the output workbook. Default "Patients".';lineage='optional. true (default) adds an audit sheet showing which source supplied every value; false leaves it out for very large outputs.';booleans='optional. How true/false values are written: "Y/N" (default), "Yes/No", "TRUE/FALSE" or "1/0".'};example='{"rule":"config","name":"Panel reconciliation","description":"One row per attributed patient from the four registry exports","asOf":"2026-09-30","note":"asOf fixed so reruns match the September reports"}'}
+ source=[ordered]@{purpose='Says which loaded file is which export. The order of source rules is the default priority: the first is the most trusted.';props=[ordered]@{source='required. Short id used by the other rules: letters, digits and underscore, e.g. "epic".';label='optional. Friendly name shown in the audit.';match='required. Array of column headers the file must contain (case and extra spaces are ignored). Choose headers that tell this export apart from the others.';fileName='optional. File name pattern with * wildcards, e.g. "*Panel*", for when several loaded files have the match columns.';sheet='optional. Worksheet name (.xlsx). Default: the first sheet with the match columns.';headerRow='optional. Row number of the column headers. Default: found automatically.';role='optional. "patients" (default): each row is about a patient. "lookup": a reference table (for example provider to location to region) used with lookup().';key='lookup sources only: the field (from this source''s map rules) that lookup() matches on.';required='optional. true (default) stops the run when no file matches; false skips the source.'};example='{"rule":"source","source":"epic","label":"Epic attributed panel","match":["MRN","Patient Name","PCP","Last Office Visit"],"note":"Most trusted for demographics and PCP"}'}
+ map=[ordered]@{purpose='Copies a source column (or a constant, or an expression) into a named field, cleaning and typing it. A field name used by several sources means the same thing in each, and is combined across them.';props=[ordered]@{source='required. The source id.';field='required. Field name to fill: letters, digits and underscore, starting with a letter.';column='The column header to read. Exactly one of column, columns, value, expr or special is required.';columns='Array of headers whose non-blank values are joined with sep.';sep='Separator for columns. Default one space.';value='A constant for every row, e.g. "Epic" or "2026-09-30".';expr='An expression over this source''s columns and the fields mapped above it.';special='"fileName", "fileDate" (the file''s modified date), "rowNumber" (row number in the file) or "sourceLabel".';clean='optional. Array of cleaning steps applied in order (see cleaningSteps).';type='optional. "text" (default), "number", "date" or "bool". Values that cannot be read as the type become blank and are counted in the audit.'};example='{"rule":"map","source":"epic","field":"MRN","column":"MRN","clean":["digits","stripLeadingZeros"],"note":"Claims file drops leading zeros, so strip them everywhere"}'}
+ filter=[ordered]@{purpose='Drops rows of a source (when it names a source; applied after that source''s map rules) or drops patients (no source; applied after the derive rules).';props=[ordered]@{source='optional. With a source: filters that source''s rows. Without: filters patients.';keep='Expression; rows or patients where it is true are kept. Use keep or drop, not both.';drop='Expression; rows or patients where it is true are removed.'};example='{"rule":"filter","source":"epic","drop":"[Patient Status] in (''Deceased'',''Inactive'')","note":"Only active patients"}'}
+ key=[ordered]@{purpose='Decides which rows are the same patient. Rows sharing a key value are joined. Key rules are tried in order; a later key never joins two patients that already have different values of an earlier key (that is reported as a key conflict instead). Key values compare ignoring case and extra spaces; clean them in the map rules so the formats agree. Rows with no usable key are left out and counted.';props=[ordered]@{fields='required. Array of fields that together identify a patient, e.g. ["MRN"] or ["LastName","FirstName","DOB"]. All must be non-blank for a row to use this key.';sources='optional. Array of source ids this key applies to. Default: every patient source that maps all the fields.'};example='{"rule":"key","fields":["MRN"],"note":"MRN is in every export"}'}
+ field=[ordered]@{purpose='Combines one field across all of a patient''s rows. A mapped field with no field rule uses how "priority".';props=[ordered]@{field='required. Name of the combined field.';of='optional. The mapped field to combine. Default: the same name. Lets one mapped field give several combined fields, e.g. ClaimsPCP from PCP with from ["claims"].';how='optional. priority (default), latest, earliest, max, min, sum, avg, count, countDistinct, list, mostCommon, any, all or exists (see howMethods).';from='optional. Array of source ids to use, in priority order. Default: every source that maps the field, in source order.';by='latest and earliest: the date field that orders the rows; it must be mapped in those sources.';sep='list: separator. Default "; ".';conflicts='optional. "report" (default) lists rows whose value differs from the chosen one on the Conflicts audit sheet; "ignore" does not.';type='optional. Converts the combined value: "text", "number", "date" or "bool".'};example='{"rule":"field","field":"PCP","how":"latest","by":"AttributionDate","from":["claims","epic"],"note":"Use whichever source attributed the patient most recently"}'}
+ derive=[ordered]@{purpose='Computes a new field for every patient with an expression, after the field rules, in the order listed. It can use any combined field, earlier derived fields and the built-in fields.';props=[ordered]@{field='required. Name of the new field.';expr='required. The expression.';type='optional. Converts the result: "text", "number", "date" or "bool".'};example='{"rule":"derive","field":"AWVDue","expr":"LastAWV is blank or daysBetween(LastAWV, today()) > 365","type":"bool","note":"Due when none in the past year"}'}
+ lookup=[ordered]@{purpose='A small translation table written in the config, used with lookup(''table'', value). For a table kept in a file, use a source with role "lookup" instead.';props=[ordered]@{table='required. Table name.';values='required. Object of "input":"output" pairs; inputs match ignoring case.';default='optional. Value when the input is not in the table. Default blank.'};example='{"rule":"lookup","table":"Region","values":{"Middletown":"Hudson Valley","Monroe":"Hudson Valley","Mt Kisco":"Westchester"},"note":"Location to region"}'}
+ sort=[ordered]@{purpose='Orders the patient rows. Sort rules apply in the order listed. Default: the order patients were first found.';props=[ordered]@{field='required. Field to sort by.';desc='optional. true sorts largest or latest first.'};example='{"rule":"sort","field":"PCP"}'}
+ output=[ordered]@{purpose='One output column of the patient sheet, in the order listed. Without output rules every field is written, in the order defined.';props=[ordered]@{field='required. Field to write (built-in fields allowed).';header='optional. Column title. Default: the field name.';format='optional. Excel number format, e.g. "m/d/yyyy", "0.0", "0%", "@" for text.';width='optional. Column width.'};example='{"rule":"output","field":"LastAWV","header":"Last AWV","format":"m/d/yyyy"}'}
+ view=[ordered]@{purpose='A summary sheet that groups patients, e.g. by provider, location, risk pool or region. Its numbers come from measure rules with the same view name.';props=[ordered]@{view='required. View name; also the sheet name (31 characters at most).';groupBy='required. Array of fields to group by, e.g. ["Region","Location"].';where='optional. Expression; only patients where it is true are counted.';total='optional. true (default) adds a total row.';sortBy='optional. A measure name or group field to sort the rows by. Default: the group fields.';desc='optional. true sorts largest first.'};example='{"rule":"view","view":"By provider","groupBy":["Location","PCP"],"sortBy":"Patients","desc":true}'}
+ measure=[ordered]@{purpose='One column of a view.';props=[ordered]@{view='required. The view name.';name='required. Column title.';agg='optional. count (default), sum, avg, min, max, countDistinct or percent.';field='sum, avg, min, max and countDistinct: the field to aggregate.';where='optional. Expression; only patients where it is true are counted in this measure.';of='percent: the measure counted on top.';per='percent: the measure divided by.';format='optional. Excel number format, e.g. "#,##0", "0.0", "0.0%".'};example='{"rule":"measure","view":"By provider","name":"AWV due","agg":"count","where":"AWVDue"}'}
+}
+$script:CmbHowText=[ordered]@{priority='the first non-blank value, trying sources in "from" order, then rows in file order';latest='the value from the row with the newest "by" date (rows without a date come last; ties go to source priority)';earliest='the value from the row with the oldest "by" date';max='the largest value (numbers, dates, or text in alphabetical order)';min='the smallest value';sum='total of the non-blank numbers';avg='average of the non-blank numbers';count='number of rows with a non-blank value';countDistinct='number of different non-blank values';list='the different non-blank values joined with sep, in priority order';mostCommon='the value found in the most rows (ties go to priority)';any='true if any non-blank value is true (Y, Yes, True, 1, X)';all='true if every non-blank value is true';exists='true if the patient has at least one row in any "from" source ("of" is not needed)'}
+$script:CmbCleanText=[ordered]@{
+ 'trim'='remove spaces at both ends (always done first)';'upper'='capitals';'lower'='lower case';'title'='Title Case';'collapseSpaces'='runs of spaces become one space'
+ 'digits'='keep only 0-9';'alnum'='keep only letters and digits';'stripLeadingZeros'='remove leading zeros';'pad:N'='left-pad with zeros to N characters, e.g. "pad:9"';'left:N'='keep the first N characters'
+ 'removeBracketId'='drop a trailing [id], e.g. "SMITH, JOHN [12345]" becomes "SMITH, JOHN"';'nameKey'='a person''s name as "LAST, FIRST" in capitals (reads "First Last" and "Last, First Middle"; drops MD, DO, NP, PA-C and similar)'
+ 'blankIf:TEXT'='treat TEXT as blank, e.g. "blankIf:N/A"';'{"replace":"regex","with":"text"}'='regular expression replace';'{"extract":"regex"}'='keep the first group of the match (or the whole match); no match gives blank'
+ '{"map":{"from":"to"},"else":"keep"}'='translate values (ignoring case); "else" is "keep" (default), "blank", or a value to use instead'
+}
+$script:CmbFunctionText=[ordered]@{
+ 'if(test, a, b)'='a when test is true, otherwise b';'coalesce(a, b, ...)'='the first non-blank value';'isBlank(x)'='true when x is blank'
+ 'upper(x), lower(x), trim(x), len(x)'='text case, trimming and length';'left(x, n), right(x, n), mid(x, start, n)'='parts of text; start counts from 1'
+ 'contains(x, t), startsWith(x, t), endsWith(x, t)'='text tests, ignoring case';'matches(x, ''regex'')'='regular expression test, ignoring case';'replace(x, ''regex'', ''with'')'='regular expression replace';'extract(x, ''regex'')'='the first group of the match, or the whole match'
+ 'number(x), date(x), text(x)'='convert';'round(x, digits), abs(x), min(a, b, ...), max(a, b, ...)'='numbers (min and max also work on dates)'
+ 'today()'='the config''s asOf date, or the day the output is built';'year(d), month(d), day(d)'='parts of a date';'addDays(d, n), addMonths(d, n), addYears(d, n)'='date arithmetic'
+ 'daysBetween(a, b), monthsBetween(a, b), yearsBetween(a, b)'='whole days, months or years from a to b; yearsBetween(DOB, today()) is the age'
+ 'format(x, ''pattern'')'='a date or number as text, e.g. format(LastVisit, ''yyyy-MM'') or format(Score, ''0.0'')'
+ 'lookup(''table'', x)'='the value for x in a lookup rule''s table';'lookup(''sourceId'', x, ''Field'')'='a field of the row of a lookup source whose key equals x'
+}
+$script:CmbGuide=@(
+ 'A config is a list of rules (JSON objects) that turns several spreadsheet (.xlsx) or text (.csv, .txt) exports into one row per patient, plus optional summary views. The source files are never changed.'
+ 'Processing order; each step uses only the rules of its kind:'
+ 'Step 1. source rules say which loaded file is which export, by the column headers it must contain. Their order is the default priority (first = most trusted).'
+ 'Step 2. map rules copy source columns into named fields, cleaning and typing the values. The same field name in several sources means the same thing and is combined.'
+ 'Step 3. filter rules that name a source drop rows of that source.'
+ 'Step 4. key rules decide which rows belong to the same patient (for example the same MRN).'
+ 'Step 5. field rules combine each field across a patient''s rows (priority, latest, max, list, count and so on). Disagreements are listed on the Conflicts audit sheet. A mapped field without a field rule uses how "priority".'
+ 'Step 6. derive rules compute new fields per patient with expressions, in the order listed.'
+ 'Step 7. filter rules without a source drop patients; sort rules order the rows; output rules choose and name the columns of the patient sheet.'
+ 'Step 8. view and measure rules build summary sheets, for example by provider, location, risk pool or region.'
+ 'Field names use letters, digits and underscore and start with a letter (MRN, LastVisit, RiskPool). Names are not case-sensitive.'
+ 'Built-in patient fields: _key (the key value that matched), _sources (ids of the sources the patient appears in), _rows (number of matched rows), _matchedBy (the key rules that joined the rows).'
+ 'Value types are text (default), number, date and bool. Blank cells stay blank (not zero). Dates are read from Excel dates or text such as 2026-09-30, 9/30/2026, 30-Sep-2026 or 20260930.'
+ 'Every rule may carry "note": a short reason for the rule, shown beside it in the audit. Always write one.'
+ 'The output workbook has audit sheets: each rule''s effect (rows dropped, values unreadable, conflicts found), the files used, every conflict, key matches, excluded patients, and which source supplied each value.'
+)
+$script:CmbExprGuide=@(
+ 'Expressions are used by map (expr), filter (keep or drop), derive (expr), view (where) and measure (where).'
+ 'Names: a field such as PCP, or any name in square brackets such as [Last Visit Date]. In a source''s map and filter rules a name can also be one of that source''s column headers.'
+ 'Text goes in single quotes: ''Inactive''. Write two single quotes for one inside text: ''O''''Brien''. Numbers: 12, 0.5. Also true, false and blank.'
+ 'Compare with = <> < <= > >= (text ignores case; numbers and dates compare as numbers and dates). Combine tests with and, or, not, and parentheses.'
+ 'X in (''A'',''B'') is true when X equals any of the values; X not in (...) is the opposite. X is blank and X is not blank test for empty values.'
+ 'Arithmetic: + - * /. A date plus a number adds days; a date minus a date gives days. & joins text: LastName & '', '' & FirstName.'
+ 'A comparison with a blank value is false, except that blank <> ''A'' is true; so Status <> ''Inactive'' keeps rows with a blank Status.'
+ 'A field on its own is a test: AWVDue is true for Y, Yes, True, 1 or X.'
+)
+$script:CmbAnswerGuide=@(
+ 'Answer with the complete new config (not just the changes) and nothing else.'
+ 'Put the answer in a new worksheet, in column A starting at cell A1, one line per row: row 1 is [ then one complete rule object per row, each followed by a comma except the last rule, and the final row is ].'
+ 'Never split a rule across rows or put two rules in one row. Do not add headings, explanations, blank rows, or quotes around the rows.'
+ 'Use straight double quotes for JSON, and single quotes for text inside expressions, so nothing needs escaping.'
+ 'Keep the rules that are still correct, in the same order where possible. Give every rule a short "note" saying why it exists.'
+ 'Use only the rule types, properties, cleaning steps and functions described here. Column names in match, column and columns must be copied exactly from the headers listed under columns.'
+ 'If something cannot be decided from this information, still answer with a complete config and put a note beginning QUESTION: on the affected rule saying what needs checking.'
+ 'If you cannot create a worksheet, reply with the same lines in a single code block.'
+)
+
+# Runtime helpers for expressions and the engine. A class keeps per-value calls cheap compared with functions (Windows PowerShell 5.1 compatible).
+class CmbRt{
+ static [Globalization.CultureInfo]$Inv=[Globalization.CultureInfo]::InvariantCulture
+ static [hashtable]$Rx=@{}
+ static [string[]]$DateFormats=@('yyyy-MM-dd','yyyy-MM-ddTHH:mm:ss','yyyy-MM-ddTHH:mm:ss.FFFFFFF','yyyy-MM-ddTHH:mm:ss.FFFFFFFK','yyyy-MM-ddTHH:mm:ssK','yyyy-MM-dd HH:mm:ss','yyyy-MM-dd HH:mm','yyyy/M/d','M/d/yyyy','M/d/yyyy H:mm','M/d/yyyy H:mm:ss','M/d/yyyy h:mm tt','M/d/yyyy h:mm:ss tt','M/d/yy','M-d-yyyy','M.d.yyyy','d-MMM-yyyy','d-MMM-yy','d MMM yyyy','MMM d, yyyy','MMMM d, yyyy','MMM d yyyy','yyyyMMdd')
+ static [bool] IsBlank([object]$v){if($null -eq $v){return $true};if($v -is [string]){return [string]::IsNullOrWhiteSpace([string]$v)};return $false}
+ static [bool] IsNum([object]$v){return ($v -is [double] -or $v -is [int] -or $v -is [long] -or $v -is [decimal] -or $v -is [single])}
+ static [object] Num([object]$v){
+  if($null -eq $v){return $null};if($v -is [double]){return [double]$v};if([CmbRt]::IsNum($v)){return [double]$v};if($v -is [bool]){if([bool]$v){return [double]1};return [double]0};if($v -is [DateTime]){return $null}
+  $s=([string]$v).Trim();if($s.Length -eq 0){return $null}
+  $neg=$false;if($s.StartsWith('(') -and $s.EndsWith(')')){$neg=$true;$s=$s.Substring(1,$s.Length-2)}
+  $pct=$false;if($s.EndsWith('%')){$pct=$true;$s=$s.Substring(0,$s.Length-1)}
+  $s=$s.Replace(',','').Replace('$','').Replace(' ','')
+  [double]$d=0;if(-not [double]::TryParse($s,[Globalization.NumberStyles]::Float,[CmbRt]::Inv,[ref]$d)){return $null}
+  if($pct){$d=$d/100};if($neg){$d=-$d};return $d
+ }
+ static [object] Date([object]$v){
+  if($null -eq $v){return $null};if($v -is [DateTime]){return [DateTime]$v}
+  if([CmbRt]::IsNum($v)){$n=[double]$v;if($n -ge 1000 -and $n -lt 80000){return [DateTime]::FromOADate($n)};return $null}
+  $s=([string]$v).Trim();if($s.Length -eq 0){return $null}
+  [DateTime]$d=[DateTime]::MinValue
+  if([DateTime]::TryParseExact($s,[CmbRt]::DateFormats,[CmbRt]::Inv,[Globalization.DateTimeStyles]::AllowWhiteSpaces,[ref]$d)){return $d}
+  [double]$n=0;if($s -match '^\d{4,5}(\.\d+)?$' -and [double]::TryParse($s,[Globalization.NumberStyles]::Float,[CmbRt]::Inv,[ref]$n) -and $n -ge 1000 -and $n -lt 80000){return [DateTime]::FromOADate($n)}
+  if($s -match '[A-Za-z]{3}' -and [DateTime]::TryParse($s,[CmbRt]::Inv,[Globalization.DateTimeStyles]::AllowWhiteSpaces,[ref]$d)){return $d}
+  return $null
+ }
+ static [object] Bool([object]$v){
+  if($null -eq $v){return $null};if($v -is [bool]){return [bool]$v};if([CmbRt]::IsNum($v)){return ([double]$v -ne 0)}
+  $s=([string]$v).Trim().ToUpperInvariant();if($s.Length -eq 0){return $null}
+  if($s -eq 'Y' -or $s -eq 'YES' -or $s -eq 'TRUE' -or $s -eq 'T' -or $s -eq '1' -or $s -eq 'X'){return $true}
+  if($s -eq 'N' -or $s -eq 'NO' -or $s -eq 'FALSE' -or $s -eq 'F' -or $s -eq '0'){return $false}
+  return $null
+ }
+ static [bool] Truthy([object]$v){
+  if($null -eq $v){return $false};if($v -is [bool]){return [bool]$v};if([CmbRt]::IsNum($v)){return ([double]$v -ne 0)};if($v -is [DateTime]){return $true}
+  $s=([string]$v).Trim().ToUpperInvariant();return -not ($s.Length -eq 0 -or $s -eq 'N' -or $s -eq 'NO' -or $s -eq 'FALSE' -or $s -eq 'F' -or $s -eq '0')
+ }
+ static [string] Text([object]$v){
+  if($null -eq $v){return ''};if($v -is [string]){return [string]$v}
+  if($v -is [DateTime]){$d=[DateTime]$v;if($d.TimeOfDay.Ticks -eq 0){return $d.ToString('M/d/yyyy',[CmbRt]::Inv)};return $d.ToString('M/d/yyyy H:mm',[CmbRt]::Inv)}
+  if([CmbRt]::IsNum($v)){return ([double]$v).ToString('0.###############',[CmbRt]::Inv)};if($v -is [bool]){if([bool]$v){return 'Y'};return 'N'}
+  return [string]$v
+ }
+ static [string] Key([object]$v){$s=[CmbRt]::Text($v).Trim();if($s.Length -eq 0){return ''};return ([regex]::Replace($s,'\s+',' ')).ToUpperInvariant()}
+ static [object] Cmp([object]$a,[object]$b){
+  # -1/0/1, or $null when either side is blank. Same-type values take the fast paths.
+  if($null -eq $a -or $null -eq $b){return $null}
+  if($a -is [double] -and $b -is [double]){return ([double]$a).CompareTo([double]$b)}
+  if($a -is [DateTime] -and $b -is [DateTime]){return ([DateTime]$a).CompareTo([DateTime]$b)}
+  if($a -is [string] -and $b -is [string]){$x=([string]$a).Trim();$y=([string]$b).Trim();if($x.Length -eq 0 -or $y.Length -eq 0){return $null};$r=[string]::Compare($x,$y,[StringComparison]::OrdinalIgnoreCase);if($r -lt 0){return -1};if($r -gt 0){return 1};return 0}
+  if([CmbRt]::IsBlank($a) -or [CmbRt]::IsBlank($b)){return $null}
+  if($a -is [bool] -or $b -is [bool]){return ([int][CmbRt]::Truthy($a)).CompareTo([int][CmbRt]::Truthy($b))}
+  if($a -is [DateTime] -or $b -is [DateTime]){$x=[CmbRt]::Date($a);$y=[CmbRt]::Date($b);if($null -ne $x -and $null -ne $y){return ([DateTime]$x).CompareTo([DateTime]$y)}}
+  elseif([CmbRt]::IsNum($a) -or [CmbRt]::IsNum($b)){$x=[CmbRt]::Num($a);$y=[CmbRt]::Num($b);if($null -ne $x -and $null -ne $y){return ([double]$x).CompareTo([double]$y)}}
+  $r=[string]::Compare([CmbRt]::Text($a).Trim(),[CmbRt]::Text($b).Trim(),[StringComparison]::OrdinalIgnoreCase);if($r -lt 0){return -1};if($r -gt 0){return 1};return 0
+ }
+ static [bool] Eq([object]$a,[object]$b){
+  if($a -is [string] -and $b -is [string]){$x=([string]$a).Trim();$y=([string]$b).Trim();return [string]::Equals($x,$y,[StringComparison]::OrdinalIgnoreCase)}
+  if($a -is [double] -and $b -is [double]){return ([double]$a -eq [double]$b)}
+  $ba=[CmbRt]::IsBlank($a);$bb=[CmbRt]::IsBlank($b);if($ba -or $bb){return ($ba -and $bb)};return ([int][CmbRt]::Cmp($a,$b) -eq 0)
+ }
+ static [bool] Lt([object]$a,[object]$b){$c=[CmbRt]::Cmp($a,$b);return ($null -ne $c -and [int]$c -lt 0)}
+ static [bool] Le([object]$a,[object]$b){$c=[CmbRt]::Cmp($a,$b);return ($null -ne $c -and [int]$c -le 0)}
+ static [bool] Gt([object]$a,[object]$b){$c=[CmbRt]::Cmp($a,$b);return ($null -ne $c -and [int]$c -gt 0)}
+ static [bool] Ge([object]$a,[object]$b){$c=[CmbRt]::Cmp($a,$b);return ($null -ne $c -and [int]$c -ge 0)}
+ static [bool] In([object]$a,[object[]]$list){foreach($x in $list){if([CmbRt]::Eq($a,$x)){return $true}};return $false}
+ static [string] Cat([object]$a,[object]$b){return [CmbRt]::Text($a)+[CmbRt]::Text($b)}
+ static [object] Add([object]$a,[object]$b){
+  if([CmbRt]::IsBlank($a) -or [CmbRt]::IsBlank($b)){return $null}
+  if($a -is [DateTime]){$n=[CmbRt]::Num($b);if($null -eq $n){return $null};return ([DateTime]$a).AddDays([double]$n)}
+  if($b -is [DateTime]){$n=[CmbRt]::Num($a);if($null -eq $n){return $null};return ([DateTime]$b).AddDays([double]$n)}
+  $x=[CmbRt]::Num($a);$y=[CmbRt]::Num($b);if($null -ne $x -and $null -ne $y){return ([double]$x+[double]$y)};return [CmbRt]::Text($a)+[CmbRt]::Text($b)
+ }
+ static [object] Sub([object]$a,[object]$b){
+  if([CmbRt]::IsBlank($a) -or [CmbRt]::IsBlank($b)){return $null}
+  if($a -is [DateTime]){if($b -is [DateTime]){return [Math]::Round((([DateTime]$a)-([DateTime]$b)).TotalDays,6)};$d=[CmbRt]::Date($b);if($null -ne $d -and -not [CmbRt]::IsNum($b)){return [Math]::Round((([DateTime]$a)-([DateTime]$d)).TotalDays,6)};$n=[CmbRt]::Num($b);if($null -eq $n){return $null};return ([DateTime]$a).AddDays(-[double]$n)}
+  $x=[CmbRt]::Num($a);$y=[CmbRt]::Num($b);if($null -eq $x -or $null -eq $y){return $null};return ([double]$x-[double]$y)
+ }
+ static [object] Mul([object]$a,[object]$b){$x=[CmbRt]::Num($a);$y=[CmbRt]::Num($b);if($null -eq $x -or $null -eq $y){return $null};return ([double]$x*[double]$y)}
+ static [object] Div([object]$a,[object]$b){$x=[CmbRt]::Num($a);$y=[CmbRt]::Num($b);if($null -eq $x -or $null -eq $y -or [double]$y -eq 0){return $null};return ([double]$x/[double]$y)}
+ static [object] Neg([object]$a){$x=[CmbRt]::Num($a);if($null -eq $x){return $null};return -[double]$x}
+ static [object] Coalesce([object[]]$list){foreach($x in $list){if(-not [CmbRt]::IsBlank($x)){return $x}};return $null}
+ static [object] Pick([object[]]$list,[int]$sign){
+  $best=$null;foreach($x in $list){if([CmbRt]::IsBlank($x)){continue};if($null -eq $best){$best=$x;continue};$c=[CmbRt]::Cmp($x,$best);if($null -ne $c -and [int]$c*$sign -gt 0){$best=$x}};return $best
+ }
+ static [object] Min([object[]]$list){return [CmbRt]::Pick($list,-1)}
+ static [object] Max([object[]]$list){return [CmbRt]::Pick($list,1)}
+ static [object] Blank([string]$s){if($s.Length -eq 0){return $null};return $s}
+ static [object] Upper([object]$a){return [CmbRt]::Blank([CmbRt]::Text($a).ToUpperInvariant())}
+ static [object] Lower([object]$a){return [CmbRt]::Blank([CmbRt]::Text($a).ToLowerInvariant())}
+ static [object] Trim([object]$a){return [CmbRt]::Blank([CmbRt]::Text($a).Trim())}
+ static [object] Len([object]$a){return [double][CmbRt]::Text($a).Length}
+ static [int] Int([object]$n){$x=[CmbRt]::Num($n);if($null -eq $x){return 0};return [int][Math]::Floor([double]$x)}
+ static [object] Left([object]$a,[object]$n){$s=[CmbRt]::Text($a);$k=[Math]::Max(0,[Math]::Min($s.Length,[CmbRt]::Int($n)));return [CmbRt]::Blank($s.Substring(0,$k))}
+ static [object] Right([object]$a,[object]$n){$s=[CmbRt]::Text($a);$k=[Math]::Max(0,[Math]::Min($s.Length,[CmbRt]::Int($n)));return [CmbRt]::Blank($s.Substring($s.Length-$k))}
+ static [object] Mid([object]$a,[object]$st,[object]$n){$s=[CmbRt]::Text($a);$i=[Math]::Max(1,[CmbRt]::Int($st))-1;if($i -ge $s.Length){return $null};$k=[Math]::Max(0,[Math]::Min($s.Length-$i,[CmbRt]::Int($n)));return [CmbRt]::Blank($s.Substring($i,$k))}
+ static [bool] Contains([object]$a,[object]$t){return ([CmbRt]::Text($a).IndexOf([CmbRt]::Text($t),[StringComparison]::OrdinalIgnoreCase) -ge 0)}
+ static [bool] StartsWith([object]$a,[object]$t){return [CmbRt]::Text($a).StartsWith([CmbRt]::Text($t),[StringComparison]::OrdinalIgnoreCase)}
+ static [bool] EndsWith([object]$a,[object]$t){return [CmbRt]::Text($a).EndsWith([CmbRt]::Text($t),[StringComparison]::OrdinalIgnoreCase)}
+ static [regex] Re([string]$p){if(-not [CmbRt]::Rx.ContainsKey($p)){[CmbRt]::Rx[$p]=[regex]::new($p,[Text.RegularExpressions.RegexOptions]'IgnoreCase, CultureInvariant')};return [regex][CmbRt]::Rx[$p]}
+ static [bool] Matches([object]$a,[object]$p){if([CmbRt]::IsBlank($a)){return $false};return [CmbRt]::Re([CmbRt]::Text($p)).IsMatch([CmbRt]::Text($a))}
+ static [object] Replace([object]$a,[object]$p,[object]$w){if([CmbRt]::IsBlank($a)){return $null};return [CmbRt]::Blank([CmbRt]::Re([CmbRt]::Text($p)).Replace([CmbRt]::Text($a),[CmbRt]::Text($w)))}
+ static [object] Extract([object]$a,[object]$p){if([CmbRt]::IsBlank($a)){return $null};$m=[CmbRt]::Re([CmbRt]::Text($p)).Match([CmbRt]::Text($a));if(-not $m.Success){return $null};if($m.Groups.Count -gt 1){return [CmbRt]::Blank($m.Groups[1].Value)};return [CmbRt]::Blank($m.Value)}
+ static [object] Round([object]$a,[object]$n){$x=[CmbRt]::Num($a);if($null -eq $x){return $null};return [Math]::Round([double]$x,[Math]::Max(0,[Math]::Min(15,[CmbRt]::Int($n))),[MidpointRounding]::AwayFromZero)}
+ static [object] Abs([object]$a){$x=[CmbRt]::Num($a);if($null -eq $x){return $null};return [Math]::Abs([double]$x)}
+ static [object] Part([object]$d,[string]$what){$x=[CmbRt]::Date($d);if($null -eq $x){return $null};$t=[DateTime]$x;if($what -eq 'y'){return [double]$t.Year};if($what -eq 'm'){return [double]$t.Month};return [double]$t.Day}
+ static [object] AddTo([object]$d,[object]$n,[string]$what){
+  $x=[CmbRt]::Date($d);$k=[CmbRt]::Num($n);if($null -eq $x -or $null -eq $k){return $null};$t=[DateTime]$x
+  if($what -eq 'd'){return $t.AddDays([double]$k)};if($what -eq 'm'){return $t.AddMonths([int][Math]::Truncate([double]$k))};return $t.AddYears([int][Math]::Truncate([double]$k))
+ }
+ static [object] Between([object]$a,[object]$b,[string]$what){
+  if($a -is [DateTime]){$s=([DateTime]$a).Date}else{$x=[CmbRt]::Date($a);if($null -eq $x){return $null};$s=([DateTime]$x).Date}
+  if($b -is [DateTime]){$e=([DateTime]$b).Date}else{$y=[CmbRt]::Date($b);if($null -eq $y){return $null};$e=([DateTime]$y).Date}
+  if($what -eq 'd'){return [double](($e-$s).Days)}
+  $m=($e.Year-$s.Year)*12+$e.Month-$s.Month
+  if($e -ge $s){if($e.Day -lt $s.Day){$m--}}elseif($e.Day -gt $s.Day){$m++}
+  if($what -eq 'm'){return [double]$m};return [double][Math]::Truncate($m/12)
+ }
+ static [object] Format([object]$a,[object]$f){
+  if([CmbRt]::IsBlank($a)){return $null};$p=[CmbRt]::Text($f)
+  if($a -is [DateTime]){return ([DateTime]$a).ToString($p,[CmbRt]::Inv)};$x=[CmbRt]::Num($a);if($null -ne $x){return ([double]$x).ToString($p,[CmbRt]::Inv)}
+  $d=[CmbRt]::Date($a);if($null -ne $d){return ([DateTime]$d).ToString($p,[CmbRt]::Inv)};return [CmbRt]::Text($a)
+ }
+ static [object] Lookup([hashtable]$t,[object]$k,[string]$field){
+  $key=[CmbRt]::Key($k);if($key.Length -eq 0 -or -not $t.ContainsKey($key)){if($t.ContainsKey('*default*') -and $field.Length -eq 0){return $t['*default*']};return $null}
+  $v=$t[$key];if($field.Length -eq 0){return $v};$h=[hashtable]$v;if($h.ContainsKey($field)){return $h[$field]};return $null
+ }
+ static [string] NameKey([string]$s){
+  # A person's name as "LAST, FIRST" in capitals: drops a trailing [id], punctuation, credentials and suffixes; reads "First M Last" too.
+  $t=[regex]::Replace($s.ToUpperInvariant(),'\s*\[[^\]]*\]\s*$','');$t=[regex]::Replace($t,'[.''`]','');$t=[regex]::Replace($t,'[^A-Z0-9, \-]',' ')
+  $t=[regex]::Replace($t,'(^|[ ,])(FNP-BC|FNP-C|PA-C|MD|DO|NP|PA|FNP|APRN|ANP|AGNP|AGPCNP|ACNP|CNM|RN|DNP|PHD|MBBS|DPM|JR|SR|II|III|IV)(?=$|[ ,])','$1')
+  $t=[regex]::Replace($t,'\s+',' ').Trim();$t=$t.Trim(',',' ');if($t.Length -eq 0){return ''}
+  $c=$t.IndexOf(',')
+  if($c -ge 0){$last=$t.Substring(0,$c).Trim();$rest=$t.Substring($c+1).Trim(',',' ');$first=$rest;$sp=$rest.IndexOf(' ');if($sp -gt 0){$first=$rest.Substring(0,$sp)};if($first.Length -eq 0){return $last};return $last+', '+$first}
+  $w=$t.Split(' ');if($w.Length -eq 1){return $t};return $w[$w.Length-1]+', '+$w[0]
+ }
+ static [object] Convert([object]$v,[string]$type){
+  # Converts to a field type; '' (text) keeps strings, turning empty text into blank.
+  if($type -eq 'number'){return [CmbRt]::Num($v)};if($type -eq 'date'){return [CmbRt]::Date($v)};if($type -eq 'bool'){return [CmbRt]::Bool($v)}
+  if($type -eq 'text'){if([CmbRt]::IsBlank($v)){return $null};return [CmbRt]::Text($v).Trim()}
+  if($v -is [string] -and [string]::IsNullOrWhiteSpace([string]$v)){return $null};return $v
+ }
+}
+
+# Strict JSON reader (also accepts trailing commas) giving ordered, case-insensitive dictionaries and object[] arrays. Text stays text:
+# unlike ConvertFrom-Json in PowerShell 7 it never turns date-like strings into dates, and its errors name the line and column.
+class CmbJsonReader{
+ [string]$S;[int]$I
+ CmbJsonReader([string]$s){$this.S=$s;$this.I=0}
+ [void] Fail([string]$m){
+  $line=1;$col=1;$end=[Math]::Min($this.I,$this.S.Length);for($k=0;$k -lt $end;$k++){if($this.S[$k] -eq [char]10){$line++;$col=1}else{$col++}}
+  throw ('line '+$line+', column '+$col+': '+$m)
+ }
+ [void] Ws(){while($this.I -lt $this.S.Length -and [char]::IsWhiteSpace($this.S[$this.I])){$this.I++}}
+ [object] Document(){
+  if($this.S.Length -gt 0 -and $this.S[0] -eq [char]0xFEFF){$this.I=1}
+  $this.Ws();if($this.I -ge $this.S.Length){$this.Fail('the text is empty')};$v=$this.Value();$this.Ws()
+  if($this.I -lt $this.S.Length){$this.Fail('unexpected text after the end: '+$this.Near())};return $v
+ }
+ [string] Near(){$n=[Math]::Min(25,$this.S.Length-$this.I);if($n -le 0){return 'end of text'};return '"'+$this.S.Substring($this.I,$n)+'"'}
+ [object] Value(){
+  $this.Ws();if($this.I -ge $this.S.Length){$this.Fail('unexpected end of text');return $null}
+  $c=$this.S[$this.I]
+  if($c -eq [char]'{'){return $this.Obj()};if($c -eq [char]'['){return $this.Arr()};if($c -eq [char]'"'){return $this.Str()}
+  if($c -eq [char]'-' -or [char]::IsDigit($c)){return $this.Number()}
+  if([string]::CompareOrdinal($this.S,$this.I,'true',0,4) -eq 0){$this.I+=4;return $true}
+  if([string]::CompareOrdinal($this.S,$this.I,'false',0,5) -eq 0){$this.I+=5;return $false}
+  if([string]::CompareOrdinal($this.S,$this.I,'null',0,4) -eq 0){$this.I+=4;return $null}
+  if($c -eq [char]0x201C -or $c -eq [char]0x201D){$this.Fail('curly quotes are not JSON; use straight double quotes');return $null}
+  $this.Fail('expected a value but found '+$this.Near());return $null
+ }
+ [object] Obj(){
+  $o=[Collections.Specialized.OrderedDictionary]::new([StringComparer]::OrdinalIgnoreCase);$this.I++
+  while($true){
+   $this.Ws();if($this.I -ge $this.S.Length){$this.Fail('missing } at the end of an object');return $null}
+   if($this.S[$this.I] -eq [char]'}'){$this.I++;return $o}
+   if($this.S[$this.I] -ne [char]'"'){$this.Fail('expected a "name" in double quotes but found '+$this.Near());return $null}
+   $k=$this.Str();$this.Ws();if($this.I -ge $this.S.Length -or $this.S[$this.I] -ne [char]':'){$this.Fail('expected : after "'+$k+'"');return $null}
+   $this.I++;$o[$k]=$this.Value();$this.Ws()
+   if($this.I -ge $this.S.Length){$this.Fail('missing } at the end of an object');return $null}
+   $c=$this.S[$this.I];if($c -eq [char]','){$this.I++;continue};if($c -eq [char]'}'){$this.I++;return $o}
+   $this.Fail('expected , or } after the value of "'+$k+'" but found '+$this.Near());return $null
+  }
+  return $o
+ }
+ [object] Arr(){
+  $l=[Collections.Generic.List[object]]::new();$this.I++
+  while($true){
+   $this.Ws();if($this.I -ge $this.S.Length){$this.Fail('missing ] at the end of a list');return $null}
+   if($this.S[$this.I] -eq [char]']'){$this.I++;return $l.ToArray()}
+   $l.Add($this.Value());$this.Ws()
+   if($this.I -ge $this.S.Length){$this.Fail('missing ] at the end of a list');return $null}
+   $c=$this.S[$this.I];if($c -eq [char]','){$this.I++;continue};if($c -eq [char]']'){$this.I++;return $l.ToArray()}
+   $this.Fail('expected , or ] in a list but found '+$this.Near());return $null
+  }
+  return $l.ToArray()
+ }
+ [string] Str(){
+  $sb=[Text.StringBuilder]::new();$this.I++;$stops=[char[]]@([char]'"',[char]'\',[char]10,[char]13)
+  while($true){
+   $j=$this.S.IndexOfAny($stops,$this.I);if($j -lt 0){$this.I=$this.S.Length;$this.Fail('text is missing its closing "');return ''}
+   [void]$sb.Append($this.S,$this.I,$j-$this.I);$this.I=$j;$c=$this.S[$j]
+   if($c -eq [char]'"'){$this.I++;return $sb.ToString()}
+   if($c -ne [char]'\'){$this.Fail('text is missing its closing " before the end of the line');return ''}
+   if($j+1 -ge $this.S.Length){$this.Fail('text ends after \');return ''}
+   $e=$this.S[$j+1];$this.I=$j+2
+   switch([string]$e){'"'{[void]$sb.Append('"')}'\'{[void]$sb.Append('\')}'/'{[void]$sb.Append('/')}'b'{[void]$sb.Append([char]8)}'f'{[void]$sb.Append([char]12)}'n'{[void]$sb.Append([char]10)}'r'{[void]$sb.Append([char]13)}'t'{[void]$sb.Append([char]9)}
+    'u'{if($this.I+4 -gt $this.S.Length -or $this.S.Substring($this.I,4) -notmatch '^[0-9a-fA-F]{4}$'){$this.Fail('\u needs 4 hex digits');return ''};[void]$sb.Append([char][Convert]::ToInt32($this.S.Substring($this.I,4),16));$this.I+=4}
+    default{$this.I=$j;$this.Fail('unknown escape \'+$e+' (write \\ for a backslash)');return ''}}
+  }
+  return $sb.ToString()
+ }
+ [object] Number(){
+  $m=[regex]::Match($this.S.Substring($this.I,[Math]::Min(64,$this.S.Length-$this.I)),'^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?')
+  if(-not $m.Success){$this.Fail('bad number '+$this.Near());return $null}
+  $this.I+=$m.Length;return [double]::Parse($m.Value,[Globalization.CultureInfo]::InvariantCulture)
+ }
+}
+function ConvertFrom-CmbJson([string]$Text){$v=([CmbJsonReader]::new($Text)).Document();if($v -is [Array]){return ,$v};return $v}
+function ConvertTo-CmbJsonString([string]$s){
+ if($s -notmatch '["\\\x00-\x1f]'){return '"'+$s+'"'}
+ $sb=New-Object Text.StringBuilder ($s.Length+16);[void]$sb.Append('"')
+ foreach($ch in $s.ToCharArray()){$n=[int]$ch;if($ch -eq '"'){[void]$sb.Append('\"')}elseif($ch -eq '\'){[void]$sb.Append('\\')}elseif($n -eq 10){[void]$sb.Append('\n')}elseif($n -eq 13){[void]$sb.Append('\r')}elseif($n -eq 9){[void]$sb.Append('\t')}elseif($n -lt 32){[void]$sb.Append('\u'+$n.ToString('x4'))}else{[void]$sb.Append($ch)}}
+ [void]$sb.Append('"');return $sb.ToString()
+}
+function ConvertTo-CmbJson($Value,[switch]$SortKeys){
+ # Compact JSON that leaves < > & ' unescaped (ConvertTo-Json in Windows PowerShell writes < etc.), keeping key order unless SortKeys.
+ if($null -eq $Value){return 'null'}
+ if($Value -is [string]){return (ConvertTo-CmbJsonString $Value)}
+ if($Value -is [bool]){if($Value){return 'true'};return 'false'}
+ if($Value -is [double] -or $Value -is [single]){$d=[double]$Value;if([double]::IsNaN($d) -or [double]::IsInfinity($d)){return 'null'};return $d.ToString('R',[Globalization.CultureInfo]::InvariantCulture)}
+ if($Value -is [int] -or $Value -is [long] -or $Value -is [decimal]){return ([string]::Format([Globalization.CultureInfo]::InvariantCulture,'{0}',$Value))}
+ if($Value -is [DateTime]){$t=[DateTime]$Value;if($t.TimeOfDay.Ticks -eq 0){return ('"'+$t.ToString('yyyy-MM-dd')+'"')};return ('"'+$t.ToString('yyyy-MM-ddTHH:mm:ss')+'"')}
+ if($Value -is [Collections.IDictionary]){
+  $keys=@($Value.Keys);if($SortKeys){$keys=@($keys|Sort-Object)}
+  $parts=foreach($k in $keys){(ConvertTo-CmbJsonString ([string]$k))+':'+(ConvertTo-CmbJson $Value[$k] -SortKeys:$SortKeys)}
+  return '{'+(@($parts) -join ',')+'}'
+ }
+ if($Value -is [Management.Automation.PSCustomObject]){
+  $keys=@($Value.PSObject.Properties|ForEach-Object{$_.Name});if($SortKeys){$keys=@($keys|Sort-Object)}
+  $parts=foreach($k in $keys){(ConvertTo-CmbJsonString $k)+':'+(ConvertTo-CmbJson $Value.$k -SortKeys:$SortKeys)}
+  return '{'+(@($parts) -join ',')+'}'
+ }
+ if($Value -is [Collections.IEnumerable]){$parts=foreach($x in $Value){ConvertTo-CmbJson $x -SortKeys:$SortKeys};return '['+(@($parts) -join ',')+']'}
+ return (ConvertTo-CmbJsonString ([string]$Value))
+}
+function Get-CmbValue($Rule,[string]$Key,$Default=$null){if($null -ne $Rule -and $Rule -is [Collections.IDictionary] -and $Rule.Contains($Key) -and $null -ne $Rule[$Key]){return $Rule[$Key]};return $Default}
+function Get-CmbText($Rule,[string]$Key){$v=Get-CmbValue $Rule $Key '';if($v -is [string]){return $v.Trim()};if($v -is [double] -or $v -is [bool]){return (ConvertTo-CmbJson $v)};return ''}
+function Get-CmbList($Rule,[string]$Key){
+ # A property that should be an array of text; a single text value is accepted as a one-item list.
+ $v=Get-CmbValue $Rule $Key $null;if($null -eq $v){return @()}
+ if($v -is [string]){if($v.Trim()){return @($v.Trim())};return @()}
+ if($v -is [Array]){return @(foreach($x in $v){if($null -ne $x -and ([string]$x).Trim()){([string]$x).Trim()}})}
+ return @([string]$v)
+}
+function ConvertTo-CmbRuleText($Rule){
+ # One rule as one line: "rule" first and "note" last, the rest in its own order.
+ $o=[ordered]@{};if($Rule.Contains('rule')){$o['rule']=$Rule['rule']}
+ foreach($k in @($Rule.Keys)){if($k -ne 'rule' -and $k -ne 'note'){$o[[string]$k]=$Rule[$k]}}
+ if($Rule.Contains('note')){$o['note']=$Rule['note']}
+ return (ConvertTo-CmbJson $o)
+}
+function Format-CmbConfigText([object[]]$Rules){
+ $lines=@(foreach($r in $Rules){ConvertTo-CmbRuleText $r})
+ if($lines.Count -eq 0){return "[`r`n]`r`n"}
+ return ("[`r`n"+($lines -join (",`r`n"))+"`r`n]`r`n")
+}
+function Read-CmbConfigText([string]$Text){
+ # Accepts a config as saved (a JSON array, one rule per line), pretty-printed JSON, an object holding "rules" or "currentConfig", or rows
+ # copied from Excel (one rule per row, with or without the [ ] rows and trailing commas; cells Excel wrapped in quotes are unwrapped).
+ $errors=[Collections.Generic.List[object]]::new();$rules=[Collections.Generic.List[object]]::new()
+ $t=[string]$Text;if($t.Length -gt 0 -and $t[0] -eq [char]0xFEFF){$t=$t.Substring(1)}
+ $lines=@(($t -replace "`r`n","`n" -replace "`r","`n") -split "`n")
+ $clean=@(foreach($l in $lines){
+  $x=$l.Trim();if($x -match '^```'){'';continue}
+  if($x.Length -ge 2 -and $x.StartsWith('"') -and ($x.EndsWith('"') -or $x.EndsWith('",')) -and $x.Contains('""') -and $x.Substring(1).TrimStart().StartsWith('{')){$x=$x.Substring(1);if($x.EndsWith('",')){$x=$x.Substring(0,$x.Length-2)+','}else{$x=$x.Substring(0,$x.Length-1)};$x=$x.Replace('""','"')}
+  $x
+ })
+ $joined=($clean -join "`n").Trim()
+ if(!$joined){$errors.Add([ordered]@{line=0;message='Nothing to read: the text is empty.'});return [ordered]@{rules=@();errors=@($errors);lines=@()}}
+ $doc=$null;$wholeError=''
+ try{$doc=ConvertFrom-CmbJson $joined}catch{$wholeError=$_.Exception.Message}
+ if(!$wholeError -and $joined.Contains([string][char]0x201C)){$wholeError=''}
+ if(!$wholeError){
+  $list=$null
+  if($doc -is [Array]){$list=$doc}
+  elseif($doc -is [Collections.IDictionary]){foreach($k in @('rules','currentConfig','config')){if($doc.Contains($k) -and $doc[$k] -is [Array]){$list=$doc[$k];break}};if($null -eq $list -and $doc.Contains('rule')){$list=@($doc)}}
+  if($null -eq $list){$errors.Add([ordered]@{line=0;message='Expected a list of rules: [ {"rule":...}, ... ].'});return [ordered]@{rules=@();errors=@($errors);lines=@()}}
+  $n=0;foreach($r in $list){$n++;if($r -is [Collections.IDictionary]){$rules.Add($r)}else{$errors.Add([ordered]@{line=0;message=('Item '+$n+' of the list is not a rule object.')})}}
+  return [ordered]@{rules=@($rules);errors=@($errors);lines=@()}
+ }
+ # Row by row: each non-empty row holds one rule object.
+ $lineNos=[Collections.Generic.List[int]]::new();$rowErrors=0;$rowsTried=0
+ for($i=0;$i -lt $clean.Count;$i++){
+  $x=[string]$clean[$i];if(!$x -or $x -eq '[' -or $x -eq ']' -or $x -eq '],' -or $x -eq '[,'){continue}
+  if($x.StartsWith('[{')){$x=$x.Substring(1)};if($x.EndsWith('}]')){$x=$x.Substring(0,$x.Length-1)};if($x.EndsWith('},')){$x=$x.Substring(0,$x.Length-1)}
+  $rowsTried++
+  try{$r=ConvertFrom-CmbJson $x;if($r -is [Collections.IDictionary]){$rules.Add($r);$lineNos.Add($i+1)}else{$rowErrors++;$errors.Add([ordered]@{line=($i+1);message='This row is not a rule object.'})}}
+  catch{$rowErrors++;$m=$_.Exception.Message -replace '^line 1, ','';$errors.Add([ordered]@{line=($i+1);message=$m})}
+ }
+ if($rowsTried -eq 0 -or ($rowErrors -gt 0 -and $rules.Count -eq 0) -or $rowErrors -gt [Math]::Max(3,$rowsTried/2)){
+  return [ordered]@{rules=@();errors=@([ordered]@{line=0;message=('This is not valid JSON: '+$wholeError)});lines=@()}
+ }
+ return [ordered]@{rules=@($rules);errors=@($errors);lines=@($lineNos)}
+}
+function Get-CmbRuleIdentity($Rule,[hashtable]$Seen){
+ # A stable name for a rule (used to compare two versions of a config): its "id" if given, otherwise what it applies to.
+ $type=([string](Get-CmbValue $Rule 'rule' '')).Trim().ToLowerInvariant();$id=Get-CmbText $Rule 'id'
+ if($id){$k='id:'+$id}
+ else{
+  switch($type){
+   'config'{$k='config'}
+   'source'{$k='source:'+(Get-CmbText $Rule 'source')}
+   'map'{$k='map:'+(Get-CmbText $Rule 'source')+'.'+(Get-CmbText $Rule 'field')}
+   'field'{$k='field:'+(Get-CmbText $Rule 'field')}
+   'derive'{$k='derive:'+(Get-CmbText $Rule 'field')}
+   'lookup'{$k='lookup:'+(Get-CmbText $Rule 'table')}
+   'sort'{$k='sort:'+(Get-CmbText $Rule 'field')}
+   'output'{$k='output:'+(Get-CmbText $Rule 'field')}
+   'view'{$k='view:'+(Get-CmbText $Rule 'view')}
+   'measure'{$k='measure:'+(Get-CmbText $Rule 'view')+'.'+(Get-CmbText $Rule 'name')}
+   'filter'{$s=Get-CmbText $Rule 'source';if(!$s){$s='patients'};$k='filter:'+$s}
+   'key'{$k='key'}
+   default{$k='rule:'+$type}
+  }
+ }
+ $k=$k.ToLowerInvariant();if($Seen.ContainsKey($k)){$Seen[$k]++;return ($k+'#'+$Seen[$k])};$Seen[$k]=1;return $k
+}
+function Compare-CmbRules([object[]]$Old,[object[]]$New){
+ # What changed between two versions: added, removed and changed rules (ignoring key order inside a rule), and order changes where order matters.
+ $so=@{};$sn=@{};$a=[ordered]@{};$b=[ordered]@{}
+ foreach($r in @($Old)){$a[(Get-CmbRuleIdentity $r $so)]=$r};foreach($r in @($New)){$b[(Get-CmbRuleIdentity $r $sn)]=$r}
+ $out=[Collections.Generic.List[object]]::new()
+ foreach($k in @($b.Keys)){
+  $after=ConvertTo-CmbRuleText $b[$k]
+  if(!$a.Contains($k)){$out.Add([ordered]@{change='added';identity=$k;before='';after=$after});continue}
+  if((ConvertTo-CmbJson $a[$k] -SortKeys) -ne (ConvertTo-CmbJson $b[$k] -SortKeys)){$out.Add([ordered]@{change='changed';identity=$k;before=(ConvertTo-CmbRuleText $a[$k]);after=$after})}
+ }
+ foreach($k in @($a.Keys)){if(!$b.Contains($k)){$out.Add([ordered]@{change='removed';identity=$k;before=(ConvertTo-CmbRuleText $a[$k]);after=''})}}
+ foreach($type in @('source','key','derive','sort','output','measure')){
+  $oa=@($a.Keys|Where-Object{$_ -like ($type+'*') -and $b.Contains($_)});$ob=@($b.Keys|Where-Object{$_ -like ($type+'*') -and $a.Contains($_)})
+  if(($oa -join '|') -ne ($ob -join '|')){$out.Add([ordered]@{change='reordered';identity=$type;before=($oa -join ', ');after=($ob -join ', ')})}
+ }
+ return ,@($out)
+}
+
+# --- Combine expressions: tokenized, parsed and compiled into one PowerShell loop per expression. User text never becomes code: names
+# become column variables, text and numbers become constants, and functions and operators come from a fixed list.
+$script:CmbFunctions=@{
+ 'if'=@(3,3);'coalesce'=@(1,20);'isblank'=@(1,1);'upper'=@(1,1);'lower'=@(1,1);'trim'=@(1,1);'len'=@(1,1);'left'=@(2,2);'right'=@(2,2);'mid'=@(3,3)
+ 'contains'=@(2,2);'startswith'=@(2,2);'endswith'=@(2,2);'matches'=@(2,2);'replace'=@(3,3);'extract'=@(2,2);'number'=@(1,1);'date'=@(1,1);'text'=@(1,1)
+ 'round'=@(1,2);'abs'=@(1,1);'min'=@(1,20);'max'=@(1,20);'today'=@(0,0);'year'=@(1,1);'month'=@(1,1);'day'=@(1,1);'adddays'=@(2,2);'addmonths'=@(2,2);'addyears'=@(2,2)
+ 'daysbetween'=@(2,2);'monthsbetween'=@(2,2);'yearsbetween'=@(2,2);'format'=@(2,2);'lookup'=@(2,3)
+}
+$script:CmbBoolFunctions=@('isblank','contains','startswith','endswith','matches')
+function Get-CmbTokens([string]$Text){
+ $t=[Collections.Generic.List[object]]::new();$i=0;$n=$Text.Length
+ while($i -lt $n){
+  $c=$Text[$i]
+  if([char]::IsWhiteSpace($c)){$i++;continue}
+  if($c -eq "'" -or $c -eq '"'){
+   $q=$c;$sb=New-Object Text.StringBuilder;$j=$i+1;$closed=$false
+   while($j -lt $n){if($Text[$j] -eq $q){if($j+1 -lt $n -and $Text[$j+1] -eq $q){[void]$sb.Append($q);$j+=2;continue};$closed=$true;break};[void]$sb.Append($Text[$j]);$j++}
+   if(!$closed){throw ('text starting at position '+($i+1)+' has no closing quote')}
+   $t.Add(@{t='str';v=$sb.ToString();p=$i});$i=$j+1;continue
+  }
+  if($c -eq '['){$j=$Text.IndexOf(']',$i+1);if($j -lt 0){throw ('[ at position '+($i+1)+' has no closing ]')};$name=$Text.Substring($i+1,$j-$i-1).Trim();if(!$name){throw ('empty [] at position '+($i+1))};$t.Add(@{t='id';v=$name;p=$i;br=$true});$i=$j+1;continue}
+  if([char]::IsDigit($c) -or ($c -eq '.' -and $i+1 -lt $n -and [char]::IsDigit($Text[$i+1]))){$m=[regex]::Match($Text.Substring($i),'^\d*\.?\d+([eE][+-]?\d+)?');$t.Add(@{t='num';v=[double]::Parse($m.Value,[Globalization.CultureInfo]::InvariantCulture);p=$i});$i+=$m.Length;continue}
+  if([char]::IsLetter($c) -or $c -eq '_'){
+   $m=[regex]::Match($Text.Substring($i),'^[A-Za-z_][A-Za-z0-9_]*');$w=$m.Value;$lw=$w.ToLowerInvariant()
+   if($lw -in @('and','or','not','in','is','true','false','blank','null')){$t.Add(@{t='kw';v=$lw;p=$i})}else{$t.Add(@{t='id';v=$w;p=$i;br=$false})}
+   $i+=$m.Length;continue
+  }
+  $two='';if($i+1 -lt $n){$two=$Text.Substring($i,2)}
+  if($two -in @('<=','>=','<>','!=','==')){$t.Add(@{t='op';v=$two;p=$i});$i+=2;continue}
+  if('=<>&+-*/'.IndexOf($c) -ge 0){$t.Add(@{t='op';v=[string]$c;p=$i});$i++;continue}
+  if($c -eq '('){$t.Add(@{t='lp';v='(';p=$i});$i++;continue};if($c -eq ')'){$t.Add(@{t='rp';v=')';p=$i});$i++;continue};if($c -eq ','){$t.Add(@{t='comma';v=',';p=$i});$i++;continue}
+  if($c -eq [char]0x2018 -or $c -eq [char]0x2019 -or $c -eq [char]0x201C -or $c -eq [char]0x201D){throw ('curly quote at position '+($i+1)+'; use a straight single quote')}
+  throw ('unexpected character "'+$c+'" at position '+($i+1))
+ }
+ $t.Add(@{t='end';v='';p=$n});return ,$t
+}
+class CmbExprParser{
+ [object]$T;[int]$K
+ CmbExprParser([object]$tokens){$this.T=$tokens;$this.K=0}
+ [hashtable] Peek(){return [hashtable]$this.T[$this.K]}
+ [hashtable] Next(){$x=[hashtable]$this.T[$this.K];if($this.K -lt $this.T.Count-1){$this.K++};return $x}
+ [bool] IsKw([string]$w){$x=$this.Peek();return ($x.t -eq 'kw' -and $x.v -eq $w)}
+ [bool] IsOp([string]$o){$x=$this.Peek();return ($x.t -eq 'op' -and $x.v -eq $o)}
+ [void] Fail([string]$m){$x=$this.Peek();$where='at the end';if($x.t -ne 'end'){$where='at position '+($x.p+1)};throw ($m+' '+$where)}
+ [hashtable] Parse(){$e=$this.OrX();if($this.Peek().t -ne 'end'){$this.Fail('unexpected "'+$this.Peek().v+'"')};return $e}
+ [hashtable] OrX(){$l=$this.AndX();while($this.IsKw('or')){$null=$this.Next();$l=@{t='or';l=$l;r=$this.AndX()}};return $l}
+ [hashtable] AndX(){$l=$this.NotX();while($this.IsKw('and')){$null=$this.Next();$l=@{t='and';l=$l;r=$this.NotX()}};return $l}
+ [hashtable] NotX(){if($this.IsKw('not')){$null=$this.Next();return @{t='not';e=$this.NotX()}};return $this.CmpX()}
+ [hashtable] CmpX(){
+  $l=$this.CatX();$x=$this.Peek()
+  if($x.t -eq 'op' -and $x.v -in @('=','==','<>','!=','<','<=','>','>=')){$null=$this.Next();$op=$x.v;if($op -eq '=='){$op='='};if($op -eq '!='){$op='<>'};return @{t='cmp';op=$op;l=$l;r=$this.CatX()}}
+  $neg=$false
+  if($this.IsKw('not')){$save=$this.K;$null=$this.Next();if($this.IsKw('in')){$neg=$true}else{$this.K=$save;return $l}}
+  if($this.IsKw('in')){
+   $null=$this.Next();if($this.Peek().t -ne 'lp'){$this.Fail('expected ( after in')};$null=$this.Next()
+   $items=[Collections.Generic.List[object]]::new();if($this.Peek().t -ne 'rp'){$items.Add($this.CatX());while($this.Peek().t -eq 'comma'){$null=$this.Next();$items.Add($this.CatX())}}
+   if($this.Peek().t -ne 'rp'){$this.Fail('expected ) to close the in list')};$null=$this.Next();return @{t='in';e=$l;items=$items.ToArray();neg=$neg}
+  }
+  if($this.IsKw('is')){$null=$this.Next();$n=$false;if($this.IsKw('not')){$null=$this.Next();$n=$true};if(-not ($this.IsKw('blank') -or $this.IsKw('null'))){$this.Fail('expected blank after is')};$null=$this.Next();return @{t='isblank';e=$l;neg=$n}}
+  return $l
+ }
+ [hashtable] CatX(){$l=$this.AddX();while($this.IsOp('&')){$null=$this.Next();$l=@{t='bin';op='&';l=$l;r=$this.AddX()}};return $l}
+ [hashtable] AddX(){$l=$this.MulX();while($this.IsOp('+') -or $this.IsOp('-')){$op=$this.Next().v;$l=@{t='bin';op=$op;l=$l;r=$this.MulX()}};return $l}
+ [hashtable] MulX(){$l=$this.UnX();while($this.IsOp('*') -or $this.IsOp('/')){$op=$this.Next().v;$l=@{t='bin';op=$op;l=$l;r=$this.UnX()}};return $l}
+ [hashtable] UnX(){if($this.IsOp('-')){$null=$this.Next();return @{t='neg';e=$this.UnX()}};return $this.Prim()}
+ [hashtable] Prim(){
+  $x=$this.Next()
+  if($x.t -eq 'num'){return @{t='const';v=$x.v}};if($x.t -eq 'str'){return @{t='const';v=$x.v}}
+  if($x.t -eq 'kw'){if($x.v -eq 'true'){return @{t='const';v=$true}};if($x.v -eq 'false'){return @{t='const';v=$false}};if($x.v -eq 'blank' -or $x.v -eq 'null'){return @{t='null'}};$this.K--;$this.Fail('unexpected "'+$x.v+'"')}
+  if($x.t -eq 'lp'){$e=$this.OrX();if($this.Peek().t -ne 'rp'){$this.Fail('expected )')};$null=$this.Next();return $e}
+  if($x.t -eq 'id'){
+   if(-not $x.br -and $this.Peek().t -eq 'lp'){
+    $null=$this.Next();$args1=[Collections.Generic.List[object]]::new()
+    if($this.Peek().t -ne 'rp'){$args1.Add($this.OrX());while($this.Peek().t -eq 'comma'){$null=$this.Next();$args1.Add($this.OrX())}}
+    if($this.Peek().t -ne 'rp'){$this.Fail('expected ) to close '+$x.v+'(')};$null=$this.Next();return @{t='call';name=([string]$x.v).ToLowerInvariant();shown=$x.v;args=$args1.ToArray();p=$x.p}
+   }
+   return @{t='id';name=[string]$x.v;p=$x.p}
+  }
+  if($x.t -eq 'end'){$this.Fail('the expression is incomplete')}
+  $this.K--;$this.Fail('unexpected "'+$x.v+'"');return $null
+ }
+}
+function ConvertTo-CmbExprTree([string]$Text){
+ if([string]::IsNullOrWhiteSpace($Text)){throw 'the expression is empty'}
+ return ([CmbExprParser]::new((Get-CmbTokens $Text))).Parse()
+}
+function New-CmbExprContext([hashtable]$Names,[hashtable]$Tables,$Today,[string]$Unknown='',[switch]$AcceptAny){
+ # Names maps a name (ConvertTo-CmbHeaderKey form) to the index of a column array; AcceptAny lets unknown names through (headers not known
+ # yet). Tables maps a lookup table name (lower case) to @{index;fields}.
+ return @{Names=$Names;AcceptAny=[bool]$AcceptAny;Unknown=$Unknown;Tables=$Tables;Today=$Today;Consts=[Collections.Generic.List[object]]::new();Cols=[Collections.Generic.List[int]]::new();ColVar=@{};Refs=[Collections.Generic.List[string]]::new();TableRefs=[Collections.Generic.List[int]]::new()}
+}
+function Add-CmbConst($Ctx,$Value){$Ctx.Consts.Add($Value);return ('$k'+($Ctx.Consts.Count-1))}
+function ConvertTo-CmbCode($Node,$Ctx){
+ # Returns @{code;bool}: PowerShell for one row (row index $i), and whether it already gives [bool].
+ switch($Node.t){
+  'const'{return @{code=(Add-CmbConst $Ctx $Node.v);bool=($Node.v -is [bool])}}
+  'null'{return @{code='$null';bool=$false}}
+  'id'{
+   $nk=ConvertTo-CmbHeaderKey ([string]$Node.name)
+   if($Ctx.Names.ContainsKey($nk)){$col=[int]$Ctx.Names[$nk]}elseif($Ctx.AcceptAny){$col=0}else{throw ('unknown name "'+$Node.name+'"'+$(if($Ctx.Unknown){' ('+$Ctx.Unknown+')'}else{''})+' at position '+($Node.p+1))}
+   $Ctx.Refs.Add([string]$Node.name)
+   if(!$Ctx.ColVar.ContainsKey($col)){$Ctx.Cols.Add($col);$Ctx.ColVar[$col]='$c'+($Ctx.Cols.Count-1)}
+   return @{code=($Ctx.ColVar[$col]+'[$i]');bool=$false}
+  }
+  'not'{$e=ConvertTo-CmbCode $Node.e $Ctx;return @{code=('(-not '+(Get-CmbBoolCode $e)+')');bool=$true}}
+  'and'{$l=ConvertTo-CmbCode $Node.l $Ctx;$r=ConvertTo-CmbCode $Node.r $Ctx;return @{code=('('+(Get-CmbBoolCode $l)+' -and '+(Get-CmbBoolCode $r)+')');bool=$true}}
+  'or'{$l=ConvertTo-CmbCode $Node.l $Ctx;$r=ConvertTo-CmbCode $Node.r $Ctx;return @{code=('('+(Get-CmbBoolCode $l)+' -or '+(Get-CmbBoolCode $r)+')');bool=$true}}
+  'cmp'{
+   $l=(ConvertTo-CmbCode $Node.l $Ctx).code;$r=(ConvertTo-CmbCode $Node.r $Ctx).code
+   $m=@{'='='Eq';'<>'='Eq';'<'='Lt';'<='='Le';'>'='Gt';'>='='Ge'}[$Node.op];$c='[CmbRt]::'+$m+'(('+$l+'),('+$r+'))'
+   if($Node.op -eq '<>'){$c='(-not '+$c+')'};return @{code=$c;bool=$true}
+  }
+  'in'{
+   $e=(ConvertTo-CmbCode $Node.e $Ctx).code;$allConst=$true;foreach($x in $Node.items){if($x.t -ne 'const'){$allConst=$false}}
+   if($allConst){$list=Add-CmbConst $Ctx ([object[]]@(foreach($x in $Node.items){$x.v}))}else{$list='[object[]]@('+(@(foreach($x in $Node.items){'('+(ConvertTo-CmbCode $x $Ctx).code+')'}) -join ',')+')'}
+   $c='[CmbRt]::In(('+$e+'),'+$list+')';if($Node.neg){$c='(-not '+$c+')'};return @{code=$c;bool=$true}
+  }
+  'isblank'{$e=(ConvertTo-CmbCode $Node.e $Ctx).code;$c='[CmbRt]::IsBlank(('+$e+'))';if($Node.neg){$c='(-not '+$c+')'};return @{code=$c;bool=$true}}
+  'neg'{$e=(ConvertTo-CmbCode $Node.e $Ctx).code;return @{code=('[CmbRt]::Neg(('+$e+'))');bool=$false}}
+  'bin'{
+   $l=(ConvertTo-CmbCode $Node.l $Ctx).code;$r=(ConvertTo-CmbCode $Node.r $Ctx).code
+   $m=@{'&'='Cat';'+'='Add';'-'='Sub';'*'='Mul';'/'='Div'}[$Node.op];return @{code=('[CmbRt]::'+$m+'(('+$l+'),('+$r+'))');bool=$false}
+  }
+  'call'{return (ConvertTo-CmbCallCode $Node $Ctx)}
+ }
+ throw ('unknown expression part '+$Node.t)
+}
+function Get-CmbBoolCode($Part){if($Part.bool){return $Part.code};return ('[CmbRt]::Truthy(('+$Part.code+'))')}
+function ConvertTo-CmbCallCode($Node,$Ctx){
+ $name=[string]$Node.name;$a=@($Node.args)
+ if(!$script:CmbFunctions.ContainsKey($name)){throw ('unknown function '+$Node.shown+'() at position '+($Node.p+1))}
+ $lim=$script:CmbFunctions[$name];if($a.Count -lt $lim[0] -or $a.Count -gt $lim[1]){$want=$(if($lim[0] -eq $lim[1]){[string]$lim[0]}else{[string]$lim[0]+' to '+$lim[1]});throw ($Node.shown+'() takes '+$want+' value'+$(if($lim[1] -eq 1){''}else{'s'})+' but was given '+$a.Count)}
+ if($name -eq 'today'){return @{code=(Add-CmbConst $Ctx $Ctx.Today);bool=$false}}
+ if($name -eq 'lookup'){
+  if($a[0].t -ne 'const' -or !($a[0].v -is [string])){throw 'lookup() needs the table name in quotes as its first value'}
+  $tn=([string]$a[0].v).ToLowerInvariant();if(!$Ctx.Tables.ContainsKey($tn)){throw ('lookup(): there is no lookup table or lookup source named "'+$a[0].v+'"')}
+  $tb=$Ctx.Tables[$tn];$field=''
+  if($a.Count -eq 3){if($a[2].t -ne 'const' -or !($a[2].v -is [string])){throw 'lookup() needs the field name in quotes as its third value'};$field=[string]$a[2].v;$hit=@($tb.fields|Where-Object{$_ -ieq $field});if($tb.fields.Count -gt 0 -and $hit.Count -eq 0){throw ('lookup(): source "'+$a[0].v+'" has no field "'+$field+'"')};if($hit.Count){$field=[string]$hit[0]}}
+  elseif($tb.fields.Count -gt 0){throw ('lookup(): "'+$a[0].v+'" is a lookup source; name the field to return, e.g. lookup('''+$a[0].v+''', x, '''+$tb.fields[0]+''')')}
+  $Ctx.TableRefs.Add([int]$tb.index)
+  return @{code=('[CmbRt]::Lookup($L['+[int]$tb.index+'],('+(ConvertTo-CmbCode $a[1] $Ctx).code+'),'+(Add-CmbConst $Ctx $field)+')');bool=$false}
+ }
+ if($name -eq 'if'){$c=ConvertTo-CmbCode $a[0] $Ctx;$x=(ConvertTo-CmbCode $a[1] $Ctx).code;$y=(ConvertTo-CmbCode $a[2] $Ctx).code;return @{code=('$(if('+(Get-CmbBoolCode $c)+'){'+$x+'}else{'+$y+'})');bool=$false}}
+ $codes=@(foreach($x in $a){'('+(ConvertTo-CmbCode $x $Ctx).code+')'})
+ switch($name){
+  'coalesce'{return @{code=('[CmbRt]::Coalesce([object[]]@('+($codes -join ',')+'))');bool=$false}}
+  'min'{return @{code=('[CmbRt]::Min([object[]]@('+($codes -join ',')+'))');bool=$false}}
+  'max'{return @{code=('[CmbRt]::Max([object[]]@('+($codes -join ',')+'))');bool=$false}}
+  'isblank'{return @{code=('[CmbRt]::IsBlank('+$codes[0]+')');bool=$true}}
+  'number'{return @{code=('[CmbRt]::Num('+$codes[0]+')');bool=$false}}
+  'date'{return @{code=('[CmbRt]::Date('+$codes[0]+')');bool=$false}}
+  'text'{return @{code=('[CmbRt]::Blank([CmbRt]::Text('+$codes[0]+'))');bool=$false}}
+  'round'{$d='0';if($codes.Count -gt 1){$d=$codes[1]};return @{code=('[CmbRt]::Round('+$codes[0]+','+$d+')');bool=$false}}
+  'year'{return @{code=('[CmbRt]::Part('+$codes[0]+',''y'')');bool=$false}}
+  'month'{return @{code=('[CmbRt]::Part('+$codes[0]+',''m'')');bool=$false}}
+  'day'{return @{code=('[CmbRt]::Part('+$codes[0]+',''d'')');bool=$false}}
+  'adddays'{return @{code=('[CmbRt]::AddTo('+$codes[0]+','+$codes[1]+',''d'')');bool=$false}}
+  'addmonths'{return @{code=('[CmbRt]::AddTo('+$codes[0]+','+$codes[1]+',''m'')');bool=$false}}
+  'addyears'{return @{code=('[CmbRt]::AddTo('+$codes[0]+','+$codes[1]+',''y'')');bool=$false}}
+  'daysbetween'{return @{code=('[CmbRt]::Between('+$codes[0]+','+$codes[1]+',''d'')');bool=$false}}
+  'monthsbetween'{return @{code=('[CmbRt]::Between('+$codes[0]+','+$codes[1]+',''m'')');bool=$false}}
+  'yearsbetween'{return @{code=('[CmbRt]::Between('+$codes[0]+','+$codes[1]+',''y'')');bool=$false}}
+ }
+ $method=@{'upper'='Upper';'lower'='Lower';'trim'='Trim';'len'='Len';'left'='Left';'right'='Right';'mid'='Mid';'contains'='Contains';'startswith'='StartsWith';'endswith'='EndsWith';'matches'='Matches';'replace'='Replace';'extract'='Extract';'abs'='Abs';'format'='Format'}[$name]
+ if($name -in @('matches','replace','extract') -and $a[1].t -eq 'const'){try{$null=[regex]::new([string]$a[1].v)}catch{throw ($Node.shown+'(): the pattern '''+$a[1].v+''' is not a valid regular expression')}}
+ return @{code=('[CmbRt]::'+$method+'('+($codes -join ',')+')');bool=($script:CmbBoolFunctions -contains $name)}
+}
+function New-CmbCompiled([string]$Text,$Ctx,[switch]$AsBool){
+ # Compiles one expression into a loop over $n rows: & $sb $Cols $Consts $Tables $n $out $errs. Errors name the expression.
+ try{$tree=ConvertTo-CmbExprTree $Text;$part=ConvertTo-CmbCode $tree $Ctx}catch{throw ('expression "'+$Text+'": '+$_.Exception.Message)}
+ $body=$(if($AsBool){Get-CmbBoolCode $part}else{$part.code})
+ $sb=New-Object Text.StringBuilder;[void]$sb.Append('param($C,$K,$L,[int]$n,$out,$errs)')
+ for($j=0;$j -lt $Ctx.Cols.Count;$j++){[void]$sb.Append(';$c'+$j+'=$C['+$j+']')}
+ for($j=0;$j -lt $Ctx.Consts.Count;$j++){[void]$sb.Append(';$k'+$j+'=$K['+$j+']')}
+ [void]$sb.Append(';for($i=0;$i -lt $n;$i++){try{$out[$i]=('+$body+')}catch{$errs.Add($i)}}')
+ return @{text=$Text;script=[scriptblock]::Create($sb.ToString());cols=@($Ctx.Cols);consts=$Ctx.Consts.ToArray();refs=@($Ctx.Refs);tables=@($Ctx.TableRefs|Select-Object -Unique);bool=[bool]$AsBool}
+}
+function Invoke-CmbCompiled($Compiled,[object[]]$Columns,[object[]]$Tables,[int]$Count){
+ # Runs a compiled expression over every row; returns @{values;errors(row indexes)}.
+ $cols=[object[]]@(foreach($j in $Compiled.cols){,$Columns[$j]})
+ $out=New-Object object[] $Count;$errs=[Collections.Generic.List[int]]::new()
+ & $Compiled.script $cols $Compiled.consts $Tables $Count $out $errs
+ return @{values=$out;errors=$errs}
+}
+# --- Combine files: the loaded exports (combine\source-files, newest few kept, one record each in state\cmbfile-<token>.json) and their fingerprints.
+function Get-CmbFilePath([string]$Token){if($Token -notmatch '^[a-f0-9]{32}$'){throw 'Invalid file token.'};return (Join-Path $script:Paths.State ('cmbfile-'+$Token+'.json'))}
+function Get-CmbFiles{return @(Get-ChildItem $script:Paths.State -Filter 'cmbfile-*.json' -File -ErrorAction SilentlyContinue|ForEach-Object{Json $_.FullName}|Where-Object{$null -ne $_}|Sort-Object -Property @{Expression={ConvertTo-IsoText (Get-P $_ 'loadedUtc' '')}} -Descending)}
+function Get-CmbFile([string]$Token){$f=Json (Get-CmbFilePath $Token);if(!$f){throw 'That file is no longer loaded; load it again on the Files page.'};if(!(Test-Path -LiteralPath ([string](Get-P $f 'path' '')))){throw ('"'+[string]$f.originalName+'" was removed from the combine folder; load it again.')};return $f}
+function ConvertTo-CmbHeaderKey([string]$Text){return (($Text -replace '\s+',' ').Trim().ToLowerInvariant())}
+function Get-CmbShape([string]$Value){
+ # The shape of a value for fingerprints: digits become 9, letter runs become A, the rest is kept ("123-45-6789" -> "999-99-9999").
+ $s=$Value;if($s.Length -gt 40){$s=$s.Substring(0,40)+'...'};$s=[regex]::Replace($s,'[0-9]','9');$s=[regex]::Replace($s,'[A-Za-z]+','A');return [regex]::Replace($s,'\s+',' ')
+}
+function Get-CmbValueKind([string]$Value){
+ if($Value -match '^-?\d+$'){return 'integer'};if($Value -match '^[-(]?\$?-?[\d,]*\.?\d+%?\)?$'){return 'number'}
+ if($Value -match '^(?i:y|n|yes|no|true|false)$'){return 'bool'}
+ if($Value -match '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}' -or $Value -match '^\d{1,4}[-/.]\d{1,2}[-/.]\d{2,4}( \d{1,2}:\d{2}(:\d{2})?( ?[AaPp][Mm])?)?$' -or $Value -match '^\d{1,2}[- ][A-Za-z]{3}[- ]\d{2,4}$' -or $Value -match '^[A-Za-z]{3,9} \d{1,2},? \d{4}$'){if($null -ne [CmbRt]::Date($Value)){return 'date'}}
+ return 'text'
+}
+function Get-CmbTextEncoding([byte[]]$Bytes){
+ if($Bytes.Length -ge 3 -and $Bytes[0] -eq 0xEF -and $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF){return (New-Object Text.UTF8Encoding($false))}
+ if($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xFE){return [Text.Encoding]::Unicode};if($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFE -and $Bytes[1] -eq 0xFF){return [Text.Encoding]::BigEndianUnicode}
+ try{$null=(New-Object Text.UTF8Encoding($false,$true)).GetString($Bytes);return (New-Object Text.UTF8Encoding($false))}catch{}
+ try{return [Text.Encoding]::GetEncoding(1252)}catch{return [Text.Encoding]::GetEncoding(28591)}
+}
+function Read-CmbTextRows([string]$Path){
+ # A delimited text export as rows of fields. The delimiter is the one of , tab | ; seen most in the first line (tab for .tsv).
+ $bytes=[IO.File]::ReadAllBytes($Path);$enc=Get-CmbTextEncoding $bytes;$text=$enc.GetString($bytes);if($text.Length -gt 0 -and $text[0] -eq [char]0xFEFF){$text=$text.Substring(1)}
+ $first='';foreach($l in ($text -split "`n",30)){if($l.Trim()){$first=$l;break}}
+ $delim=',';$best=-1;foreach($d in @(',',"`t",'|',';')){$n=([regex]::Matches(($first -replace '"[^"]*"',''),[regex]::Escape($d))).Count;if($n -gt $best){$best=$n;$delim=$d}}
+ if([IO.Path]::GetExtension($Path) -ieq '.tsv'){$delim="`t"}
+ try{Add-Type -AssemblyName Microsoft.VisualBasic -ErrorAction Stop}catch{}
+ $p=New-Object Microsoft.VisualBasic.FileIO.TextFieldParser (New-Object IO.StringReader $text);$p.SetDelimiters([string[]]@($delim));$p.HasFieldsEnclosedInQuotes=$true;$p.TrimWhiteSpace=$false
+ $rows=[Collections.Generic.List[string[]]]::new();$bad=0
+ try{while(-not $p.EndOfData){try{$f=$p.ReadFields();if($null -ne $f){$rows.Add($f)}}catch [Microsoft.VisualBasic.FileIO.MalformedLineException]{$bad++;$rows.Add([string[]]@(($p.ErrorLine -split [regex]::Escape($delim))))}}}finally{$p.Close()}
+ return @{rows=$rows;delimiter=$delim;encoding=$enc.WebName;malformed=$bad}
+}
+function Find-CmbHeaderRow([object[]]$Rows){
+ # Index (0-based) of the header row among the first rows: the one with the most non-blank, non-numeric cells (ties: the earliest).
+ $best=0;$bestN=-1
+ for($r=0;$r -lt [Math]::Min(25,$Rows.Count);$r++){$n=0;foreach($v in @($Rows[$r])){$s=([string]$v).Trim();if($s -and $s -notmatch '^-?[\d.,/:\- ]+$'){$n++}};if($n -gt $bestN){$best=$r;$bestN=$n}}
+ return $best
+}
+function Get-CmbUniqueHeaders([string[]]$Headers){
+ # Blank headers become "Column C"; repeated headers get " (2)", " (3)" so every column has its own name.
+ $seen=@{};$out=New-Object string[] $Headers.Count
+ for($c=0;$c -lt $Headers.Count;$c++){
+  $h=([string]$Headers[$c] -replace '\s+',' ').Trim();if(!$h){$h='Column '+(Get-ColumnLetter ($c+1))}
+  $k=$h.ToLowerInvariant();if($seen.ContainsKey($k)){$seen[$k]++;$h=$h+' ('+$seen[$k]+')'}else{$seen[$k]=1};$out[$c]=$h
+ }
+ return ,$out
+}
+function Read-CmbSheets([string]$Path,[string]$OnlySheet='',[int]$HeaderRow=0,[string[]]$Want=$null,[string]$TextName=''){
+ # Every non-empty table in a file as @{name;headerRow;headers;columns (header -> string[]);rows}. Want limits which columns are read
+ # (header keys); HeaderRow (1-based) overrides the detected header row. Text files have one table named after the file.
+ $ext=[IO.Path]::GetExtension($Path).ToLowerInvariant();$out=[Collections.Generic.List[object]]::new()
+ $wantSet=$null;if($null -ne $Want){$wantSet=@{};foreach($w in $Want){$wantSet[(ConvertTo-CmbHeaderKey $w)]=$true}}
+ if($ext -eq '.xlsx'){
+  $pkg=$null
+  try{
+   $pkg=Open-ExcelPackage -Path $Path -ErrorAction Stop
+   foreach($ws in $pkg.Workbook.Worksheets){
+    if($OnlySheet -and $ws.Name -ne $OnlySheet){continue};if($null -eq $ws.Dimension){continue}
+    $maxCol=[Math]::Min(500,$ws.Dimension.End.Column);$last=$ws.Dimension.End.Row;$top=[Math]::Min(25,$last)
+    $raw=$ws.Cells[1,1,$top,$maxCol].Value;$grid=@(for($r=0;$r -lt $top;$r++){,([object[]]@(for($c=0;$c -lt $maxCol;$c++){if($raw -is [Array] -and $raw.Rank -eq 2){$raw[$r,$c]}elseif($r -eq 0 -and $c -eq 0){$raw}else{$null}}))})
+    $h=$(if($HeaderRow -gt 0){$HeaderRow-1}else{Find-CmbHeaderRow $grid});if($h -ge $grid.Count){continue}
+    $headers=Get-CmbUniqueHeaders ([string[]]@(foreach($v in $grid[$h]){if($v -is [DateTime]){([DateTime]$v).ToString('yyyy-MM-dd')}else{[string]$v}}))
+    $width=$headers.Count;while($width -gt 0 -and [string]$grid[$h][$width-1] -eq ''){$width--};if($width -eq 0){continue}
+    $cols=[ordered]@{};$first=$h+2
+    for($c=0;$c -lt $width;$c++){$name=$headers[$c];if($null -ne $wantSet -and !$wantSet.ContainsKey((ConvertTo-CmbHeaderKey $name))){continue};if($last -ge $first){$cols[$name]=ConvertTo-CmbDateColumn $ws ($c+1) $first (Get-ColumnText $ws ($c+1) $first $last)}else{$cols[$name]=New-Object string[] 0}}
+    $n=[Math]::Max(0,$last-$first+1);$n=Get-CmbTrimmedCount $cols $n
+    $out.Add(@{name=$ws.Name;headerRow=($h+1);headers=[string[]]$headers[0..($width-1)];columns=$cols;rows=$n})
+   }
+  }finally{if($pkg){Close-ExcelPackage $pkg -NoSave}}
+  return @($out)
+ }
+ if($ext -notin @('.csv','.txt','.tsv')){throw ('Unsupported file type '+$ext+'; use .xlsx or .csv (save .xls files as .xlsx first).')}
+ $t=Read-CmbTextRows $Path;$rows=$t.rows;if($rows.Count -eq 0){return @()}
+ $h=$(if($HeaderRow -gt 0){$HeaderRow-1}else{Find-CmbHeaderRow @($rows.GetRange(0,[Math]::Min(25,$rows.Count)))})
+ if($h -ge $rows.Count){return @()}
+ $headers=Get-CmbUniqueHeaders ([string[]]$rows[$h]);$width=$headers.Count;$n=$rows.Count-$h-1;$cols=[ordered]@{}
+ for($c=0;$c -lt $width;$c++){
+  $name=$headers[$c];if($null -ne $wantSet -and !$wantSet.ContainsKey((ConvertTo-CmbHeaderKey $name))){continue}
+  $a=New-Object string[] ([Math]::Max(0,$n));for($r=0;$r -lt $n;$r++){$f=$rows[$h+1+$r];if($c -lt $f.Length){$a[$r]=$f[$c].Trim()}else{$a[$r]=''}};$cols[$name]=$a
+ }
+ $n=Get-CmbTrimmedCount $cols ([Math]::Max(0,$n))
+ if(!$TextName){$TextName=[IO.Path]::GetFileNameWithoutExtension($Path)}
+ $out.Add(@{name=$TextName;headerRow=($h+1);headers=$headers;columns=$cols;rows=$n;delimiter=$t.delimiter;encoding=$t.encoding;malformed=$t.malformed})
+ return @($out)
+}
+function ConvertTo-CmbDateColumn($Worksheet,[int]$Column,[int]$FirstRow,[string[]]$Values){
+ # Dates saved with a custom number format come back as day numbers; when the column's first value is a number shown as a date, every
+ # number in the column becomes the date text Get-ColumnText gives for real dates.
+ $k=-1;for($i=0;$i -lt [Math]::Min(200,$Values.Length);$i++){if($Values[$i] -ne ''){$k=$i;break}};if($k -lt 0){return ,$Values}
+ if($Values[$k] -match '^\d{4}-\d\d-\d\dT'){
+  # Real dates: midnight timestamps are shown as plain dates (2026-03-01), as in the export.
+  $rx=[regex]'^(\d{4}-\d\d-\d\d)T00:00:00(\.0+)?$';for($i=0;$i -lt $Values.Length;$i++){$m=$rx.Match($Values[$i]);if($m.Success){$Values[$i]=$m.Groups[1].Value}};return ,$Values
+ }
+ if($Values[$k] -notmatch '^\d+(\.\d+)?$'){return ,$Values}
+ $fmt=[string]$Worksheet.Cells[($FirstRow+$k),$Column].Style.Numberformat.Format;$f=($fmt -replace '\[[^\]]*\]','' -replace '"[^"]*"','')
+ if($f -notmatch '(?i)[dy]' -or $f -match '[#0]'){return ,$Values}
+ $inv=[Globalization.CultureInfo]::InvariantCulture;$n=0.0
+ for($i=0;$i -lt $Values.Length;$i++){$v=$Values[$i];if($v -ne '' -and [double]::TryParse($v,[Globalization.NumberStyles]::Float,$inv,[ref]$n) -and $n -gt 0 -and $n -lt 2958466){$d=[DateTime]::FromOADate($n);if($d.TimeOfDay.Ticks -eq 0){$Values[$i]=$d.ToString('yyyy-MM-dd')}else{$Values[$i]=$d.ToString('o')}}}
+ return ,$Values
+}
+function Get-CmbTrimmedCount($Cols,[int]$N){
+ # Row count without the blank rows at the end (formatted but empty rows that Excel still reports).
+ $last=-1;foreach($k in @($Cols.Keys)){$a=$Cols[$k];for($r=$N-1;$r -gt $last;$r--){if($a[$r] -ne ''){$last=$r;break}}};return ($last+1)
+}
+function Get-CmbColumnStats([string]$Header,[int]$Index,[string[]]$Values,[int]$Rows){
+ # One column of a fingerprint: inferred type, fill and distinct counts, shapes, common values (repeating categories only) and examples.
+ $counts=New-Object 'Collections.Generic.Dictionary[string,int]';$set=$null;$filled=0
+ for($r=0;$r -lt $Rows;$r++){
+  $v=$Values[$r];if($v -eq ''){continue};$filled++
+  if($null -eq $set){$x=0;if($counts.TryGetValue($v,[ref]$x)){$counts[$v]=$x+1}else{$counts[$v]=1;if($counts.Count -gt 60){$set=[Collections.Generic.HashSet[string]]::new([string[]]@($counts.Keys))}}}
+  else{if($set.Count -lt 500000){[void]$set.Add($v)}}
+ }
+ $distinct=$(if($null -eq $set){$counts.Count}else{$set.Count})
+ $kinds=@{};$shapes=@{};$sample=0;$lead=$false;$minL=[int]::MaxValue;$maxL=0;$min=$null;$max=$null;$examples=[Collections.Generic.List[string]]::new()
+ $step=[Math]::Max(1,[int][Math]::Floor($filled/1000));$k=0
+ for($r=0;$r -lt $Rows;$r++){
+  $v=$Values[$r];if($v -eq ''){continue};$k++;if(($k-1)%$step -ne 0){continue};$sample++
+  $kind=Get-CmbValueKind $v;$kinds[$kind]=1+[int]$kinds[$kind]
+  $sh=Get-CmbShape $v;$shapes[$sh]=1+[int]$shapes[$sh]
+  if($v.Length -lt $minL){$minL=$v.Length};if($v.Length -gt $maxL){$maxL=$v.Length};if($v -match '^0\d'){$lead=$true}
+  if($examples.Count -lt 3 -and !$examples.Contains($v)){$examples.Add($v)}
+  if($kind -eq 'date'){$d=[CmbRt]::Date($v);if($null -eq $min -or $d -lt $min){$min=$d};if($null -eq $max -or $d -gt $max){$max=$d}}
+  elseif($kind -in @('integer','number')){$d=[CmbRt]::Num($v);if($null -ne $d){if($null -eq $min -or $d -lt $min){$min=$d};if($null -eq $max -or $d -gt $max){$max=$d}}}
+ }
+ $type='empty'
+ if($sample -gt 0){
+  $top=@($kinds.Keys|Sort-Object @{Expression={$kinds[$_]}} -Descending);$t0=[string]$top[0];$share=$kinds[$t0]/$sample
+  if($kinds.ContainsKey('integer') -and $kinds.ContainsKey('number') -and ($kinds['integer']+$kinds['number'])/$sample -ge 0.95){$t0='number';$share=1}
+  if($share -ge 0.95){$type=$t0}else{$type='mixed ('+(@($top|Select-Object -First 3|ForEach-Object{$_+' '+[Math]::Round(100*$kinds[$_]/$sample)+'%'}) -join ', ')+')'}
+  if($type -eq 'integer' -and $lead){$type='text (digits with leading zeros)'}elseif($type -in @('integer','number') -and $null -ne $min -and [double]$min -ge 1000 -and [double]$max -lt 80000 -and $Header -match '(?i)date|\bdob\b|birth|\bdt\b|admit|discharge' -and $Header -notmatch '(?i)count|number|\bnum\b|#|days'){$type='date (stored as Excel day numbers)'}elseif($type -eq 'integer'){$type='number'}
+ }
+ $pat=@($shapes.Keys|Sort-Object @{Expression={$shapes[$_]}} -Descending|Select-Object -First 3|ForEach-Object{[ordered]@{shape=$_;share=[Math]::Round($shapes[$_]/[Math]::Max(1,$sample),3)}})
+ $common=@();if($null -eq $set -and $distinct -gt 0 -and $distinct -le 25 -and $filled -ge 2*$distinct){$common=@($counts.Keys|Sort-Object @{Expression={$counts[$_]}} -Descending|ForEach-Object{[ordered]@{value=$_;rows=$counts[$_]}})}
+ $fmt={param($x)if($null -eq $x){return ''};if($x -is [DateTime]){return ([DateTime]$x).ToString('yyyy-MM-dd')};return [CmbRt]::Text($x)}
+ return [ordered]@{index=($Index+1);letter=(Get-ColumnLetter ($Index+1));header=$Header;type=$type;filled=$filled;blank=($Rows-$filled);distinct=$distinct;unique=($filled -gt 0 -and $distinct -eq $filled);patterns=$pat;common=$common;examples=@($examples);min=(& $fmt $min);max=(& $fmt $max);minLength=$(if($sample){$minL}else{0});maxLength=$maxL}
+}
+function Get-CmbFingerprint([string]$Path,[string]$TextName=''){
+ $sheets=@(foreach($t in @(Read-CmbSheets $Path '' 0 $null $TextName)){
+  $cols=@(for($c=0;$c -lt $t.headers.Count;$c++){$h=$t.headers[$c];Get-CmbColumnStats $h $c ([string[]]$t.columns[$h]) $t.rows})
+  $layout=(Get-CmbLayoutId $t.headers)
+  $s=[ordered]@{name=$t.name;headerRow=$t.headerRow;rows=$t.rows;layoutId=$layout;headers=@($t.headers);columns=$cols}
+  if($t.ContainsKey('delimiter')){$s['delimiter']=$(if($t.delimiter -eq "`t"){'tab'}else{$t.delimiter});$s['encoding']=$t.encoding;$s['malformedLines']=$t.malformed}
+  $s
+ })
+ return @($sheets)
+}
+function Get-CmbLayoutId([string[]]$Headers){
+ # The same report exported on another day has the same column headers in the same order, so the same layout id.
+ $sha=[Security.Cryptography.SHA256]::Create();try{$b=$sha.ComputeHash([Text.Encoding]::UTF8.GetBytes((@($Headers|ForEach-Object{ConvertTo-CmbHeaderKey $_}) -join "`n")))}finally{$sha.Dispose()}
+ return (([BitConverter]::ToString($b) -replace '-','').Substring(0,10))
+}
+function Remove-OldCmbFiles{
+ $busy=@{};foreach($r in @(Get-CmbRuns)){if([string](Get-P $r 'state' '') -in @('Starting','Running')){foreach($a in @(Get-P $r 'assignments' @())){$busy[[string](Get-P $a 'token' '')]=$true}}}
+ foreach($f in @(Get-CmbFiles|Select-Object -Skip $script:CmbFileKeep)){$t=[string](Get-P $f 'token' '');if($t -match '^[a-f0-9]{32}$' -and !$busy.ContainsKey($t)){Remove-CmbFileRecord $f}}
+}
+function Remove-CmbFileRecord($File){
+ $p=[string](Get-P $File 'path' '');if($p -and [IO.Path]::GetFullPath($p).StartsWith([IO.Path]::GetFullPath($script:Paths.CombineFiles),[StringComparison]::OrdinalIgnoreCase)){Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue}
+ Remove-Item -LiteralPath (Get-CmbFilePath ([string]$File.token)) -Force -ErrorAction SilentlyContinue
+}
+function Receive-CmbUpload($Context){
+ # Saves one chosen export and fingerprints it. A file already loaded (same SHA-256) is reused and marked as loaded now.
+ $name=[Net.WebUtility]::UrlDecode([string]$Context.Request.Headers['X-File-Name']);if([string]::IsNullOrWhiteSpace($name)){throw 'Missing file name.'}
+ $name=[IO.Path]::GetFileName($name);$ext=[IO.Path]::GetExtension($name).ToLowerInvariant()
+ if($ext -eq '.xls'){throw 'Old .xls workbooks cannot be read; open the file in Excel and save it as .xlsx.'};if($script:CmbExtensions -notcontains $ext){throw ('Only '+($script:CmbExtensions -join ', ')+' files can be loaded.')}
+ $token=[Guid]::NewGuid().ToString('N');$path=Join-Path $script:Paths.CombineFiles ($token+$ext)
+ $stream=[IO.File]::Create($path);try{$buffer=New-Object byte[] 1048576;$total=0;while(($read=$Context.Request.InputStream.Read($buffer,0,$buffer.Length)) -gt 0){$total+=$read;if($total -gt 2147483648){throw 'Upload exceeds 2 GB limit.'};$stream.Write($buffer,0,$read)}}finally{$stream.Dispose()}
+ $fileDate=$null;try{$ms=[string]$Context.Request.Headers['X-File-Timestamp'];if($ms){$fileDate=[DateTimeOffset]::FromUnixTimeMilliseconds([int64]$ms).UtcDateTime.ToString('o')}}catch{}
+ $sw=[Diagnostics.Stopwatch]::StartNew()
+ try{
+  $hash=Get-FileHash256 $path
+  foreach($f in @(Get-CmbFiles)){
+   if([string](Get-P $f 'sha256' '') -ne $hash -or !(Test-Path -LiteralPath ([string](Get-P $f 'path' '')))){continue}
+   Remove-Item -LiteralPath $path -Force;Set-P $f 'originalName' $name;Set-P $f 'loadedUtc' ([DateTime]::UtcNow.ToString('o'));if($fileDate){Set-P $f 'fileDateUtc' $fileDate};Save-JsonAtomic (Get-CmbFilePath ([string]$f.token)) $f
+   Log 'COMBINE_FILE_LOADED' 'OK' ($name+' (already loaded)');return (Get-CmbFileModel ([string]$f.token) -Full)
+  }
+  $sheets=@(Get-CmbFingerprint $path ([IO.Path]::GetFileNameWithoutExtension($name)));if($sheets.Count -eq 0){throw 'No table was found in the file (every sheet is empty).'}
+  $rec=[ordered]@{cmbFileVersion=1;token=$token;originalName=$name;path=$path;extension=$ext;sha256=$hash;byteLength=(Get-Item -LiteralPath $path).Length;loadedUtc=[DateTime]::UtcNow.ToString('o');fileDateUtc=$fileDate;seconds=[Math]::Round($sw.Elapsed.TotalSeconds,1);sheets=$sheets}
+  Save-JsonAtomic (Get-CmbFilePath $token) $rec
+ }catch{Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue;Log 'COMBINE_FILE' 'FAILED' $_.Exception.Message;throw}
+ Log 'COMBINE_FILE_LOADED' 'OK' ($name+'; '+(@($sheets|ForEach-Object{$_.name+' '+$_.rows+' rows'}) -join ', ')+' in '+$rec.seconds+'s')
+ Remove-OldCmbFiles
+ return (Get-CmbFileModel $token -Full)
+}
+function Get-CmbFileModel([string]$Token,[switch]$Full){
+ $f=Get-CmbFile $Token
+ $sheets=@(foreach($s in @(Get-P $f 'sheets' @())){
+  $m=[ordered]@{name=[string]$s.name;headerRow=[int]$s.headerRow;rows=[int]$s.rows;layoutId=[string]$s.layoutId;columnCount=@(Get-P $s 'columns' @()).Count}
+  if($Full){$m['columns']=@(Get-P $s 'columns' @());foreach($k in @('delimiter','encoding','malformedLines')){$v=Get-P $s $k $null;if($null -ne $v){$m[$k]=$v}}}
+  $m
+ })
+ return [ordered]@{token=[string]$f.token;originalName=[string]$f.originalName;extension=[string](Get-P $f 'extension' '');byteLength=[int64](Get-P $f 'byteLength' 0);loadedUtc=(ConvertTo-IsoText (Get-P $f 'loadedUtc' ''));fileDateUtc=(ConvertTo-IsoText (Get-P $f 'fileDateUtc' ''));seconds=(Get-P $f 'seconds' $null);sheets=$sheets}
+}
+
+# --- Combine configs: combine\configs\<name>.json, each save keeping the previous version under configs\history\<name>\.
+function Get-CmbConfigName([string]$Name){$n=Get-SafeFileName $Name;if(!$n -or $n -eq 'Provider'){$n=($Name -replace '[^A-Za-z0-9 _.-]','').Trim()};if(!$n){throw 'Give the config a name.'};return $n}
+function Get-CmbConfigPath([string]$Name){$n=Get-CmbConfigName $Name;return (Join-Path $script:Paths.CombineConfigs ($n+'.json'))}
+function Get-CmbConfigs{
+ return @(Get-ChildItem $script:Paths.CombineConfigs -Filter '*.json' -File -ErrorAction SilentlyContinue|Sort-Object Name|ForEach-Object{
+  $text='';try{$text=[IO.File]::ReadAllText($_.FullName)}catch{}
+  $r=Read-CmbConfigText $text;$cfg=@($r.rules|Where-Object{[string](Get-CmbValue $_ 'rule' '') -ieq 'config'})
+  $desc='';if($cfg.Count){$desc=Get-CmbText $cfg[0] 'description'}
+  [ordered]@{name=$_.BaseName;path=$_.FullName;rules=@($r.rules).Count;readErrors=@($r.errors).Count;description=$desc;modifiedUtc=$_.LastWriteTimeUtc.ToString('o')}
+ })
+}
+function Read-CmbConfigFile([string]$Name){
+ $p=Get-CmbConfigPath $Name;if(!(Test-Path -LiteralPath $p)){throw ('There is no config named "'+$Name+'".')}
+ $text=[IO.File]::ReadAllText($p);$r=Read-CmbConfigText $text
+ return @{name=[IO.Path]::GetFileNameWithoutExtension($p);path=$p;text=$text;rules=@($r.rules);errors=@($r.errors)}
+}
+function Get-CmbHistoryDir([string]$Name){return (Join-Path $script:Paths.CombineHistory (Get-CmbConfigName $Name))}
+function Save-CmbConfig([string]$Name,[object[]]$Rules,[string]$Reason='saved'){
+ # Writes the config one rule per line, keeping the previous file in the history folder; the config rule's name follows the file name.
+ $n=Get-CmbConfigName $Name;$p=Get-CmbConfigPath $n
+ $cfg=@($Rules|Where-Object{[string](Get-CmbValue $_ 'rule' '') -ieq 'config'})
+ if($cfg.Count -eq 0){$c=[ordered]@{};$c['rule']='config';$c['name']=$n;$Rules=@(,$c)+@($Rules)}else{$cfg[0]['name']=$n}
+ $text=Format-CmbConfigText $Rules
+ if(Test-Path -LiteralPath $p){
+  $old=[IO.File]::ReadAllText($p);if($old -eq $text){return @{name=$n;path=$p;changed=$false}}
+  $dir=Get-CmbHistoryDir $n;if(!(Test-Path $dir)){New-Item -ItemType Directory -Path $dir -Force|Out-Null}
+  $stamp=(Get-Item -LiteralPath $p).LastWriteTimeUtc.ToString('yyyyMMdd-HHmmss');$hp=Join-Path $dir ($stamp+'.json');$k=2;while(Test-Path -LiteralPath $hp){$hp=Join-Path $dir ($stamp+'-'+$k+'.json');$k++}
+  Copy-Item -LiteralPath $p -Destination $hp
+ }
+ $tmp=$p+'.'+$PID+'.tmp';[IO.File]::WriteAllText($tmp,$text,(New-Object Text.UTF8Encoding($false)))
+ if(Test-Path -LiteralPath $p){[IO.File]::Replace($tmp,$p,[NullString]::Value)}else{[IO.File]::Move($tmp,$p)}
+ Log 'COMBINE_CONFIG_SAVED' 'OK' ($n+' ('+$Reason+', '+@($Rules).Count+' rules)')
+ return @{name=$n;path=$p;changed=$true}
+}
+function Get-CmbConfigHistory([string]$Name){
+ $dir=Get-CmbHistoryDir $Name;if(!(Test-Path $dir)){return @()}
+ return @(Get-ChildItem $dir -Filter '*.json' -File|Sort-Object Name -Descending|ForEach-Object{$r=Read-CmbConfigText ([IO.File]::ReadAllText($_.FullName));[ordered]@{version=$_.BaseName;savedUtc=$_.LastWriteTimeUtc.ToString('o');rules=@($r.rules).Count}})
+}
+function Read-CmbConfigVersion([string]$Name,[string]$Version){
+ if($Version -notmatch '^\d{8}-\d{6}(-\d+|-deleted)?$'){throw 'Invalid version.'};$p=Join-Path (Get-CmbHistoryDir $Name) ($Version+'.json');if(!(Test-Path -LiteralPath $p)){throw 'That version was not found.'}
+ return [IO.File]::ReadAllText($p)
+}
+function Remove-CmbConfig([string]$Name){
+ # The file moves into its history folder, so a deleted config can still be recovered by hand.
+ $p=Get-CmbConfigPath $Name;if(!(Test-Path -LiteralPath $p)){throw 'That config was not found.'}
+ $dir=Get-CmbHistoryDir $Name;if(!(Test-Path $dir)){New-Item -ItemType Directory -Path $dir -Force|Out-Null}
+ Move-Item -LiteralPath $p -Destination (Join-Path $dir ((Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss')+'-deleted.json')) -Force;Log 'COMBINE_CONFIG_DELETED' 'OK' $Name
+}
+# --- Combine plan: checks a config against the rule reference (and the matched files' headers when known) and organizes it for a run.
+function Test-CmbName([string]$Name){return ($Name -match '^[A-Za-z][A-Za-z0-9_]*$')}
+function Get-CmbTypeOf([string]$Type){$t=$Type.Trim().ToLowerInvariant();if($t -in @('','text','string')){return 'text'};if($t -in @('number','numeric','integer','decimal')){return 'number'};if($t -in @('date','datetime')){return 'date'};if($t -in @('bool','boolean','yesno','flag')){return 'bool'};return $null}
+function ConvertTo-CmbCleanSteps($Steps){
+ # Normalized cleaning steps (@{op;n;text;with;map;else}), or a message saying which step is wrong.
+ $out=[Collections.Generic.List[object]]::new();$known=@('trim','upper','lower','title','collapsespaces','digits','alnum','stripleadingzeros','removebracketid','namekey')
+ $list=@();if($null -eq $Steps){return @{steps=@();error=''}};if($Steps -is [Array]){$list=$Steps}else{$list=@($Steps)}
+ foreach($s in $list){
+  if($s -is [string]){
+   $x=$s.Trim();$lx=$x.ToLowerInvariant()
+   if($known -contains $lx){$out.Add(@{op=$lx});continue}
+   if($lx -match '^(pad|left):\s*(\d{1,3})$'){$out.Add(@{op=$matches[1];n=[int]$matches[2]});continue}
+   if($lx -match '^blankif:'){$out.Add(@{op='blankif';text=$x.Substring(8).Trim()});continue}
+   return @{steps=@();error=('unknown cleaning step "'+$x+'"')}
+  }
+  if($s -is [Collections.IDictionary]){
+   if($s.Contains('replace')){$p=[string]$s['replace'];try{$null=[regex]::new($p)}catch{return @{steps=@();error=('"replace" pattern "'+$p+'" is not a valid regular expression')}};$out.Add(@{op='replace';rx=$p;with=[string](Get-CmbValue $s 'with' '')});continue}
+   if($s.Contains('extract')){$p=[string]$s['extract'];try{$null=[regex]::new($p)}catch{return @{steps=@();error=('"extract" pattern "'+$p+'" is not a valid regular expression')}};$out.Add(@{op='extract';rx=$p});continue}
+   if($s.Contains('map')){
+    $m=$s['map'];if(!($m -is [Collections.IDictionary])){return @{steps=@();error='"map" needs an object of "from":"to" pairs'}}
+    $h=@{};foreach($k in @($m.Keys)){$h[[CmbRt]::Key($k)]=$(if($null -eq $m[$k]){$null}else{[string]$m[$k]})}
+    $else=[string](Get-CmbValue $s 'else' 'keep');$out.Add(@{op='map';map=$h;else=$else});continue
+   }
+   return @{steps=@();error=('unknown cleaning step '+(ConvertTo-CmbJson $s))}
+  }
+  return @{steps=@();error=('unknown cleaning step '+(ConvertTo-CmbJson $s))}
+ }
+ return @{steps=@($out);error=''}
+}
+function Get-CmbClosest([string]$Name,[string[]]$Options){
+ # The option most like Name (for "did you mean"), by edit distance ignoring case, spaces and punctuation; '' when nothing is close.
+ $n=($Name -replace '[^A-Za-z0-9]','').ToLowerInvariant();if(!$n){return ''};$best='';$bestD=[int]::MaxValue
+ foreach($o in $Options){
+  if($null -eq $o){continue};$x=([string]$o -replace '[^A-Za-z0-9]','').ToLowerInvariant();if(!$x){continue};if($x -eq $n){return [string]$o}
+  $prev=New-Object int[] ($x.Length+1);for($j=0;$j -le $x.Length;$j++){$prev[$j]=$j}
+  for($i=1;$i -le $n.Length;$i++){$cur=New-Object int[] ($x.Length+1);$cur[0]=$i;for($j=1;$j -le $x.Length;$j++){$c=$(if($n[$i-1] -eq $x[$j-1]){0}else{1});$cur[$j]=[Math]::Min([Math]::Min($prev[$j]+1,$cur[$j-1]+1),$prev[$j-1]+$c)};$prev=$cur}
+  $dist=$prev[$x.Length];if($dist -lt $bestD){$bestD=$dist;$best=[string]$o}
+ }
+ if($bestD -le [Math]::Max(2,[int][Math]::Floor($n.Length/3))){return $best};return ''
+}
+function Get-CmbPlan([object[]]$Rules,[hashtable]$Tables=@{},[switch]$Strict){
+ # Tables: source id (lower case) -> @{headers;file} for sources whose file is known. Strict (a run) makes a missing file an error.
+ $P=@{problems=[Collections.Generic.List[object]]::new();config=@{name='';description='';asOf=(Get-Date).Date;asOfText='';sheet='Patients';lineage=$true;booleans='Y/N'};sources=[Collections.Generic.List[object]]::new();sourceByKey=@{};keys=[Collections.Generic.List[object]]::new();fields=[ordered]@{};derives=[Collections.Generic.List[object]]::new();lookups=[ordered]@{};patientFilters=[Collections.Generic.List[object]]::new();sorts=[Collections.Generic.List[object]]::new();outputs=[Collections.Generic.List[object]]::new();views=[ordered]@{};fieldTypes=@{};fieldNames=@{};order=[Collections.Generic.List[string]]::new();rules=@($Rules)}
+ $add={param([int]$i,[string]$sev,[string]$msg)$P.problems.Add([ordered]@{rule=$i;severity=$sev;message=$msg})}
+ $byType=@{};for($i=0;$i -lt $Rules.Count;$i++){
+  $r=$Rules[$i];$no=$i+1
+  if(!($r -is [Collections.IDictionary])){& $add $no 'error' 'This row is not a rule object.';continue}
+  $type=([string](Get-CmbValue $r 'rule' '')).Trim().ToLowerInvariant()
+  if(!$type){& $add $no 'error' 'Missing "rule" (the rule type).';continue}
+  if(!$script:CmbRuleSpec.Contains($type)){$g=Get-CmbClosest $type @($script:CmbRuleSpec.Keys);& $add $no 'error' ('Unknown rule type "'+$type+'".'+$(if($g){' Did you mean "'+$g+'"?'}else{''})+' Rule types: '+(@($script:CmbRuleSpec.Keys) -join ', ')+'.');continue}
+  $allowed=@($script:CmbRuleSpec[$type].props.Keys)+@('rule','note','id')
+  foreach($k in @($r.Keys)){if($allowed -notcontains [string]$k){$g=Get-CmbClosest ([string]$k) $allowed;& $add $no 'warning' ('Unknown property "'+$k+'" is ignored.'+$(if($g){' Did you mean "'+$g+'"?'}else{' A '+$type+' rule takes: '+(@($script:CmbRuleSpec[$type].props.Keys) -join ', ')+'.'}))}}
+  if(!$byType.ContainsKey($type)){$byType[$type]=[Collections.Generic.List[int]]::new()};$byType[$type].Add($i)
+ }
+ $of={param([string]$t)if($byType.ContainsKey($t)){return ,@($byType[$t])};return ,@()}
+ # config
+ $cfgs=& $of 'config'
+ if($cfgs.Count -gt 1){foreach($i in @($cfgs|Select-Object -Skip 1)){& $add ($i+1) 'error' 'Only one config rule is allowed.'}}
+ if($cfgs.Count -ge 1){
+  $r=$Rules[$cfgs[0]];$no=$cfgs[0]+1;$P.config.name=Get-CmbText $r 'name';$P.config.description=Get-CmbText $r 'description'
+  $a=Get-CmbText $r 'asOf';if($a){$d=[CmbRt]::Date($a);if($null -eq $d){& $add $no 'error' ('asOf "'+$a+'" is not a date; write it as YYYY-MM-DD.')}else{$P.config.asOf=([DateTime]$d).Date;$P.config.asOfText=([DateTime]$d).ToString('yyyy-MM-dd')}}
+  $s=Get-CmbText $r 'sheet';if($s){$P.config.sheet=$s}
+  $l=Get-CmbValue $r 'lineage' $true;if($l -is [bool]){$P.config.lineage=$l}else{& $add $no 'error' 'lineage must be true or false.'}
+  $b=Get-CmbText $r 'booleans';if($b){$hit=@(@('Y/N','Yes/No','TRUE/FALSE','1/0')|Where-Object{$_ -ieq $b});if($hit.Count){$P.config.booleans=$hit[0]}else{& $add $no 'error' 'booleans must be "Y/N", "Yes/No", "TRUE/FALSE" or "1/0".'}}
+ }else{& $add 0 'warning' 'There is no config rule; one is added (named after the file) when the config is saved.'}
+ # sources
+ foreach($i in (& $of 'source')){
+  $r=$Rules[$i];$no=$i+1;$id=Get-CmbText $r 'source'
+  if(!$id){& $add $no 'error' 'A source rule needs "source": a short id such as "epic".';continue}
+  if(!(Test-CmbName $id)){& $add $no 'error' ('Source id "'+$id+'" must use letters, digits and underscore and start with a letter.');continue}
+  $key=$id.ToLowerInvariant();if($P.sourceByKey.ContainsKey($key)){& $add $no 'error' ('Source "'+$id+'" is defined twice.');continue}
+  $match=@(Get-CmbList $r 'match');if($match.Count -eq 0){& $add $no 'error' ('Source "'+$id+'" needs "match": the column headers its file must have.')}
+  $role=(Get-CmbText $r 'role').ToLowerInvariant();if(!$role){$role='patients'};if($role -notin @('patients','lookup')){& $add $no 'error' 'role must be "patients" or "lookup".';$role='patients'}
+  $hr=Get-CmbValue $r 'headerRow' 0;$hrN=0;if($hr -is [double] -and $hr -ge 1 -and $hr -le 1000 -and [Math]::Floor($hr) -eq $hr){$hrN=[int]$hr}elseif([string]$hr -ne '0'){& $add $no 'error' 'headerRow must be a row number such as 1.'}
+  $req=Get-CmbValue $r 'required' $true;if(!($req -is [bool])){& $add $no 'error' 'required must be true or false.';$req=$true}
+  $src=@{id=$id;key=$key;ruleIndex=$i;label=$(if((Get-CmbText $r 'label')){Get-CmbText $r 'label'}else{$id});match=$match;fileName=(Get-CmbText $r 'fileName');sheet=(Get-CmbText $r 'sheet');headerRow=$hrN;role=$role;required=$req;lookupKey=(Get-CmbText $r 'key');maps=[Collections.Generic.List[object]]::new();filters=[Collections.Generic.List[object]]::new();fields=[ordered]@{};rank=$P.sources.Count;table=$null}
+  if($Tables.ContainsKey($key)){$src.table=$Tables[$key]}
+  elseif($Strict -and $req -and $match.Count){& $add $no 'error' ('No file is chosen for source "'+$id+'".')}
+  if($role -eq 'lookup' -and !$src.lookupKey){& $add $no 'error' ('Lookup source "'+$id+'" needs "key": the field that lookup() matches on.')}
+  if($role -eq 'patients' -and $src.lookupKey){& $add $no 'warning' '"key" is only used by lookup sources; patients are matched by key rules.'}
+  $P.sources.Add($src);$P.sourceByKey[$key]=$src
+ }
+ if($P.sources.Count -eq 0){& $add 0 'error' 'Add at least one source rule.'}
+ $headerOf={param($src)if($null -eq $src.table){return $null};$h=@{};foreach($x in @($src.table.headers)){$h[(ConvertTo-CmbHeaderKey $x)]=$x};return $h}
+ foreach($src in $P.sources){
+  $h=& $headerOf $src;if($null -eq $h){continue}
+  $miss=@($src.match|Where-Object{!$h.ContainsKey((ConvertTo-CmbHeaderKey $_))})
+  if($miss.Count){& $add ($src.ruleIndex+1) 'error' ('The file chosen for "'+$src.id+'" ('+$src.table.file+') has no column '+(@($miss|ForEach-Object{'"'+$_+'"'}) -join ', ')+'.')}
+ }
+ # maps
+ foreach($i in (& $of 'map')){
+  $r=$Rules[$i];$no=$i+1;$sid=Get-CmbText $r 'source';$field=Get-CmbText $r 'field'
+  if(!$sid -or !$P.sourceByKey.ContainsKey($sid.ToLowerInvariant())){& $add $no 'error' $(if($sid){'Map rule names source "'+$sid+'", which has no source rule.'}else{'A map rule needs "source".'});continue}
+  $src=$P.sourceByKey[$sid.ToLowerInvariant()]
+  if(!$field -or !(Test-CmbName $field)){& $add $no 'error' $(if($field){'Field name "'+$field+'" must use letters, digits and underscore and start with a letter.'}else{'A map rule needs "field".'});continue}
+  $fk=$field.ToLowerInvariant();if($src.fields.Contains($fk)){& $add $no 'error' ('Source "'+$src.id+'" maps field "'+$field+'" twice.');continue}
+  $modes=@(foreach($m in @('column','columns','value','expr','special')){if($r.Contains($m) -and $null -ne $r[$m]){$m}})
+  if($modes.Count -ne 1){& $add $no 'error' $(if($modes.Count){'Use only one of '+($modes -join ', ')+'.'}else{'A map rule needs one of column, columns, value, expr or special.'});continue}
+  $type='text';$tt=Get-CmbText $r 'type';if($tt){$type=Get-CmbTypeOf $tt;if(!$type){& $add $no 'error' ('type "'+$tt+'" is not one of text, number, date, bool.');$type='text'}}
+  $cl=ConvertTo-CmbCleanSteps (Get-CmbValue $r 'clean' $null);if($cl.error){& $add $no 'error' ('clean: '+$cl.error+'. See the cleaning steps in the reference.')}
+  $m=@{ruleIndex=$i;field=$field;key=$fk;mode=$modes[0];type=$type;clean=$cl.steps;column='';columns=@();sep=' ';value=$null;expr='';special=''}
+  $h=& $headerOf $src
+  switch($modes[0]){
+   'column'{$m.column=Get-CmbText $r 'column';if(!$m.column){& $add $no 'error' 'column is empty.'}elseif($null -ne $h -and !$h.ContainsKey((ConvertTo-CmbHeaderKey $m.column))){$g=Get-CmbClosest $m.column @($src.table.headers);& $add $no 'error' ('Column "'+$m.column+'" is not in '+$src.table.file+'.'+$(if($g){' Did you mean "'+$g+'"?'}else{''}))}}
+   'columns'{$m.columns=@(Get-CmbList $r 'columns');$m.sep=[string](Get-CmbValue $r 'sep' ' ');if($m.columns.Count -eq 0){& $add $no 'error' 'columns is empty.'};if($null -ne $h){foreach($c in $m.columns){if(!$h.ContainsKey((ConvertTo-CmbHeaderKey $c))){$g=Get-CmbClosest $c @($src.table.headers);& $add $no 'error' ('Column "'+$c+'" is not in '+$src.table.file+'.'+$(if($g){' Did you mean "'+$g+'"?'}else{''}))}}}}
+   'value'{$m.value=Get-CmbValue $r 'value' $null;if($m.value -is [Collections.IDictionary] -or $m.value -is [Array]){& $add $no 'error' 'value must be text, a number, true or false.'}}
+   'expr'{$m.expr=Get-CmbText $r 'expr'}
+   'special'{$m.special=(Get-CmbText $r 'special');$hit=@(@('fileName','fileDate','rowNumber','sourceLabel')|Where-Object{$_ -ieq $m.special});if($hit.Count){$m.special=$hit[0]}else{& $add $no 'error' 'special must be "fileName", "fileDate", "rowNumber" or "sourceLabel".'}}
+  }
+  if($m.mode -eq 'expr'){
+   $names=@{};if($null -ne $h){foreach($k in @($h.Keys)){$names[$k]=0}};foreach($k in @($src.fields.Keys)){$names[$k]=0}
+   try{$null=New-CmbCompiled $m.expr (New-CmbExprContext $names (Get-CmbLookupTablesForCheck $P $Rules) $P.config.asOf ('not a column of '+$(if($src.table){$src.table.file}else{'the file'})+' or a field mapped above') -AcceptAny:($null -eq $h))}catch{& $add $no 'error' $_.Exception.Message}
+  }
+  if($m.special -eq 'fileDate' -and $type -eq 'text'){$m.type='date'};if($m.special -eq 'rowNumber' -and $type -eq 'text'){$m.type='number'}
+  $src.maps.Add($m);$src.fields[$fk]=@{name=$field;type=$m.type;map=$m}
+ }
+ foreach($src in $P.sources){
+  if($src.maps.Count -eq 0){& $add ($src.ruleIndex+1) 'warning' ('Source "'+$src.id+'" has no map rules, so nothing is read from it.')}
+  if($src.role -eq 'lookup' -and $src.lookupKey -and !$src.fields.Contains($src.lookupKey.ToLowerInvariant())){& $add ($src.ruleIndex+1) 'error' ('Lookup key "'+$src.lookupKey+'" is not a field mapped from "'+$src.id+'".')}
+ }
+ # Field names and their types across patient sources (first map wins the display name and type).
+ foreach($src in $P.sources){if($src.role -ne 'patients'){continue};foreach($k in @($src.fields.Keys)){if(!$P.fieldNames.ContainsKey($k)){$P.fieldNames[$k]=$src.fields[$k].name;$P.fieldTypes[$k]=$src.fields[$k].type}elseif($P.fieldTypes[$k] -ne $src.fields[$k].type){& $add ($src.fields[$k].map.ruleIndex+1) 'warning' ('Field "'+$src.fields[$k].name+'" is '+$src.fields[$k].type+' here but '+$P.fieldTypes[$k]+' in another source; values compare as '+$P.fieldTypes[$k]+'.')}}}
+ # source filters
+ foreach($i in (& $of 'filter')){
+  $r=$Rules[$i];$no=$i+1;$sid=Get-CmbText $r 'source';$keep=Get-CmbText $r 'keep';$drop=Get-CmbText $r 'drop'
+  if(($keep -and $drop) -or (!$keep -and !$drop)){& $add $no 'error' 'A filter rule needs keep or drop (one of them).';continue}
+  $f=@{ruleIndex=$i;keep=[bool]$keep;expr=$(if($keep){$keep}else{$drop})}
+  if(!$sid){$P.patientFilters.Add($f);continue}
+  if(!$P.sourceByKey.ContainsKey($sid.ToLowerInvariant())){& $add $no 'error' ('Filter names source "'+$sid+'", which has no source rule.');continue}
+  $src=$P.sourceByKey[$sid.ToLowerInvariant()];$h=& $headerOf $src;$names=@{};if($null -ne $h){foreach($k in @($h.Keys)){$names[$k]=0}};foreach($k in @($src.fields.Keys)){$names[$k]=0}
+  try{$null=New-CmbCompiled $f.expr (New-CmbExprContext $names (Get-CmbLookupTablesForCheck $P $Rules) $P.config.asOf ('not a column of '+$(if($src.table){$src.table.file}else{'the file'})+' or a field of source "'+$src.id+'"') -AcceptAny:($null -eq $h)) -AsBool}catch{& $add $no 'error' $_.Exception.Message}
+  $src.filters.Add($f)
+ }
+ # keys
+ $patientSources=@($P.sources|Where-Object{$_.role -eq 'patients'})
+ foreach($i in (& $of 'key')){
+  $r=$Rules[$i];$no=$i+1;$fields=@(Get-CmbList $r 'fields');if($fields.Count -eq 0){& $add $no 'error' 'A key rule needs "fields", e.g. ["MRN"].';continue}
+  $bad=@($fields|Where-Object{!$P.fieldNames.ContainsKey($_.ToLowerInvariant())});if($bad.Count){& $add $no 'error' ('Key field '+(@($bad|ForEach-Object{'"'+$_+'"'}) -join ', ')+' is not mapped by any patient source.');continue}
+  $want=@(Get-CmbList $r 'sources');$use=@()
+  if($want.Count){foreach($w in $want){if(!$P.sourceByKey.ContainsKey($w.ToLowerInvariant())){& $add $no 'error' ('Key rule names source "'+$w+'", which has no source rule.')}else{$s=$P.sourceByKey[$w.ToLowerInvariant()];$miss=@($fields|Where-Object{!$s.fields.Contains($_.ToLowerInvariant())});if($miss.Count){& $add $no 'error' ('Source "'+$s.id+'" does not map '+(@($miss|ForEach-Object{'"'+$_+'"'}) -join ', ')+'.')}else{$use+=$s.id}}}}
+  else{$use=@(foreach($s in $patientSources){$all=$true;foreach($f in $fields){if(!$s.fields.Contains($f.ToLowerInvariant())){$all=$false}};if($all){$s.id}})}
+  $P.keys.Add(@{ruleIndex=$i;fields=@($fields|ForEach-Object{$P.fieldNames[$_.ToLowerInvariant()]});sources=@($use);label=(@($fields|ForEach-Object{$P.fieldNames[$_.ToLowerInvariant()]}) -join ' + ')})
+ }
+ if($P.keys.Count -eq 0 -and $patientSources.Count){& $add 0 'error' 'Add a key rule (for example {"rule":"key","fields":["MRN"]}) so rows can be matched to patients.'}
+ foreach($s in $patientSources){$hit=$false;foreach($k in $P.keys){if($k.sources -contains $s.id){$hit=$true}};if(!$hit -and $P.keys.Count){& $add ($s.ruleIndex+1) 'warning' ('No key rule applies to source "'+$s.id+'" (it does not map the key fields), so all its rows will be left out.')}}
+ # combined fields: explicit field rules, then every other mapped field with how=priority
+ $explicit=@{}
+ foreach($i in (& $of 'field')){
+  $r=$Rules[$i];$no=$i+1;$name=Get-CmbText $r 'field'
+  if(!$name -or !(Test-CmbName $name)){& $add $no 'error' $(if($name){'Field name "'+$name+'" must use letters, digits and underscore and start with a letter.'}else{'A field rule needs "field".'});continue}
+  $fk=$name.ToLowerInvariant();if($explicit.ContainsKey($fk)){& $add $no 'error' ('Field "'+$name+'" has two field rules.');continue}
+  $how=Get-CmbText $r 'how';if(!$how){$how='priority'};$hit=@($script:CmbHows|Where-Object{$_ -ieq $how});if(!$hit.Count){& $add $no 'error' ('how "'+$how+'" is not one of '+($script:CmbHows -join ', ')+'.');continue};$how=$hit[0]
+  $ofName=Get-CmbText $r 'of';if(!$ofName){$ofName=$name};$ok=$ofName.ToLowerInvariant()
+  if($how -ne 'exists' -and !$P.fieldNames.ContainsKey($ok)){& $add $no 'error' $(if($ofName -ieq $name){'Field "'+$name+'" is not mapped by any patient source; map it, or name the mapped field with "of".'}else{'"of": field "'+$ofName+'" is not mapped by any patient source.'});continue}
+  $from=@(Get-CmbList $r 'from');$fromIds=@()
+  foreach($w in $from){if(!$P.sourceByKey.ContainsKey($w.ToLowerInvariant())){& $add $no 'error' ('from names source "'+$w+'", which has no source rule.')}else{$s=$P.sourceByKey[$w.ToLowerInvariant()];if($s.role -ne 'patients'){& $add $no 'error' ('from: "'+$s.id+'" is a lookup source.')}elseif($how -ne 'exists' -and !$s.fields.Contains($ok)){& $add $no 'warning' ('Source "'+$s.id+'" does not map "'+$ofName+'", so it adds nothing to this field.')}else{$fromIds+=$s.id}}}
+  if($from.Count -eq 0){$fromIds=@(foreach($s in $patientSources){if($how -eq 'exists' -or $s.fields.Contains($ok)){$s.id}})}
+  if($how -eq 'exists' -and $from.Count -eq 0){& $add $no 'warning' 'how "exists" without "from" is true for every patient; name the sources in "from".'}
+  $by=Get-CmbText $r 'by'
+  if($how -in @('latest','earliest')){if(!$by){& $add $no 'error' ('how "'+$how+'" needs "by": the date field that orders the rows.')}elseif(!$P.fieldNames.ContainsKey($by.ToLowerInvariant())){& $add $no 'error' ('by: field "'+$by+'" is not mapped by any patient source.')}else{foreach($sid in $fromIds){$s=$P.sourceByKey[$sid.ToLowerInvariant()];if(!$s.fields.Contains($by.ToLowerInvariant())){& $add $no 'warning' ('Source "'+$s.id+'" does not map "'+$by+'"; its rows count as oldest.')}}}}
+  elseif($by){& $add $no 'warning' ('"by" is only used with how latest or earliest.')}
+  $conf=(Get-CmbText $r 'conflicts').ToLowerInvariant();if(!$conf){$conf='report'};if($conf -notin @('report','ignore')){& $add $no 'error' 'conflicts must be "report" or "ignore".';$conf='report'}
+  $type=$null;$tt=Get-CmbText $r 'type';if($tt){$type=Get-CmbTypeOf $tt;if(!$type){& $add $no 'error' ('type "'+$tt+'" is not one of text, number, date, bool.')}}
+  if(!$type){$type=$(if($how -in @('sum','avg','count','countDistinct')){'number'}elseif($how -in @('any','all','exists')){'bool'}elseif($how -eq 'list'){'text'}elseif($P.fieldTypes.ContainsKey($ok)){$P.fieldTypes[$ok]}else{'text'})}
+  if($P.fieldNames.ContainsKey($fk) -and $fk -ne $ok){& $add $no 'warning' ('Field "'+$name+'" is also a mapped field; this rule replaces the combined value of the mapped "'+$P.fieldNames[$fk]+'".')}
+  $explicit[$fk]=@{name=$name;key=$fk;ruleIndex=$i;of=$P.fieldNames[$ok];ofKey=$ok;how=$how;from=@($fromIds);by=$by;byKey=$by.ToLowerInvariant();sep=[string](Get-CmbValue $r 'sep' '; ');conflicts=$conf;type=$type}
+ }
+ foreach($k in @($P.fieldNames.Keys)){
+  # Mapped fields in the order first mapped; a field rule of the same name takes its place.
+  if($explicit.ContainsKey($k)){continue}
+  $P.fields[$k]=@{name=$P.fieldNames[$k];key=$k;ruleIndex=-1;of=$P.fieldNames[$k];ofKey=$k;how='priority';from=@(foreach($s in $patientSources){if($s.fields.Contains($k)){$s.id}});by='';byKey='';sep='; ';conflicts='report';type=$P.fieldTypes[$k]}
+ }
+ $ordered=[ordered]@{};foreach($k in @($P.fieldNames.Keys)){if($explicit.ContainsKey($k)){$ordered[$k]=$explicit[$k]}elseif($P.fields.Contains($k)){$ordered[$k]=$P.fields[$k]}}
+ foreach($i in (& $of 'field')){foreach($k in @($explicit.Keys)){if($explicit[$k].ruleIndex -eq $i -and !$ordered.Contains($k)){$ordered[$k]=$explicit[$k]}}}
+ $P.fields=$ordered;foreach($k in @($P.fields.Keys)){$P.order.Add($P.fields[$k].name);$P.fieldTypes[$k]=$P.fields[$k].type}
+ # lookups (inline tables)
+ foreach($i in (& $of 'lookup')){
+  $r=$Rules[$i];$no=$i+1;$name=Get-CmbText $r 'table';if(!$name){& $add $no 'error' 'A lookup rule needs "table".';continue}
+  $tk=$name.ToLowerInvariant();if($P.lookups.Contains($tk) -or $P.sourceByKey.ContainsKey($tk)){& $add $no 'error' ('There is already a table or source named "'+$name+'".');continue}
+  $vals=Get-CmbValue $r 'values' $null;if(!($vals -is [Collections.IDictionary])){& $add $no 'error' '"values" must be an object of "input":"output" pairs.';continue}
+  $h=@{};foreach($k in @($vals.Keys)){$v=$vals[$k];if($v -is [Collections.IDictionary] -or $v -is [Array]){& $add $no 'error' ('values: "'+$k+'" must map to text or a number.');continue};$h[[CmbRt]::Key($k)]=[CmbRt]::Convert($v,'')}
+  $d=Get-CmbValue $r 'default' $null;if($null -ne $d){$h['*default*']=[CmbRt]::Convert($d,'')}
+  $P.lookups[$tk]=@{name=$name;ruleIndex=$i;table=$h}
+ }
+ # derives, in order; each may use combined fields, earlier derives and the built-ins
+ $patientKnown=@{};foreach($k in @($P.fields.Keys)){$patientKnown[$k]=$true};foreach($b in $script:CmbBuiltins){$patientKnown[$b]=$true}
+ $tablesCheck=Get-CmbLookupTablesForCheck $P $Rules
+ foreach($i in (& $of 'derive')){
+  $r=$Rules[$i];$no=$i+1;$name=Get-CmbText $r 'field';$expr=Get-CmbText $r 'expr'
+  if(!$name -or !(Test-CmbName $name)){& $add $no 'error' $(if($name){'Field name "'+$name+'" must use letters, digits and underscore and start with a letter.'}else{'A derive rule needs "field".'});continue}
+  if(!$expr){& $add $no 'error' 'A derive rule needs "expr".';continue}
+  $fk=$name.ToLowerInvariant();if($patientKnown.ContainsKey($fk)){& $add $no 'error' ('"'+$name+'" is already a field; give the derived field another name.');continue}
+  $type=$null;$tt=Get-CmbText $r 'type';if($tt){$type=Get-CmbTypeOf $tt;if(!$type){& $add $no 'error' ('type "'+$tt+'" is not one of text, number, date, bool.')}}
+  $names=@{};foreach($k in @($patientKnown.Keys)){$names[$k]=0}
+  $ok=$true;try{$null=New-CmbCompiled $expr (New-CmbExprContext $names $tablesCheck $P.config.asOf 'not a field defined above')}catch{$ok=$false;& $add $no 'error' $_.Exception.Message}
+  $P.derives.Add(@{ruleIndex=$i;field=$name;key=$fk;expr=$expr;type=$type;ok=$ok});$patientKnown[$fk]=$true;$P.order.Add($name);$P.fieldTypes[$fk]=$(if($type){$type}else{''})
+ }
+ $nameOf=@{};foreach($k in @($P.fields.Keys)){$nameOf[$k]=$P.fields[$k].name};foreach($d in $P.derives){$nameOf[$d.key]=$d.field};foreach($b in $script:CmbBuiltins){$nameOf[$b]=$b}
+ $P.nameOf=$nameOf
+ $patientNames=@{};foreach($k in @($nameOf.Keys)){$patientNames[$k]=0}
+ foreach($f in $P.patientFilters){try{$null=New-CmbCompiled $f.expr (New-CmbExprContext $patientNames $tablesCheck $P.config.asOf 'not a field') -AsBool}catch{& $add ($f.ruleIndex+1) 'error' $_.Exception.Message}}
+ # sort, output
+ foreach($i in (& $of 'sort')){$r=$Rules[$i];$f=Get-CmbText $r 'field';if(!$f -or !$nameOf.ContainsKey($f.ToLowerInvariant())){& $add ($i+1) 'error' $(if($f){'Sort field "'+$f+'" is not a field.'}else{'A sort rule needs "field".'});continue};$d=Get-CmbValue $r 'desc' $false;if(!($d -is [bool])){& $add ($i+1) 'error' 'desc must be true or false.';$d=$false};$P.sorts.Add(@{ruleIndex=$i;field=$nameOf[$f.ToLowerInvariant()];key=$f.ToLowerInvariant();desc=$d})}
+ $seenOut=@{}
+ foreach($i in (& $of 'output')){
+  $r=$Rules[$i];$f=Get-CmbText $r 'field';if(!$f -or !$nameOf.ContainsKey($f.ToLowerInvariant())){$g='';if($f){$g=Get-CmbClosest $f @($nameOf.Values)};& $add ($i+1) 'error' $(if($f){'Output field "'+$f+'" is not a field.'+$(if($g){' Did you mean "'+$g+'"?'}else{''})}else{'An output rule needs "field".'});continue}
+  $fk=$f.ToLowerInvariant();if($seenOut.ContainsKey($fk)){& $add ($i+1) 'warning' ('Field "'+$f+'" is output twice.')};$seenOut[$fk]=$true
+  $w=Get-CmbValue $r 'width' $null;if($null -ne $w -and !($w -is [double] -and $w -gt 0 -and $w -le 255)){& $add ($i+1) 'error' 'width must be a number from 1 to 255.';$w=$null}
+  $hd=Get-CmbText $r 'header';if(!$hd){$hd=$nameOf[$fk]}
+  $P.outputs.Add(@{ruleIndex=$i;field=$nameOf[$fk];key=$fk;header=$hd;format=(Get-CmbText $r 'format');width=$w})
+ }
+ # views and measures
+ foreach($i in (& $of 'view')){
+  $r=$Rules[$i];$no=$i+1;$name=Get-CmbText $r 'view';if(!$name){& $add $no 'error' 'A view rule needs "view": its name.';continue}
+  $vk=$name.ToLowerInvariant();if($P.views.Contains($vk)){& $add $no 'error' ('View "'+$name+'" is defined twice.');continue}
+  if($name.Length -gt 31 -or $name -match '[\[\]:*?/\\]'){& $add $no 'warning' 'Sheet names are at most 31 characters without [ ] : * ? / \; the sheet name will be shortened.'}
+  $gb=@(Get-CmbList $r 'groupBy');if($gb.Count -eq 0){& $add $no 'error' 'A view needs "groupBy": the fields to group patients by.'}
+  $badG=@($gb|Where-Object{!$nameOf.ContainsKey($_.ToLowerInvariant())});if($badG.Count){& $add $no 'error' ('groupBy field '+(@($badG|ForEach-Object{'"'+$_+'"'}) -join ', ')+' is not a field.')}
+  $where=Get-CmbText $r 'where';if($where){try{$null=New-CmbCompiled $where (New-CmbExprContext $patientNames $tablesCheck $P.config.asOf 'not a field') -AsBool}catch{& $add $no 'error' $_.Exception.Message}}
+  $tot=Get-CmbValue $r 'total' $true;if(!($tot -is [bool])){& $add $no 'error' 'total must be true or false.';$tot=$true}
+  $desc=Get-CmbValue $r 'desc' $false;if(!($desc -is [bool])){& $add $no 'error' 'desc must be true or false.';$desc=$false}
+  $P.views[$vk]=@{name=$name;ruleIndex=$i;groupBy=@($gb|Where-Object{$nameOf.ContainsKey($_.ToLowerInvariant())}|ForEach-Object{$nameOf[$_.ToLowerInvariant()]});where=$where;total=$tot;sortBy=(Get-CmbText $r 'sortBy');desc=$desc;measures=[Collections.Generic.List[object]]::new()}
+ }
+ foreach($i in (& $of 'measure')){
+  $r=$Rules[$i];$no=$i+1;$vn=Get-CmbText $r 'view';$name=Get-CmbText $r 'name'
+  if(!$vn -or !$P.views.Contains($vn.ToLowerInvariant())){& $add $no 'error' $(if($vn){'Measure names view "'+$vn+'", which has no view rule.'}else{'A measure rule needs "view".'});continue}
+  $v=$P.views[$vn.ToLowerInvariant()];if(!$name){& $add $no 'error' 'A measure rule needs "name".';continue}
+  if(@($v.measures|Where-Object{$_.name -ieq $name}).Count -or @($v.groupBy|Where-Object{$_ -ieq $name}).Count){& $add $no 'error' ('View "'+$v.name+'" already has a column "'+$name+'".');continue}
+  $agg=Get-CmbText $r 'agg';if(!$agg){$agg='count'};$hit=@($script:CmbAggs|Where-Object{$_ -ieq $agg});if(!$hit.Count){& $add $no 'error' ('agg "'+$agg+'" is not one of '+($script:CmbAggs -join ', ')+'.');continue};$agg=$hit[0]
+  $field=Get-CmbText $r 'field';if($agg -in @('sum','avg','min','max','countDistinct')){if(!$field){& $add $no 'error' ('agg "'+$agg+'" needs "field".');continue};if(!$nameOf.ContainsKey($field.ToLowerInvariant())){& $add $no 'error' ('Field "'+$field+'" is not a field.');continue};$field=$nameOf[$field.ToLowerInvariant()]}
+  $where=Get-CmbText $r 'where';if($where){try{$null=New-CmbCompiled $where (New-CmbExprContext $patientNames $tablesCheck $P.config.asOf 'not a field') -AsBool}catch{& $add $no 'error' $_.Exception.Message}}
+  $v.measures.Add(@{ruleIndex=$i;name=$name;agg=$agg;field=$field;where=$where;of=(Get-CmbText $r 'of');per=(Get-CmbText $r 'per');format=(Get-CmbText $r 'format')})
+ }
+ foreach($vk in @($P.views.Keys)){
+  $v=$P.views[$vk]
+  foreach($m in $v.measures){if($m.agg -eq 'percent'){foreach($x in @('of','per')){$t=[string]$m[$x];if(!$t -or !@($v.measures|Where-Object{$_.name -ieq $t -and $_.agg -ne 'percent'}).Count){& $add ($m.ruleIndex+1) 'error' ('percent needs "'+$x+'": the name of another (non-percent) measure in view "'+$v.name+'".')}}}}
+  if($v.measures.Count -eq 0){$v.measures.Add(@{ruleIndex=-1;name='Patients';agg='count';field='';where='';of='';per='';format=''})}
+  if($v.sortBy -and !@($v.measures|Where-Object{$_.name -ieq $v.sortBy}).Count -and !@($v.groupBy|Where-Object{$_ -ieq $v.sortBy}).Count){& $add ($v.ruleIndex+1) 'error' ('sortBy "'+$v.sortBy+'" is not a measure or group field of this view.')}
+ }
+ $P.errorCount=@($P.problems|Where-Object{$_.severity -eq 'error'}).Count
+ return $P
+}
+function Get-CmbLookupTablesForCheck($Plan,[object[]]$Rules){
+ # Table names lookup() may use while checking: inline lookup rules (all of them, in any order) and lookup sources with their fields.
+ $t=@{};$n=0
+ foreach($r in $Rules){if($r -is [Collections.IDictionary] -and ([string](Get-CmbValue $r 'rule' '')).Trim() -ieq 'lookup'){$name=Get-CmbText $r 'table';if($name){$t[$name.ToLowerInvariant()]=@{index=$n;fields=@()};$n++}}}
+ foreach($s in $Plan.sources){if($s.role -eq 'lookup'){$t[$s.key]=@{index=$n;fields=@(foreach($k in @($s.fields.Keys)){$s.fields[$k].name})};$n++}}
+ return $t
+}
+function Get-CmbRuleSummary($Rule){
+ # One plain sentence per rule for the rules table and the audit sheet.
+ if(!($Rule -is [Collections.IDictionary])){return '(not a rule object)'}
+ $t=([string](Get-CmbValue $Rule 'rule' '')).Trim().ToLowerInvariant();$v={param($k)Get-CmbText $Rule $k};$l={param($k),@(Get-CmbList $Rule $k)}
+ $q={param([string[]]$x)(@($x|ForEach-Object{'"'+$_+'"'}) -join ', ')}
+ switch($t){
+  'config'{$s='Config "'+(& $v 'name')+'"';if(& $v 'asOf'){$s+='; today() is '+(& $v 'asOf')};if(& $v 'sheet'){$s+='; patient sheet "'+(& $v 'sheet')+'"'};$lin=Get-CmbValue $Rule 'lineage' $true;if($lin -eq $false){$s+='; no value-source sheet'};return $s}
+  'source'{$s='Source '+(& $v 'source');if((& $v 'label')){$s+=' ('+(& $v 'label')+')'};if((& $v 'role') -ieq 'lookup'){$s+=': lookup table keyed on '+(& $v 'key')};$s+=': a file with columns '+(& $q (& $l 'match'));if(& $v 'fileName'){$s+=', named like '+(& $v 'fileName')};if(& $v 'sheet'){$s+=', sheet '+(& $v 'sheet')};if((Get-CmbValue $Rule 'required' $true) -eq $false){$s+=' (optional)'};return $s}
+  'map'{
+   $s=(& $v 'source')+'.'+(& $v 'field')+' from '
+   if($Rule.Contains('column')){$s+='column "'+(& $v 'column')+'"'}elseif($Rule.Contains('columns')){$s+='columns '+(& $q (& $l 'columns'))+' joined'}elseif($Rule.Contains('value')){$s+='the value '+(ConvertTo-CmbJson (Get-CmbValue $Rule 'value' ''))}elseif($Rule.Contains('expr')){$s+=(& $v 'expr')}elseif($Rule.Contains('special')){$s+='the '+(& $v 'special')}else{$s+='(nothing)'}
+   $c=Get-CmbValue $Rule 'clean' $null;if($null -ne $c){$s+='; cleaned: '+(@(@($c)|ForEach-Object{if($_ -is [string]){$_}else{ConvertTo-CmbJson $_}}) -join ', ')}
+   $ty=& $v 'type';if($ty -and $ty -ine 'text'){$s+='; as '+$ty};return $s
+  }
+  'filter'{$who=$(if(& $v 'source'){(& $v 'source')+' rows'}else{'Patients'});if(& $v 'keep'){return ($who+': keep where '+(& $v 'keep'))};return ($who+': drop where '+(& $v 'drop'))}
+  'key'{$s='Same patient when '+((& $l 'fields') -join ' + ')+' match';$src=& $l 'sources';if($src.Count){$s+=' (sources '+($src -join ', ')+')'};return $s}
+  'field'{
+   $f=& $v 'field';$how=& $v 'how';if(!$how){$how='priority'};$of=& $v 'of';$src=& $l 'from';$fromText=$(if($src.Count){' from '+($src -join ', ')}else{''})
+   $what=$(if($of -and $of -ine $f){$of}else{'value'})
+   switch($how.ToLowerInvariant()){
+    'priority'{return ($f+' = first non-blank '+$what+$(if($src.Count){' trying '+($src -join ', ')+' in order'}else{' in source order'}))}
+    'latest'{return ($f+' = '+$what+' from the row with the latest '+(& $v 'by')+$fromText)}
+    'earliest'{return ($f+' = '+$what+' from the row with the earliest '+(& $v 'by')+$fromText)}
+    'exists'{return ($f+' = true when the patient is in '+$(if($src.Count){$src -join ' or '}else{'any source'}))}
+    'list'{return ($f+' = every different '+$what+$fromText+', joined')}
+    'mostcommon'{return ($f+' = most common '+$what+$fromText)}
+    'countdistinct'{return ($f+' = number of different '+$what+'s'+$fromText)}
+    default{return ($f+' = '+$how+' of '+$(if($of){$of}else{$f})+$fromText)}
+   }
+  }
+  'derive'{return ((& $v 'field')+' = '+(& $v 'expr'))}
+  'lookup'{$vals=Get-CmbValue $Rule 'values' $null;$n=0;if($vals -is [Collections.IDictionary]){$n=$vals.Count};return ('Table '+(& $v 'table')+': '+$n+' value'+$(if($n -eq 1){''}else{'s'})+$(if($Rule.Contains('default')){', otherwise '+(ConvertTo-CmbJson $Rule['default'])}else{''}))}
+  'sort'{return ('Sort by '+(& $v 'field')+$(if((Get-CmbValue $Rule 'desc' $false) -eq $true){', largest or latest first'}else{''}))}
+  'output'{$h=& $v 'header';$f=& $v 'field';return ('Column "'+$(if($h){$h}else{$f})+'"'+$(if($h -and $h -cne $f){' = '+$f}else{''})+$(if(& $v 'format'){' as '+(& $v 'format')}else{''}))}
+  'view'{$s='View "'+(& $v 'view')+'": patients grouped by '+((& $l 'groupBy') -join ', ');if(& $v 'where'){$s+=' where '+(& $v 'where')};return $s}
+  'measure'{$agg=& $v 'agg';if(!$agg){$agg='count'};$s=(& $v 'view')+' / "'+(& $v 'name')+'" = ';if($agg -ieq 'percent'){$s+=(& $v 'of')+' / '+(& $v 'per')}elseif($agg -ieq 'count'){$s+='patient count'}else{$s+=$agg+' of '+(& $v 'field')};if(& $v 'where'){$s+=' where '+(& $v 'where')};return $s}
+ }
+ return ('('+$t+' rule)')
+}
+function Find-CmbFileCandidates($Source,[object[]]$Files){
+ # Loaded files (and sheets) that have every match column, newest first; fileName and sheet narrow them when given.
+ $want=@($Source.match|ForEach-Object{ConvertTo-CmbHeaderKey $_});$out=@()
+ foreach($f in $Files){
+  $nm=[string](Get-P $f 'originalName' '');if($Source.fileName -and $nm -notlike $Source.fileName){continue}
+  foreach($s in @(Get-P $f 'sheets' @())){
+   if($Source.sheet -and [string]$s.name -ne $Source.sheet){continue}
+   $have=@{};foreach($h in @(Get-P $s 'headers' @())){$have[(ConvertTo-CmbHeaderKey ([string]$h))]=$true}
+   $ok=$want.Count -gt 0;foreach($w in $want){if(!$have.ContainsKey($w)){$ok=$false;break}}
+   if($ok){$out+=@{token=[string]$f.token;file=$nm;sheet=[string]$s.name;headerRow=[int]$s.headerRow;rows=[int]$s.rows;loadedUtc=(ConvertTo-IsoText (Get-P $f 'loadedUtc' ''));headers=@(Get-P $s 'headers' @());fileDateUtc=(ConvertTo-IsoText (Get-P $f 'fileDateUtc' ''))}}
+  }
+ }
+ return @($out)
+}
+function Get-CmbAssignments($Plan,[object[]]$Files,[hashtable]$Chosen=@{}){
+ # The file for each source: the one chosen on the page if it still matches, otherwise the newest matching file not already used.
+ $used=@{};$out=[ordered]@{}
+ foreach($s in $Plan.sources){
+  $cands=@(Find-CmbFileCandidates $s $Files);$pick=$null
+  $want=[string]$Chosen[$s.key];if($want){foreach($c in $cands){if(($c.token+'|'+$c.sheet) -eq $want){$pick=$c}}}
+  if(!$pick){foreach($c in $cands){if(!$used.ContainsKey($c.token+'|'+$c.sheet)){$pick=$c;break}};if(!$pick -and $cands.Count){$pick=$cands[0]}}
+  if($pick){$used[$pick.token+'|'+$pick.sheet]=$true}
+  $out[$s.key]=@{source=$s.id;candidates=$cands;pick=$pick}
+ }
+ return $out
+}
+function Get-CmbTablesFromAssignments($Assign){
+ $t=@{};foreach($k in @($Assign.Keys)){$p=$Assign[$k].pick;if($p){$t[$k]=@{headers=@($p.headers);file=('"'+$p.file+'"'+$(if($p.sheet -and [IO.Path]::GetExtension($p.file) -ieq '.xlsx'){' sheet "'+$p.sheet+'"'}else{''}))}}};return $t
+}
+function Get-CmbCheck([object[]]$Rules,[object[]]$Files,[hashtable]$Chosen=@{}){
+ # What the Rules and Output pages show: per-rule summaries and problems, plus which file each source would use.
+ $plan0=Get-CmbPlan $Rules;$assign=Get-CmbAssignments $plan0 $Files $Chosen;$plan=Get-CmbPlan $Rules (Get-CmbTablesFromAssignments $assign)
+ $rows=@(for($i=0;$i -lt $Rules.Count;$i++){
+  $r=$Rules[$i];$type='';if($r -is [Collections.IDictionary]){$type=([string](Get-CmbValue $r 'rule' '')).Trim().ToLowerInvariant()}
+  [ordered]@{index=($i+1);type=$type;summary=(Get-CmbRuleSummary $r);note=$(if($r -is [Collections.IDictionary]){Get-CmbText $r 'note'}else{''});json=$(if($r -is [Collections.IDictionary]){ConvertTo-CmbRuleText $r}else{''});problems=@($plan.problems|Where-Object{$_.rule -eq ($i+1)}|ForEach-Object{[ordered]@{severity=$_.severity;message=$_.message}})}
+ })
+ $srcs=@(foreach($s in $plan.sources){
+  $a=$assign[$s.key];$pick=$a.pick
+  [ordered]@{source=$s.id;label=$s.label;role=$s.role;required=$s.required;match=@($s.match);candidates=@($a.candidates|ForEach-Object{[ordered]@{value=($_.token+'|'+$_.sheet);file=$_.file;sheet=$_.sheet;rows=$_.rows;loadedUtc=$_.loadedUtc}});chosen=$(if($pick){$pick.token+'|'+$pick.sheet}else{''});file=$(if($pick){$pick.file}else{''});sheet=$(if($pick){$pick.sheet}else{''});rows=$(if($pick){$pick.rows}else{0})}
+ })
+ $shared=@{};foreach($s in $srcs){if($s.chosen){if($shared.ContainsKey($s.chosen)){$shared[$s.chosen]+=@($s.source)}else{$shared[$s.chosen]=@($s.source)}}}
+ $general=@($plan.problems|Where-Object{$_.rule -eq 0}|ForEach-Object{[ordered]@{severity=$_.severity;message=$_.message}})
+ foreach($k in @($shared.Keys)){if(@($shared[$k]).Count -gt 1){$general+=[ordered]@{severity='warning';message=('Sources '+(@($shared[$k]) -join ' and ')+' use the same file; make their match columns (or fileName) more specific.')}}}
+ return [ordered]@{name=$plan.config.name;rules=$rows;general=$general;sources=$srcs;errors=$plan.errorCount;warnings=@($plan.problems|Where-Object{$_.severity -eq 'warning'}).Count;fields=@($plan.order);views=@($plan.views.Keys|ForEach-Object{$plan.views[$_].name})}
+}
+# --- Combine engine: reads the sources, matches rows to patients, combines and derives fields, and builds the views and audit tables.
+function Get-CmbExprNames([string]$Text){
+ # Names an expression refers to (not function names), for deciding which columns to read.
+ try{$tk=Get-CmbTokens $Text}catch{return @()}
+ $out=@();for($i=0;$i -lt $tk.Count;$i++){$t=$tk[$i];if($t.t -ne 'id'){continue};if(!$t.br -and $i+1 -lt $tk.Count -and $tk[$i+1].t -eq 'lp'){continue};$out+=[string]$t.v};return @($out)
+}
+function Invoke-CmbClean([string[]]$Values,[object[]]$Steps){
+ # Cleaning steps applied in order to every value (trimmed first); '' is blank.
+ $n=$Values.Length;$v=[string[]]::new($n);for($i=0;$i -lt $n;$i++){$x=$Values[$i];if($null -eq $x){$v[$i]=''}else{$v[$i]=$x.Trim()}}
+ $ti=[Globalization.CultureInfo]::InvariantCulture.TextInfo
+ foreach($s in $Steps){
+  switch($s.op){
+   'trim'{}
+   'upper'{for($i=0;$i -lt $n;$i++){$v[$i]=$v[$i].ToUpperInvariant()}}
+   'lower'{for($i=0;$i -lt $n;$i++){$v[$i]=$v[$i].ToLowerInvariant()}}
+   'title'{for($i=0;$i -lt $n;$i++){$v[$i]=$ti.ToTitleCase($v[$i].ToLowerInvariant())}}
+   'collapsespaces'{$rx=[regex]'\s+';for($i=0;$i -lt $n;$i++){$v[$i]=$rx.Replace($v[$i],' ')}}
+   'digits'{$rx=[regex]'[^0-9]';for($i=0;$i -lt $n;$i++){$v[$i]=$rx.Replace($v[$i],'')}}
+   'alnum'{$rx=[regex]'[^A-Za-z0-9]';for($i=0;$i -lt $n;$i++){$v[$i]=$rx.Replace($v[$i],'')}}
+   'stripleadingzeros'{for($i=0;$i -lt $n;$i++){$x=$v[$i];if($x.StartsWith('0')){$y=$x.TrimStart('0');if($y.Length -eq 0){$y='0'};$v[$i]=$y}}}
+   'pad'{$w=[int]$s.n;for($i=0;$i -lt $n;$i++){if($v[$i].Length -gt 0){$v[$i]=$v[$i].PadLeft($w,'0')}}}
+   'left'{$w=[int]$s.n;for($i=0;$i -lt $n;$i++){if($v[$i].Length -gt $w){$v[$i]=$v[$i].Substring(0,$w)}}}
+   'removebracketid'{$rx=[regex]'\s*\[[^\]]*\]\s*$';for($i=0;$i -lt $n;$i++){$v[$i]=$rx.Replace($v[$i],'')}}
+   'namekey'{$memo=@{};for($i=0;$i -lt $n;$i++){$x=$v[$i];if($x.Length -eq 0){continue};$y=$memo[$x];if($null -eq $y){$y=[CmbRt]::NameKey($x);$memo[$x]=$y};$v[$i]=$y}}
+   'blankif'{$b=[string]$s.text;for($i=0;$i -lt $n;$i++){if([string]::Equals($v[$i],$b,[StringComparison]::OrdinalIgnoreCase)){$v[$i]=''}}}
+   'replace'{$rx=[CmbRt]::Re([string]$s.rx);$w=[string]$s.with;for($i=0;$i -lt $n;$i++){if($v[$i].Length -gt 0){$v[$i]=$rx.Replace($v[$i],$w)}}}
+   'extract'{$rx=[CmbRt]::Re([string]$s.rx);for($i=0;$i -lt $n;$i++){if($v[$i].Length -gt 0){$m=$rx.Match($v[$i]);if(!$m.Success){$v[$i]=''}elseif($m.Groups.Count -gt 1){$v[$i]=$m.Groups[1].Value}else{$v[$i]=$m.Value}}}}
+   'map'{$h=$s.map;$else=[string]$s.else;for($i=0;$i -lt $n;$i++){$x=$v[$i];if($x.Length -eq 0){continue};$k=[CmbRt]::Key($x);if($h.ContainsKey($k)){$y=$h[$k];if($null -eq $y){$v[$i]=''}else{$v[$i]=[string]$y}}elseif($else -ieq 'blank'){$v[$i]=''}elseif($else -ine 'keep'){$v[$i]=$else}}}
+  }
+  if($s.op -notin @('trim','pad','left','blankif','map')){for($i=0;$i -lt $n;$i++){$v[$i]=$v[$i].Trim()}}
+ }
+ return ,$v
+}
+function ConvertTo-CmbTypedValues([object[]]$Values,[string]$Type,$Stat){
+ # Typed values ($null = blank); a non-blank value the type cannot read becomes blank and is counted, with a few examples.
+ # Text is only trimmed; other types remember each distinct text's result, since exports repeat values (dates, codes, flags).
+ $n=$Values.Length;$out=[object[]]::new($n)
+ if($Type -eq 'text'){for($i=0;$i -lt $n;$i++){$x=$Values[$i];if($null -eq $x){continue};if($x -is [string]){$t=$x.Trim();if($t.Length){$out[$i]=$t}}else{$out[$i]=[CmbRt]::Convert($x,'text')}};return ,$out}
+ $memo=[Collections.Generic.Dictionary[string,object]]::new();$bad=[Collections.Generic.HashSet[string]]::new()
+ for($i=0;$i -lt $n;$i++){
+  $x=$Values[$i];if($null -eq $x){continue}
+  if($x -is [string]){
+   if($x.Length -eq 0){continue};$y=$null
+   if($memo.TryGetValue($x,[ref]$y)){$out[$i]=$y;continue}
+   if($bad.Contains($x)){$Stat.unreadable++;continue}
+   $y=[CmbRt]::Convert($x,$Type)
+   if($null -eq $y){if([string]::IsNullOrWhiteSpace($x)){continue};[void]$bad.Add($x);$Stat.unreadable++;if($Stat.examples.Count -lt 5){$t=$x.Trim();if(!$Stat.examples.Contains($t)){$Stat.examples.Add($t)}};continue}
+   if($memo.Count -lt 200000){$memo[$x]=$y};$out[$i]=$y;continue
+  }
+  $y=[CmbRt]::Convert($x,$Type)
+  if($null -eq $y){$Stat.unreadable++;if($Stat.examples.Count -lt 5){$t=[CmbRt]::Text($x);if(!$Stat.examples.Contains($t)){$Stat.examples.Add($t)}}}else{$out[$i]=$y}
+ }
+ return ,$out
+}
+function Get-CmbNumberText([double]$N){return $N.ToString('#,0',[Globalization.CultureInfo]::InvariantCulture)}
+function Read-CmbSource($Plan,$Src,$Pick,$File,[object[]]$TableList,[hashtable]$TableMap){
+ # One source: reads only the columns its rules use, applies the map rules in order, then its filters. Returns its fields and kept rows.
+ $want=@{}
+ foreach($m in $Src.maps){if($m.mode -eq 'column'){$want[(ConvertTo-CmbHeaderKey $m.column)]=$true};if($m.mode -eq 'columns'){foreach($c in $m.columns){$want[(ConvertTo-CmbHeaderKey $c)]=$true}};if($m.mode -eq 'expr'){foreach($x in (Get-CmbExprNames $m.expr)){$want[(ConvertTo-CmbHeaderKey $x)]=$true}}}
+ foreach($f in $Src.filters){foreach($x in (Get-CmbExprNames $f.expr)){$want[(ConvertTo-CmbHeaderKey $x)]=$true}}
+ $hr=$Src.headerRow;if($hr -le 0){$hr=[int]$Pick.headerRow}
+ $tables=@(Read-CmbSheets ([string]$File.path) ([string]$Pick.sheet) $hr ([string[]]@($want.Keys)) ([string]$Pick.sheet))
+ if($tables.Count -eq 0){throw ('Source "'+$Src.id+'": sheet "'+$Pick.sheet+'" was not found in '+[string]$File.originalName+'.')}
+ $t=$tables[0];$n=[int]$t.rows
+ $names=@{};$cols=[Collections.Generic.List[object]]::new()
+ foreach($h in @($t.columns.Keys)){$a=$t.columns[$h];$o=New-Object object[] $n;[Array]::Copy([object[]]$a,$o,[Math]::Min($n,$a.Length));$cols.Add($o);$names[(ConvertTo-CmbHeaderKey $h)]=$cols.Count-1}
+ $hdr=@{};foreach($h in @($t.headers)){$hdr[(ConvertTo-CmbHeaderKey $h)]=$h}
+ $fields=@{};$effects=@{};$label=('"'+[string]$File.originalName+'"'+$(if([IO.Path]::GetExtension([string]$File.originalName) -ieq '.xlsx'){' sheet "'+$t.name+'"'}else{''}))
+ $fileDate=$null;$fd=[string](Get-P $File 'fileDateUtc' '');if($fd){$d=ConvertTo-DateValue $fd;if($d){$fileDate=$d.ToLocalTime().Date}}
+ foreach($m in $Src.maps){
+  $stat=@{unreadable=0;examples=[Collections.Generic.List[string]]::new()};$raw=$null;$vals=$null;$clearedByClean=0
+  switch($m.mode){
+   'column'{$k=ConvertTo-CmbHeaderKey $m.column;if(!$names.ContainsKey($k) -or !$hdr.ContainsKey($k)){throw ('Source "'+$Src.id+'": column "'+$m.column+'" is not in '+$label+'.')};$raw=[string[]]$t.columns[$hdr[$k]]}
+   'columns'{
+    $parts=@(foreach($c in $m.columns){$k=ConvertTo-CmbHeaderKey $c;if(!$hdr.ContainsKey($k)){throw ('Source "'+$Src.id+'": column "'+$c+'" is not in '+$label+'.')};,([string[]]$t.columns[$hdr[$k]])})
+    $raw=New-Object string[] $n;for($i=0;$i -lt $n;$i++){$sb=New-Object Text.StringBuilder;foreach($pa in $parts){$x=$pa[$i].Trim();if($x){if($sb.Length){[void]$sb.Append($m.sep)};[void]$sb.Append($x)}};$raw[$i]=$sb.ToString()}
+   }
+   'value'{$c=[CmbRt]::Text($m.value);$raw=New-Object string[] $n;for($i=0;$i -lt $n;$i++){$raw[$i]=$c}}
+   'special'{
+    $vals=New-Object object[] $n
+    for($i=0;$i -lt $n;$i++){switch($m.special){'fileName'{$vals[$i]=[string]$File.originalName}'fileDate'{$vals[$i]=$fileDate}'rowNumber'{$vals[$i]=[double]($t.headerRow+1+$i)}'sourceLabel'{$vals[$i]=$Src.label}}}
+   }
+   'expr'{
+    $c=New-CmbCompiled $m.expr (New-CmbExprContext $names $TableMap $Plan.config.asOf ('not a column of '+$label+' or a field mapped above'))
+    $r=Invoke-CmbCompiled $c $cols.ToArray() $TableList $n;$vals=$r.values;if($r.errors.Count){$stat.unreadable+=$r.errors.Count}
+    if($m.clean.Count){$raw=New-Object string[] $n;for($i=0;$i -lt $n;$i++){$raw[$i]=[CmbRt]::Text($vals[$i])};$vals=$null}
+   }
+  }
+  if($null -ne $raw){
+   $before=0;foreach($x in $raw){if($x.Length -gt 0 -and $x.Trim().Length -gt 0){$before++}}
+   if($m.clean.Count){$raw=Invoke-CmbClean $raw $m.clean;$after=0;foreach($x in $raw){if($x.Length -gt 0){$after++}};$clearedByClean=$before-$after}
+   $vals=ConvertTo-CmbTypedValues ([object[]]$raw) $m.type $stat
+  }elseif($m.mode -eq 'expr'){$vals=ConvertTo-CmbTypedValues $vals $m.type $stat}
+  $cols.Add($vals);$names[$m.key]=$cols.Count-1;$fields[$m.key]=$vals
+  $filled=0;foreach($x in $vals){if($null -ne $x){$filled++}}
+  $e='filled '+(Get-CmbNumberText $filled)+' of '+(Get-CmbNumberText $n)+' rows'
+  if($clearedByClean -gt 0){$e+='; cleaning blanked '+(Get-CmbNumberText $clearedByClean)}
+  if($stat.unreadable -gt 0){$e+='; '+(Get-CmbNumberText $stat.unreadable)+' value'+$(if($stat.unreadable -eq 1){''}else{'s'})+' could not be read as '+$m.type+$(if($stat.examples.Count){' (e.g. '+(@($stat.examples|ForEach-Object{'"'+$_+'"'}) -join ', ')+')'}else{''})+' and were left blank'}
+  $effects[$m.ruleIndex]=$e
+ }
+ # Rows with every mapped field blank (spacer or footer rows) are not used.
+ $keep=[bool[]]::new($n);$empty=0;$farr=[object[]]@(foreach($k in @($fields.Keys)){,$fields[$k]});$nf=$farr.Count
+ for($i=0;$i -lt $n;$i++){$any=$false;for($j=0;$j -lt $nf;$j++){if($null -ne $farr[$j][$i]){$any=$true;break}};$keep[$i]=$any;if(!$any){$empty++}}
+ $dropped=0
+ foreach($f in $Src.filters){
+  $c=New-CmbCompiled $f.expr (New-CmbExprContext $names $TableMap $Plan.config.asOf ('not a column of '+$label+' or a field of source "'+$Src.id+'"')) -AsBool
+  $r=Invoke-CmbCompiled $c $cols.ToArray() $TableList $n;$d=0;$before=0
+  for($i=0;$i -lt $n;$i++){if(!$keep[$i]){continue};$before++;$hit=[bool]$r.values[$i];if($f.keep -ne $hit){$keep[$i]=$false;$d++}}
+  $dropped+=$d;$effects[$f.ruleIndex]=('removed '+(Get-CmbNumberText $d)+' of '+(Get-CmbNumberText $before)+' rows'+$(if($r.errors.Count){'; the expression failed on '+(Get-CmbNumberText $r.errors.Count)+' rows (treated as false)'}else{''}))
+ }
+ $rows=[Collections.Generic.List[int]]::new();for($i=0;$i -lt $n;$i++){if($keep[$i]){$rows.Add($i)}}
+ return @{src=$Src;n=$n;fields=$fields;rows=$rows;effects=$effects;file=$label;sheet=$t.name;headerRow=$t.headerRow;empty=$empty;dropped=$dropped;fileName=[string]$File.originalName;sha256=[string](Get-P $File 'sha256' '');token=[string]$File.token}
+}
+function Get-CmbRunTables($Plan,[hashtable]$Data){
+ # lookup() tables in the order Get-CmbLookupTablesForCheck numbers them: inline lookup rules, then lookup sources (key -> row fields).
+ $list=[Collections.Generic.List[object]]::new();$map=@{};$effects=@{}
+ foreach($r in $Plan.rules){if($r -is [Collections.IDictionary] -and ([string](Get-CmbValue $r 'rule' '')).Trim() -ieq 'lookup'){$name=Get-CmbText $r 'table';if(!$name){continue};$tk=$name.ToLowerInvariant();$tb=@{};if($Plan.lookups.Contains($tk)){$tb=$Plan.lookups[$tk].table};$map[$tk]=@{index=$list.Count;fields=@()};$list.Add($tb)}}
+ foreach($s in $Plan.sources){
+  if($s.role -ne 'lookup'){continue};$tb=@{};$dup=0
+  if($Data.ContainsKey($s.key)){
+   $d=$Data[$s.key];$kk=$s.lookupKey.ToLowerInvariant();$ka=$d.fields[$kk]
+   foreach($i in $d.rows){$k=[CmbRt]::Key($ka[$i]);if($k.Length -eq 0){continue};if($tb.ContainsKey($k)){$dup++;continue};$row=@{};foreach($f in @($s.fields.Keys)){$row[$s.fields[$f].name]=$d.fields[$f][$i]};$tb[$k]=$row}
+   $effects[$s.ruleIndex]=('lookup table of '+(Get-CmbNumberText $tb.Count)+' keys'+$(if($dup){'; '+(Get-CmbNumberText $dup)+' rows repeat a key and were ignored'}else{''}))
+  }
+  $map[$s.key]=@{index=$list.Count;fields=@(foreach($f in @($s.fields.Keys)){$s.fields[$f].name})};$list.Add($tb)
+ }
+ return @{list=$list.ToArray();map=$map;effects=$effects}
+}
+function Invoke-CmbEngine($Plan,[hashtable]$Picks,[scriptblock]$Progress={param($p,$s)}){
+ # Picks: source key -> @{pick (candidate: token, sheet, headerRow);file (file record)}. Returns everything the workbook and the page need.
+ $sw=[Diagnostics.Stopwatch]::StartNew();$effects=@{};$notes=[Collections.Generic.List[string]]::new()
+ $data=@{};$tablesEarly=Get-CmbRunTables $Plan @{}
+ $srcList=@($Plan.sources);$k=0
+ # Lookup sources first, so patient sources' map expressions can use lookup().
+ $readOrder=@($srcList|Where-Object{$_.role -eq 'lookup'})+@($srcList|Where-Object{$_.role -ne 'lookup'})
+ foreach($s in $readOrder){
+  $k++;$pk=$Picks[$s.key]
+  if(!$pk -or !$pk.pick){if($s.required){throw ('No file is chosen for source "'+$s.id+'".')};$effects[$s.ruleIndex]='skipped: no file was chosen (the source is optional)';continue}
+  & $Progress ([int](5+40*($k-1)/[Math]::Max(1,$readOrder.Count))) ('Reading '+$s.id+': '+[string]$pk.file.originalName)
+  $tb=Get-CmbRunTables $Plan $data
+  $d=Read-CmbSource $Plan $s $pk.pick $pk.file $tb.list $tb.map;$data[$s.key]=$d
+  foreach($e in @($d.effects.Keys)){$effects[$e]=$d.effects[$e]}
+ }
+ $tb=Get-CmbRunTables $Plan $data;foreach($e in @($tb.effects.Keys)){$effects[$e]=$tb.effects[$e]}
+ # Records: every kept row of every patient source, in source order then row order.
+ & $Progress 48 'Matching rows to patients'
+ $ps=@($srcList|Where-Object{$_.role -eq 'patients' -and $data.ContainsKey($_.key)});$sIndex=@{};for($i=0;$i -lt $ps.Count;$i++){$sIndex[$ps[$i].key]=$i}
+ $N=0;foreach($s in $ps){$N+=$data[$s.key].rows.Count}
+ $recSrc=New-Object int[] $N;$recRow=New-Object int[] $N;$r=0
+ for($si=0;$si -lt $ps.Count;$si++){foreach($i in $data[$ps[$si].key].rows){$recSrc[$r]=$si;$recRow[$r]=$i;$r++}}
+ $parent=[int[]]::new($N);for($i=0;$i -lt $N;$i++){$parent[$i]=$i}
+ # Per key level: the group's key value at its root (kv) and the record it came from (kr, for the display text).
+ $L=$Plan.keys.Count;$kv=@(for($j=0;$j -lt $L;$j++){,([string[]]::new($N))});$kr=@(for($j=0;$j -lt $L;$j++){$x=[int[]]::new($N);for($i=0;$i -lt $N;$i++){$x[$i]=-1};,$x});$mask=[int[]]::new($N);$hasKey=[bool[]]::new($N)
+ $keyArrs=@(for($j=0;$j -lt $L;$j++){$key=$Plan.keys[$j];,@(for($si=0;$si -lt $ps.Count;$si++){if($key.sources -contains $ps[$si].id){,@(foreach($f in $key.fields){,$data[$ps[$si].key].fields[$f.ToLowerInvariant()]})}else{,$null}})})
+ $keyConflicts=[Collections.Generic.List[object]]::new();$keyEffects=@{}
+ for($lv=0;$lv -lt $L;$lv++){
+  $key=$Plan.keys[$lv];$seen=[Collections.Generic.Dictionary[string,int]]::new();$joined=0;$withKey=0;$blocked=0;$arrs=$keyArrs[$lv];$kvl=$kv[$lv];$krl=$kr[$lv];$bit=1 -shl [Math]::Min(30,$lv)
+  for($r=0;$r -lt $N;$r++){
+   $fa=$arrs[$recSrc[$r]];if($null -eq $fa){continue}
+   $row=$recRow[$r]
+   if($fa.Count -eq 1){$x=$fa[0][$row];if($null -eq $x){continue};$val=[CmbRt]::Key($x);if($val.Length -eq 0){continue}}
+   else{$parts=[string[]]::new($fa.Count);$ok=$true;for($q=0;$q -lt $fa.Count;$q++){$t=[CmbRt]::Key($fa[$q][$row]);if($t.Length -eq 0){$ok=$false;break};$parts[$q]=$t};if(!$ok){continue};$val=[string]::Join('|',$parts)}
+   $withKey++;$hasKey[$r]=$true
+   $a=$r;while($parent[$a] -ne $a){$parent[$a]=$parent[$parent[$a]];$a=$parent[$a]}
+   if($null -eq $kvl[$a]){$kvl[$a]=$val;$krl[$a]=$r}
+   if(!$seen.ContainsKey($val)){$seen[$val]=$r;continue}
+   $b=$seen[$val];while($parent[$b] -ne $b){$parent[$b]=$parent[$parent[$b]];$b=$parent[$b]}
+   if($a -eq $b){continue}
+   $conf=-1;for($j=0;$j -lt $lv;$j++){$x=$kv[$j][$a];$y=$kv[$j][$b];if($null -ne $x -and $null -ne $y -and $x -ne $y){$conf=$j;break}}
+   if($conf -ge 0){$blocked++;if($keyConflicts.Count -lt 20000){$ra=$kr[$conf][$a];$rb=$kr[$conf][$b];$keyConflicts.Add([ordered]@{key=$key.label;value=(Get-CmbKeyDisplay $fa $row);earlierKey=$Plan.keys[$conf].label;first=(Get-CmbKeyDisplay $keyArrs[$conf][$recSrc[$rb]] $recRow[$rb]);second=(Get-CmbKeyDisplay $keyArrs[$conf][$recSrc[$ra]] $recRow[$ra]);sources=($ps[$recSrc[$b]].id+', '+$ps[$recSrc[$r]].id)})};continue}
+   $root=[Math]::Min($a,$b);$child=[Math]::Max($a,$b);$parent[$child]=$root;$joined++
+   for($j=0;$j -le $lv;$j++){if($null -eq $kv[$j][$root] -and $null -ne $kv[$j][$child]){$kv[$j][$root]=$kv[$j][$child];$kr[$j][$root]=$kr[$j][$child]}}
+   $mask[$root]=$mask[$root] -bor $mask[$child] -bor $bit
+  }
+  $keyEffects[$key.ruleIndex]=((Get-CmbNumberText $withKey)+' rows had this key; '+(Get-CmbNumberText $joined)+' joins'+$(if($blocked){'; '+(Get-CmbNumberText $blocked)+' joins refused because an earlier key differs (see Key conflicts)'}else{''}))
+ }
+ foreach($e in @($keyEffects.Keys)){$effects[$e]=$keyEffects[$e]}
+ # Patients in order of their first row; each patient's rows in record order.
+ $pOf=[int[]]::new($N);$P=0;$rootPid=[int[]]::new($N);for($i=0;$i -lt $N;$i++){$rootPid[$i]=-1};$noKey=[int[]]::new($ps.Count)
+ for($r=0;$r -lt $N;$r++){
+  if(!$hasKey[$r]){$pOf[$r]=-1;$noKey[$recSrc[$r]]++;continue}
+  $a=$r;while($parent[$a] -ne $a){$a=$parent[$a]};if($rootPid[$a] -ge 0){$pOf[$r]=$rootPid[$a]}else{$rootPid[$a]=$P;$pOf[$r]=$P;$P++}
+ }
+ $pStart=[int[]]::new($P+1);for($r=0;$r -lt $N;$r++){if($pOf[$r] -ge 0){$pStart[$pOf[$r]+1]++}};for($q=0;$q -lt $P;$q++){$pStart[$q+1]+=$pStart[$q]}
+ $fill=[int[]]::new($P);$pRecs=[int[]]::new([Math]::Max(1,$pStart[$P]));for($r=0;$r -lt $N;$r++){$q=$pOf[$r];if($q -ge 0){$pRecs[$pStart[$q]+$fill[$q]]=$r;$fill[$q]++}}
+ $pRoot=[int[]]::new($P);for($i=0;$i -lt $N;$i++){if($rootPid[$i] -ge 0){$pRoot[$rootPid[$i]]=$i}}
+ # Built-in fields.
+ $FV=@{};$LIN=@{}
+ $keyText=[object[]]::new($P);$srcText=[object[]]::new($P);$rowsN=[object[]]::new($P);$matched=[object[]]::new($P);$mbText=@{};$mark=[int[]]::new($ps.Count);$sid=[string[]]@($ps|ForEach-Object{[string]$_.id})
+ for($q=0;$q -lt $P;$q++){
+  $a=$pRoot[$q];for($j=0;$j -lt $L;$j++){$rk=$kr[$j][$a];if($rk -ge 0){$keyText[$q]=(Get-CmbKeyDisplay $keyArrs[$j][$recSrc[$rk]] $recRow[$rk]);break}}
+  $j0=$pStart[$q];$j1=$pStart[$q+1];$rowsN[$q]=[double]($j1-$j0)
+  if($j1-$j0 -eq 1){$srcText[$q]=$sid[$recSrc[$pRecs[$j0]]]}
+  else{$stamp=$q+1;$lp=[Collections.Generic.List[string]]::new();for($j=$j0;$j -lt $j1;$j++){$si=$recSrc[$pRecs[$j]];if($mark[$si] -ne $stamp){$mark[$si]=$stamp}};for($si=0;$si -lt $sid.Count;$si++){if($mark[$si] -eq $stamp){$lp.Add($sid[$si])}};$srcText[$q]=[string]::Join('; ',$lp)}
+  $m=$mask[$a];if($m){if(!$mbText.ContainsKey($m)){$mbText[$m]=(@(for($j=0;$j -lt [Math]::Min(31,$L);$j++){if($m -band (1 -shl $j)){$Plan.keys[$j].label}}) -join '; ')};$matched[$q]=$mbText[$m]}
+ }
+ $FV['_key']=$keyText;$FV['_sources']=$srcText;$FV['_rows']=$rowsN;$FV['_matchedby']=$matched
+ # Combined fields.
+ $conflicts=[Collections.Generic.List[object]]::new();$conflictCount=0;$fk=0;$fieldNotes=[ordered]@{};$fieldKeys=@($Plan.fields.Keys)
+ foreach($key in $fieldKeys){
+  $fk++;if($fk % 5 -eq 1){& $Progress ([int](55+20*$fk/[Math]::Max(1,$fieldKeys.Count))) ('Combining fields ('+$fk+' of '+$fieldKeys.Count+')')}
+  $f=$Plan.fields[$key];$res=Invoke-CmbCombineField $f $ps $data $P $pStart $pRecs $recSrc $recRow $keyText $conflicts
+  $FV[$key]=$res.values;$LIN[$key]=$res.lineage;$conflictCount+=$res.conflicts
+  $e=('filled for '+(Get-CmbNumberText $res.filled)+' of '+(Get-CmbNumberText $P)+' patients'+$(if($res.conflicts){'; sources disagreed for '+(Get-CmbNumberText $res.conflicts)+' patients (see Conflicts)'}else{''})+$(if($res.within){'; '+(Get-CmbNumberText $res.within)+' patients have different values in several rows of the chosen source (the first row was used)'}else{''}))
+  if($f.ruleIndex -ge 0){$effects[$f.ruleIndex]=$e}else{$fieldNotes[$key]=$e}
+ }
+ # Derived fields, in order.
+ & $Progress 76 'Computing derived fields'
+ $colList=[Collections.Generic.List[object]]::new();$names=@{}
+ foreach($key in @($FV.Keys)){$colList.Add($FV[$key]);$names[$key]=$colList.Count-1}
+ foreach($d in $Plan.derives){
+  $c=New-CmbCompiled $d.expr (New-CmbExprContext $names $tb.map $Plan.config.asOf 'not a field defined above')
+  $r=Invoke-CmbCompiled $c $colList.ToArray() $tb.list $P;$vals=$r.values;$unread=0
+  if($d.type){$stat=@{unreadable=0;examples=[Collections.Generic.List[string]]::new()};$vals=ConvertTo-CmbTypedValues $vals $d.type $stat;$unread=$stat.unreadable}
+  else{for($q=0;$q -lt $P;$q++){$x=$vals[$q];if($x -is [string] -and $x.Length -eq 0){$vals[$q]=$null}}}
+  $FV[$d.key]=$vals;$colList.Add($vals);$names[$d.key]=$colList.Count-1
+  $filled=0;foreach($x in $vals){if($null -ne $x){$filled++}}
+  $e='filled for '+(Get-CmbNumberText $filled)+' of '+(Get-CmbNumberText $P)+' patients'
+  if($r.errors.Count){$ex=@($r.errors|Select-Object -First 3|ForEach-Object{[CmbRt]::Text($keyText[$_])});$e+='; the expression failed for '+(Get-CmbNumberText $r.errors.Count)+' patients (left blank; e.g. '+($ex -join ', ')+')'}
+  if($unread){$e+='; '+(Get-CmbNumberText $unread)+' results could not be read as '+$d.type}
+  $effects[$d.ruleIndex]=$e
+ }
+ # Patient filters.
+ & $Progress 80 'Applying patient filters'
+ $keepP=New-Object bool[] $P;for($q=0;$q -lt $P;$q++){$keepP[$q]=$true};$excluded=[Collections.Generic.List[object]]::new()
+ foreach($f in $Plan.patientFilters){
+  $c=New-CmbCompiled $f.expr (New-CmbExprContext $names $tb.map $Plan.config.asOf 'not a field') -AsBool
+  $r=Invoke-CmbCompiled $c $colList.ToArray() $tb.list $P;$dn=0;$before=0
+  for($q=0;$q -lt $P;$q++){if(!$keepP[$q]){continue};$before++;if($f.keep -ne [bool]$r.values[$q]){$keepP[$q]=$false;$dn++;if($excluded.Count -lt 200000){$excluded.Add(@($q,$f.ruleIndex))}}}
+  $effects[$f.ruleIndex]=('removed '+(Get-CmbNumberText $dn)+' of '+(Get-CmbNumberText $before)+' patients'+$(if($r.errors.Count){'; the expression failed for '+(Get-CmbNumberText $r.errors.Count)+' (treated as false)'}else{''}))
+ }
+ $kept=[Collections.Generic.List[int]]::new();for($q=0;$q -lt $P;$q++){if($keepP[$q]){$kept.Add($q)}}
+ # Sort.
+ $order=$kept.ToArray()
+ if($Plan.sorts.Count -and $order.Length -gt 1){
+  & $Progress 82 'Sorting'
+  $order=Get-CmbSortedOrder $order @(foreach($s in $Plan.sorts){,@($FV[$s.key],[bool]$s.desc)})
+  foreach($s in $Plan.sorts){$effects[$s.ruleIndex]='applied'}
+ }
+ # Output columns.
+ $outCols=@()
+ if($Plan.outputs.Count){$outCols=@(foreach($o in $Plan.outputs){@{key=$o.key;header=$o.header;format=$o.format;width=$o.width;ruleIndex=$o.ruleIndex}})}
+ else{$outCols=@(foreach($fname in $Plan.order){@{key=$fname.ToLowerInvariant();header=$fname;format='';width=$null;ruleIndex=-1}})+@(@{key='_sources';header='_sources';format='';width=$null;ruleIndex=-1})}
+ foreach($o in $Plan.outputs){$vals=$FV[$o.key];$filled=0;foreach($q in $order){if($null -ne $vals[$q]){$filled++}};$effects[$o.ruleIndex]=('filled for '+(Get-CmbNumberText $filled)+' of '+(Get-CmbNumberText $order.Length)+' patients')}
+ # Views.
+ & $Progress 85 'Building views'
+ $views=@(foreach($vk in @($Plan.views.Keys)){$v=$Plan.views[$vk];$t=Get-CmbViewTable $v $FV $names $colList $tb $Plan $order;$effects[$v.ruleIndex]=((Get-CmbNumberText $t.rows.Count)+' groups from '+(Get-CmbNumberText $t.patients)+' patients');$t})
+ # Source statistics.
+ $perSource=[int[]]::new($ps.Count);$lastP=[int[]]::new($ps.Count);for($i=0;$i -lt $ps.Count;$i++){$lastP[$i]=-1}
+ for($q=0;$q -lt $P;$q++){if(!$keepP[$q]){continue};for($j=$pStart[$q];$j -lt $pStart[$q+1];$j++){$si=$recSrc[$pRecs[$j]];if($lastP[$si] -ne $q){$lastP[$si]=$q;$perSource[$si]++}}}
+ $sources=@(foreach($s in $srcList){
+  if(!$data.ContainsKey($s.key)){[ordered]@{source=$s.id;label=$s.label;role=$s.role;file='';sheet='';headerRow='';sha256='';rowsRead=0;emptyRows=0;filtered=0;noKey=0;rowsUsed=0;patients=0};continue}
+  $d=$data[$s.key];$si=-1;if($sIndex.ContainsKey($s.key)){$si=$sIndex[$s.key]}
+  $pc=0;if($si -ge 0){$pc=$perSource[$si]}
+  $nk=$(if($si -ge 0){$noKey[$si]}else{0})
+  if(!$effects.ContainsKey($s.ruleIndex)){$effects[$s.ruleIndex]=('read '+(Get-CmbNumberText $d.n)+' rows from '+$d.file+'; '+(Get-CmbNumberText ($d.rows.Count-$nk))+' used'+$(if($s.role -eq 'patients'){' for '+(Get-CmbNumberText $pc)+' patients'}else{''}))}
+  [ordered]@{source=$s.id;label=$s.label;role=$s.role;file=$d.fileName;sheet=$d.sheet;headerRow=$d.headerRow;sha256=$d.sha256;rowsRead=$d.n;emptyRows=$d.empty;filtered=$d.dropped;noKey=$nk;rowsUsed=($d.rows.Count-$nk);patients=$pc;token=$d.token}
+ })
+ $noKeyTotal=0;foreach($x in $noKey){$noKeyTotal+=$x}
+ return @{plan=$Plan;fieldNotes=$fieldNotes;F=$FV;LIN=$LIN;P=$P;order=$order;outCols=$outCols;views=$views;effects=$effects;sources=$sources;conflicts=$conflicts;conflictCount=$conflictCount;keyConflicts=$keyConflicts;excluded=$excluded;keyText=$keyText;records=$N;noKey=$noKeyTotal;seconds=[Math]::Round($sw.Elapsed.TotalSeconds,1)}
+}
+function Get-CmbKeyDisplay([object[]]$Arrays,[int]$Row){$p=[string[]]::new($Arrays.Count);for($i=0;$i -lt $Arrays.Count;$i++){$p[$i]=[CmbRt]::Text($Arrays[$i][$Row]).Trim()};return [string]::Join(' / ',$p)}
+function Get-CmbSortedOrder([int[]]$Order,[object[]]$Keys){
+ # Stable multi-key sort without objects: each patient gets one ordinal-sortable string. Numbers and dates become fixed-width text,
+ # descending keys have their characters inverted, blanks sort last either way, and the original position breaks ties.
+ $n=$Order.Length;$parts=@(foreach($k in $Keys){$vals=$k[0];$kind=Get-CmbSortKind @(foreach($q in $Order){$vals[$q]});,@($vals,$kind,[bool]$k[1])})
+ $sk=[string[]]::new($n);$sb=[Text.StringBuilder]::new()
+ for($i=0;$i -lt $n;$i++){
+  $q=$Order[$i];[void]$sb.Clear()
+  foreach($p in $parts){
+   $v=$p[0][$q];if($null -eq $v){[void]$sb.Append('2');[void]$sb.Append([char]0);continue};[void]$sb.Append('1')
+   if($p[1] -eq 'number'){$b=[BitConverter]::DoubleToInt64Bits([double]$v);if($b -lt 0){$b=-bnot $b}else{$b=$b -bor [long]::MinValue};$t=$b.ToString('X16')}
+   elseif($p[1] -eq 'date'){$t=([DateTime]$v).Ticks.ToString('D19')}
+   else{$t=[CmbRt]::Text($v).Trim().ToUpperInvariant()+[char]0}
+   if($p[2]){$ca=$t.ToCharArray();for($j=0;$j -lt $ca.Length;$j++){$ca[$j]=[char](65535-[int]$ca[$j])};$t=[string]::new($ca)}
+   [void]$sb.Append($t)
+  }
+  [void]$sb.Append($i.ToString('D10'));$sk[$i]=$sb.ToString()
+ }
+ $items=[int[]]$Order.Clone();[Array]::Sort($sk,$items,[StringComparer]::Ordinal);return ,$items
+}
+function Get-CmbSortKind([object[]]$Values){$k='';foreach($v in $Values){if($null -eq $v){continue};$t=$(if($v -is [DateTime]){'date'}elseif([CmbRt]::IsNum($v)){'number'}else{'text'});if(!$k){$k=$t}elseif($k -ne $t){return 'text'}};if(!$k){return 'text'};return $k}
+function ConvertTo-CmbSortValue($V,[string]$Kind,[bool]$Desc){
+ # Same-type keys so Sort-Object compares like with like; blanks sort last either way.
+ if($Kind -eq 'date'){if($null -eq $V){if($Desc){return [DateTime]::MinValue};return [DateTime]::MaxValue};return [DateTime]$V}
+ if($Kind -eq 'number'){if($null -eq $V){if($Desc){return [double]::NegativeInfinity};return [double]::PositiveInfinity};return [double]$V}
+ if($null -eq $V){if($Desc){return ''};return [string][char]0xFFFF};return [CmbRt]::Text($V).ToUpperInvariant()
+}
+function Invoke-CmbCombineField($F,[object[]]$Ps,[hashtable]$Data,[int]$P,[int[]]$PStart,[int[]]$PRecs,[int[]]$RecSrc,[int[]]$RecRow,[object[]]$KeyText,$Conflicts){
+ # One combined field for every patient: the value, which source(s) gave it, and conflicts where sources disagree with the chosen value.
+ $SC=$Ps.Count;$rank=[int[]]::new($SC);$vals=[object[]]::new($SC);$by=[object[]]::new($SC);$ids=[string[]]::new($SC)
+ for($s=0;$s -lt $SC;$s++){$ids[$s]=[string]$Ps[$s].id;$rank[$s]=[Array]::IndexOf([string[]]@($F.from),$ids[$s]);$fl=$Data[$Ps[$s].key].fields;if($fl.ContainsKey($F.ofKey)){$vals[$s]=$fl[$F.ofKey]};if($F.byKey -and $fl.ContainsKey($F.byKey)){$by[$s]=$fl[$F.byKey]}}
+ $how=[string]$F.how;$type=[string]$F.type
+ # 1 priority, 2 latest/earliest, 3 max/min, 4 mostCommon: one row's value is chosen. 5: an aggregate of every row.
+ $mode=5;if($how -eq 'priority'){$mode=1}elseif($how -eq 'latest' -or $how -eq 'earliest'){$mode=2}elseif($how -eq 'max' -or $how -eq 'min'){$mode=3}elseif($how -eq 'mostCommon'){$mode=4}
+ $agg=0;if($mode -eq 5){$agg=[Array]::IndexOf([string[]]@('sum','avg','count','countDistinct','list','any','all','exists'),$how)+1}
+ $convert=($type -and $mode -le 4) -or ($type -and $agg -eq 5)
+ $out=[object[]]::new($P);$lin=[string[]]::new($P);$filled=0;$nConf=0;$nWithin=0;$report=($F.conflicts -eq 'report' -and $mode -ne 3 -and $mode -ne 5);$sign=1;if($how -eq 'earliest' -or $how -eq 'min'){$sign=-1}
+ $mark=[int[]]::new($SC)
+ for($q=0;$q -lt $P;$q++){
+  $j0=$PStart[$q];$j1=$PStart[$q+1]
+  if($mode -le 4 -and $j1-$j0 -eq 1){
+   # One row: its value, if its source is used.
+   $r=$PRecs[$j0];$s=$RecSrc[$r];if($rank[$s] -lt 0){continue};$a=$vals[$s];if($null -eq $a){continue};$v=$a[$RecRow[$r]];if($null -eq $v){continue}
+   if($convert){$v=[CmbRt]::Convert($v,$type);if($null -eq $v){continue}};$out[$q]=$v;$lin[$q]=$ids[$s];$filled++;continue
+  }
+  $best=$null;$bestS=-1;$bestRank=[int]::MaxValue;$bestD=$null
+  if($mode -eq 1){
+   for($j=$j0;$j -lt $j1;$j++){$r=$PRecs[$j];$s=$RecSrc[$r];$rk=$rank[$s];if($rk -lt 0 -or $rk -ge $bestRank){continue};$a=$vals[$s];if($null -eq $a){continue};$v=$a[$RecRow[$r]];if($null -eq $v){continue};$best=$v;$bestS=$s;$bestRank=$rk}
+  }elseif($mode -eq 2){
+   for($j=$j0;$j -lt $j1;$j++){
+    $r=$PRecs[$j];$s=$RecSrc[$r];$rk=$rank[$s];if($rk -lt 0){continue};$a=$vals[$s];if($null -eq $a){continue};$v=$a[$RecRow[$r]];if($null -eq $v){continue}
+    $d=$null;$ba=$by[$s];if($null -ne $ba){$d=$ba[$RecRow[$r]];if($null -ne $d -and !($d -is [DateTime])){$d=[CmbRt]::Date($d)}}
+    $take=$false
+    if($bestS -lt 0){$take=$true}
+    elseif($null -ne $d){if($null -eq $bestD){$take=$true}else{$c=([DateTime]$d).CompareTo([DateTime]$bestD)*$sign;if($c -gt 0 -or ($c -eq 0 -and $rk -lt $bestRank)){$take=$true}}}
+    elseif($null -eq $bestD -and $rk -lt $bestRank){$take=$true}
+    if($take){$best=$v;$bestS=$s;$bestRank=$rk;$bestD=$d}
+   }
+  }elseif($mode -eq 3){
+   for($j=$j0;$j -lt $j1;$j++){$r=$PRecs[$j];$s=$RecSrc[$r];if($rank[$s] -lt 0){continue};$a=$vals[$s];if($null -eq $a){continue};$v=$a[$RecRow[$r]];if($null -eq $v){continue};if($bestS -lt 0){$best=$v;$bestS=$s;continue};$c=[CmbRt]::Cmp($v,$best);if($null -ne $c -and [int]$c*$sign -gt 0){$best=$v;$bestS=$s}}
+  }elseif($mode -eq 4){
+   $cnt=@{};$first=@{};$orig=@{}
+   for($j=$j0;$j -lt $j1;$j++){$r=$PRecs[$j];$s=$RecSrc[$r];$rk=$rank[$s];if($rk -lt 0){continue};$a=$vals[$s];if($null -eq $a){continue};$v=$a[$RecRow[$r]];if($null -eq $v){continue};$k=[CmbRt]::Key($v);if($cnt.ContainsKey($k)){$cnt[$k]++;if($rk -lt $first[$k][0]){$first[$k]=@($rk,$s)}}else{$cnt[$k]=1;$first[$k]=@($rk,$s);$orig[$k]=$v}}
+   $bk=$null;foreach($k in @($cnt.Keys)){if($null -eq $bk -or $cnt[$k] -gt $cnt[$bk] -or ($cnt[$k] -eq $cnt[$bk] -and $first[$k][0] -lt $first[$bk][0])){$bk=$k}}
+   if($null -ne $bk){$best=$orig[$bk];$bestS=$first[$bk][1]}
+  }else{
+   # 1 sum, 2 avg, 3 count, 4 countDistinct, 5 list, 6 any, 7 all, 8 exists
+   $n=0;$sum=0.0;$set=$null;$list=$null;$tr=0;$used=0;$stamp=$q+1
+   for($j=$j0;$j -lt $j1;$j++){
+    $r=$PRecs[$j];$s=$RecSrc[$r];$rk=$rank[$s];if($rk -lt 0){continue}
+    if($agg -ne 8){$a=$vals[$s];if($null -eq $a){continue};$v=$a[$RecRow[$r]];if($null -eq $v){continue}}
+    if($mark[$s] -ne $stamp){$mark[$s]=$stamp;$used++}
+    if($agg -le 2){$x=[CmbRt]::Num($v);if($null -ne $x){$sum+=[double]$x;$n++}}
+    elseif($agg -eq 3 -or $agg -eq 8){$n++}
+    elseif($agg -eq 4){if($null -eq $set){$set=@{}};$set[[CmbRt]::Key($v)]=$true}
+    elseif($agg -eq 5){if($null -eq $set){$set=@{};$list=[Collections.Generic.List[object[]]]::new()};$k=[CmbRt]::Key($v);if(!$set.ContainsKey($k)){$set[$k]=$true;$list.Add([object[]]@($rk,$j,[CmbRt]::Text($v).Trim()))}}
+    else{$n++;if([CmbRt]::Truthy($v)){$tr++}}
+   }
+   if($agg -eq 1){if($n){$best=$sum}}elseif($agg -eq 2){if($n){$best=$sum/$n}}elseif($agg -eq 3){$best=[double]$n}elseif($agg -eq 4){$best=[double]0;if($set){$best=[double]$set.Count}}
+   elseif($agg -eq 5){if($list){if($list.Count -gt 1){$list.Sort([Comparison[object[]]]{param($x,$y)$c=([int]$x[0]).CompareTo([int]$y[0]);if($c -eq 0){$c=([int]$x[1]).CompareTo([int]$y[1])};$c})};$parts=[string[]]::new($list.Count);for($i=0;$i -lt $list.Count;$i++){$parts[$i]=[string]$list[$i][2]};$best=[string]::Join($F.sep,$parts)}}
+   elseif($agg -eq 6){if($n){$best=($tr -gt 0)}}elseif($agg -eq 7){if($n){$best=($tr -eq $n)}}elseif($agg -eq 8){$best=($n -gt 0)}
+   if($used){if($used -eq 1){for($s=0;$s -lt $SC;$s++){if($mark[$s] -eq $stamp){$lin[$q]=$ids[$s];break}}}else{$lp=[Collections.Generic.List[string]]::new();for($s=0;$s -lt $SC;$s++){if($mark[$s] -eq $stamp){$lp.Add($ids[$s])}};$lin[$q]=[string]::Join(',',$lp)}}
+   if($convert -and $null -ne $best){$best=[CmbRt]::Convert($best,$type)}
+   $out[$q]=$best;if($null -ne $best){$filled++};continue
+  }
+  if($bestS -lt 0){continue}
+  if($convert){$best=[CmbRt]::Convert($best,$type);if($null -eq $best){continue}}
+  $out[$q]=$best;$lin[$q]=$ids[$bestS];$filled++
+  if($report){
+   # Only another source disagreeing is a conflict; several values within the chosen source (repeated rows) are counted separately.
+   $others=$null;$within=$false
+   for($j=$j0;$j -lt $j1;$j++){
+    $r=$PRecs[$j];$s=$RecSrc[$r];if($rank[$s] -lt 0){continue};$a=$vals[$s];if($null -eq $a){continue};$v=$a[$RecRow[$r]];if($null -eq $v){continue}
+    if($v -is [string] -and $best -is [string]){$same=[string]::Equals($v.Trim(),$best.Trim(),[StringComparison]::OrdinalIgnoreCase)}else{$same=[CmbRt]::Eq($v,$best)}
+    if($same){continue};if($s -eq $bestS){$within=$true;continue}
+    if($null -eq $others){$others=[ordered]@{}};$others[([CmbRt]::Text($v)+' ['+$ids[$s]+']')]=$true
+   }
+   if($within){$nWithin++}
+   if($null -ne $others){$nConf++;if($Conflicts.Count -lt 100000){$Conflicts.Add([ordered]@{patient=[CmbRt]::Text($KeyText[$q]);field=$F.name;chosen=[CmbRt]::Text($best);from=$ids[$bestS];others=(@($others.Keys) -join '; ');how=$how;ruleIndex=$F.ruleIndex})}}
+  }
+ }
+ return @{values=$out;lineage=$lin;filled=$filled;conflicts=$nConf;within=$nWithin}
+}
+function Get-CmbViewTable($View,[hashtable]$FV,[hashtable]$Names,$ColList,$Tables,$Plan,[int[]]$Order){
+ # One summary view: patients (in output order, after patient filters) grouped by the view's fields, one column per measure, plus a total.
+ $P=$FV['_rows'].Length;$cols=$ColList.ToArray()
+ $inView=[bool[]]::new($P);foreach($q in $Order){$inView[$q]=$true}
+ if($View.where){$c=New-CmbCompiled $View.where (New-CmbExprContext $Names $Tables.map $Plan.config.asOf 'not a field') -AsBool;$r=Invoke-CmbCompiled $c $cols $Tables.list $P;for($q=0;$q -lt $P;$q++){if(!$r.values[$q]){$inView[$q]=$false}}}
+ $ms=@($View.measures);$MC=$ms.Count
+ $mWhere=[object[]]@(foreach($m in $ms){if($m.where){$c=New-CmbCompiled $m.where (New-CmbExprContext $Names $Tables.map $Plan.config.asOf 'not a field') -AsBool;,((Invoke-CmbCompiled $c $cols $Tables.list $P).values)}else{,$null}})
+ $mVals=[object[]]@(foreach($m in $ms){if($m.field){,$FV[$m.field.ToLowerInvariant()]}else{,$null}})
+ # 1 count, 2 sum, 3 avg, 4 min, 5 max, 6 countDistinct, 0 percent (computed after)
+ $mAgg=[int[]]@(foreach($m in $ms){[Array]::IndexOf([string[]]@('percent','count','sum','avg','min','max','countDistinct'),[string]$m.agg)})
+ $gk=@($View.groupBy|ForEach-Object{$_.ToLowerInvariant()});$garr=[object[]]@(foreach($g in $gk){,$FV[$g]});$GC=$garr.Count
+ $index=[Collections.Generic.Dictionary[string,int]]::new();$labels=[Collections.Generic.List[object]]::new();$accs=[Collections.Generic.List[object]]::new()
+ $total=New-CmbAccumulators $ms;$patients=0;$lab=[string[]]::new($GC)
+ foreach($q in $Order){
+  if(!$inView[$q]){continue};$patients++
+  for($g=0;$g -lt $GC;$g++){$x=[CmbRt]::Text($garr[$g][$q]).Trim();if($x.Length -eq 0){$x='(blank)'};$lab[$g]=$x}
+  $k=[string]::Join([string][char]31,$lab).ToUpperInvariant();$gi=0
+  if(!$index.TryGetValue($k,[ref]$gi)){$gi=$labels.Count;$index[$k]=$gi;$labels.Add([string[]]$lab.Clone());$accs.Add((New-CmbAccumulators $ms))}
+  $acc=$accs[$gi]
+  for($i=0;$i -lt $MC;$i++){
+   $w=$mWhere[$i];if($null -ne $w -and !$w[$q]){continue}
+   $ag=$mAgg[$i];if($ag -eq 0){continue};$a1=$acc[$i];$a2=$total[$i]
+   if($ag -eq 1){$a1.n++;$a2.n++;continue}
+   $v=$mVals[$i][$q];if($null -eq $v){continue}
+   if($ag -le 3){$x=[CmbRt]::Num($v);if($null -ne $x){$a1.sum+=[double]$x;$a1.n++;$a2.sum+=[double]$x;$a2.n++};continue}
+   if($ag -eq 6){if($null -eq $a1.set){$a1.set=@{}};if($null -eq $a2.set){$a2.set=@{}};$kk=[CmbRt]::Key($v);$a1.set[$kk]=$true;$a2.set[$kk]=$true;continue}
+   $sgn=$(if($ag -eq 4){-1}else{1})
+   foreach($ax in @($a1,$a2)){if($null -eq $ax.best){$ax.best=$v}else{$c=[CmbRt]::Cmp($v,$ax.best);if($null -ne $c -and [int]$c*$sgn -gt 0){$ax.best=$v}}}
+  }
+ }
+ $rows=@(for($gi=0;$gi -lt $labels.Count;$gi++){,(@($labels[$gi])+(Get-CmbMeasureValues $ms $accs[$gi]))})
+ # Sort: by a measure or group field (blanks last), otherwise by the group labels.
+ $headers=@($View.groupBy)+@($ms|ForEach-Object{$_.name});$si=-1;if($View.sortBy){for($i=0;$i -lt $headers.Count;$i++){if($headers[$i] -ieq $View.sortBy){$si=$i}}}
+ if($rows.Count -gt 1){
+  $ord=[int[]]@(0..($rows.Count-1));$keys=@()
+  if($si -ge 0){$col=[object[]]@(foreach($r in $rows){$r[$si]});$keys+=,@($col,[bool]$View.desc)}
+  for($g=0;$g -lt $GC;$g++){$col=[object[]]@(foreach($r in $rows){[string]$r[$g]});$keys+=,@($col,$(if($si -ge 0){$false}else{[bool]$View.desc}))}
+  $ord=Get-CmbSortedOrder $ord $keys;$rows=@(foreach($i in $ord){,$rows[$i]})
+ }
+ $totalRow=$null;if($View.total){$tl=@(for($i=0;$i -lt $GC;$i++){if($i -eq 0){'Total'}else{''}});$totalRow=@($tl)+(Get-CmbMeasureValues $ms $total)}
+ return @{name=$View.name;ruleIndex=$View.ruleIndex;headers=$headers;groupCount=$GC;formats=@($ms|ForEach-Object{$mf=$_.format;if(!$mf){$mf=$(if($_.agg -eq 'percent'){'0.0%'}elseif($_.agg -in @('count','countDistinct')){'#,##0'}else{''})};$mf});rows=$rows;total=$totalRow;patients=$patients}
+}
+function New-CmbAccumulators([object[]]$Measures){return ,@(foreach($m in $Measures){@{n=0;sum=0.0;best=$null;set=$null}})}
+function Get-CmbMeasureValues([object[]]$Measures,[object[]]$Acc){
+ $vals=@(for($i=0;$i -lt $Measures.Count;$i++){$m=$Measures[$i];$a=$Acc[$i]
+  switch($m.agg){'count'{[double]$a.n}'sum'{if($a.n){$a.sum}else{$null}}'avg'{if($a.n){$a.sum/$a.n}else{$null}}'min'{$a.best}'max'{$a.best}'countDistinct'{if($a.set){[double]$a.set.Count}else{[double]0}}'percent'{$null}}})
+ for($i=0;$i -lt $Measures.Count;$i++){$m=$Measures[$i];if($m.agg -ne 'percent'){continue};$o=-1;$p=-1;for($j=0;$j -lt $Measures.Count;$j++){if($Measures[$j].name -ieq $m.of){$o=$j};if($Measures[$j].name -ieq $m.per){$p=$j}};if($o -ge 0 -and $p -ge 0){$vals[$i]=[CmbRt]::Div($vals[$o],$vals[$p])}}
+ return ,$vals
+}
+# --- Combine output: the workbook (patient sheet, views, audit sheets), run records and the worker.
+function Get-CmbCellValue($V,[string]$Booleans){
+ if($null -eq $V){return $null}
+ if($V -is [bool]){switch($Booleans){'Yes/No'{if($V){return 'Yes'};return 'No'}'TRUE/FALSE'{return [bool]$V}'1/0'{if($V){return [double]1};return [double]0}default{if($V){return 'Y'};return 'N'}}}
+ if($V -is [string]){if($V.Length -gt 32000){return $V.Substring(0,32000)};return $V}
+ return $V
+}
+function Format-CmbDisplay($V,[string]$Booleans,[string]$Format=''){
+ # Text for the page preview: dates as M/d/yyyy, percent formats as percents, other numbers with up to two decimals.
+ if($null -eq $V){return ''};if($V -is [bool]){return [string](Get-CmbCellValue $V $Booleans)}
+ if($V -is [DateTime]){return [CmbRt]::Text($V)}
+ if([CmbRt]::IsNum($V)){$d=[double]$V;if($Format -like '*%*'){return ($d*100).ToString('0.0',[Globalization.CultureInfo]::InvariantCulture)+'%'};if([Math]::Abs($d-[Math]::Round($d)) -lt 1e-9){return ([Math]::Round($d)).ToString('#,0',[Globalization.CultureInfo]::InvariantCulture)};return $d.ToString('#,0.##',[Globalization.CultureInfo]::InvariantCulture)}
+ return [string]$V
+}
+function Get-CmbSheetName([string]$Name,[hashtable]$Used){
+ $n=($Name -replace '[\[\]:*?/\\]',' ').Trim();if(!$n){$n='Sheet'};if($n.Length -gt 31){$n=$n.Substring(0,31).Trim()}
+ $b=$n;$k=2;while($Used.ContainsKey($n.ToLowerInvariant())){$s=' ('+$k+')';$n=$b.Substring(0,[Math]::Min($b.Length,31-$s.Length))+$s;$k++};$Used[$n.ToLowerInvariant()]=$true;return $n
+}
+function Add-CmbSheet($Pkg,[hashtable]$Used,[string]$Name,[string[]]$Headers,$Rows,[string[]]$Formats=$null,[object[]]$Widths=$null,[int]$BoldLastRow=0){
+ # One sheet: a styled header row, the rows (one bulk load), number formats and widths per column, filter and frozen header.
+ try{Add-Type -AssemblyName System.Drawing -ErrorAction Stop}catch{}
+ $ws=$Pkg.Workbook.Worksheets.Add((Get-CmbSheetName $Name $Used));$nc=$Headers.Count;if($nc -eq 0){return $ws}
+ $list=[Collections.Generic.List[object[]]]::new();$list.Add([object[]]$Headers)
+ if($Rows -is [Collections.Generic.List[object[]]]){$list.AddRange($Rows)}else{foreach($r in $Rows){$list.Add([object[]]$r)}}
+ $null=$ws.Cells[1,1].LoadFromArrays($list);$nr=$list.Count
+ $h=$ws.Cells[1,1,1,$nc];$h.Style.Font.Bold=$true;$h.Style.Fill.PatternType=[OfficeOpenXml.Style.ExcelFillStyle]::Solid;$h.Style.Fill.BackgroundColor.SetColor([Drawing.Color]::FromArgb(23,54,93));$h.Style.Font.Color.SetColor([Drawing.Color]::White);$h.Style.WrapText=$true
+ for($c=0;$c -lt $nc;$c++){
+  $fmt='';if($Formats -and $c -lt $Formats.Count){$fmt=[string]$Formats[$c]}
+  if(!$fmt -and $nr -gt 1){$hasTime=$false;$isDate=$false;for($r=1;$r -lt [Math]::Min($nr,2001);$r++){$v=$list[$r][$c];if($v -is [DateTime]){$isDate=$true;if(([DateTime]$v).TimeOfDay.Ticks -ne 0){$hasTime=$true}}};if($isDate){$fmt=$(if($hasTime){'m/d/yy h:mm'}else{'mm-dd-yy'})}}
+  if($fmt -and $nr -gt 1){$ws.Cells[2,($c+1),$nr,($c+1)].Style.Numberformat.Format=$fmt}
+  $w=$null;if($Widths -and $c -lt $Widths.Count){$w=$Widths[$c]}
+  if($null -eq $w){$m=([string]$Headers[$c]).Length;for($r=1;$r -lt [Math]::Min($nr,201);$r++){$v=$list[$r][$c];$l=$(if($v -is [DateTime]){10}elseif($null -eq $v){0}else{([string]$v).Length});if($l -gt $m){$m=$l}};$w=[Math]::Min(50,[Math]::Max(8,$m+2))}
+  $ws.Column($c+1).Width=[double]$w
+ }
+ if($nr -gt 1){$ws.Cells[1,1,$nr,$nc].AutoFilter=$true};$ws.View.FreezePanes(2,1)
+ if($BoldLastRow -and $nr -gt 1){$ws.Cells[$nr,1,$nr,$nc].Style.Font.Bold=$true}
+ return $ws
+}
+function Get-CmbSheetRows([object[]]$Arrays,[int[]]$Order,[string]$Booleans,[object[]]$Lead=$null){
+ # Rows for a sheet straight from the column arrays (one row per patient in output order); true/false follow the config's booleans.
+ $nc=$Arrays.Count;$off=0;if($Lead){$off=1};$list=[Collections.Generic.List[object[]]]::new([Math]::Max(1,$Order.Length))
+ foreach($q in $Order){
+  $row=[object[]]::new($nc+$off);if($off){$row[0]=$Lead[$q]}
+  for($c=0;$c -lt $nc;$c++){$v=$Arrays[$c][$q];if($null -ne $v){if($v -is [bool]){$v=Get-CmbCellValue $v $Booleans}elseif($v -is [string] -and $v.Length -gt 32000){$v=$v.Substring(0,32000)}};$row[$c+$off]=$v}
+  $list.Add($row)
+ }
+ return ,$list
+}
+function Write-CmbWorkbook($Result,[string]$Path,$Run){
+ $plan=$Result.plan;$b=$plan.config.booleans;$FV=$Result.F;$order=$Result.order;$used=@{}
+ $pkg=New-Object OfficeOpenXml.ExcelPackage
+ try{
+  $cols=@($Result.outCols)
+  $rows=Get-CmbSheetRows ([object[]]@(foreach($c in $cols){,$FV[$c.key]})) $order $b
+  $null=Add-CmbSheet $pkg $used $plan.config.sheet ([string[]]@($cols|ForEach-Object{$_.header})) $rows ([string[]]@($cols|ForEach-Object{$_.format})) ([object[]]@($cols|ForEach-Object{$_.width}))
+  foreach($v in $Result.views){
+   $vr=@(foreach($r in $v.rows){,([object[]]@(foreach($x in $r){Get-CmbCellValue $x $b}))});$bold=0;if($v.total){$vr+=,([object[]]@(foreach($x in $v.total){Get-CmbCellValue $x $b}));$bold=1}
+   $fm=@(for($i=0;$i -lt $v.groupCount;$i++){''})+@($v.formats)
+   $null=Add-CmbSheet $pkg $used $v.name ([string[]]$v.headers) $vr ([string[]]$fm) $null $bold
+  }
+  $null=Add-CmbSheet $pkg $used 'Audit - Rules' @('Row','Rule','What it does','Effect in this run','Problems','Note') @(Get-CmbEffectRows $Result) $null @(6,10,70,60,40,50)
+  $null=Add-CmbSheet $pkg $used 'Audit - Sources' @('Source','Label','Role','File','Sheet','Header row','SHA-256','Rows read','Empty rows','Removed by filters','Rows without a key','Rows used','Patients') @(foreach($s in $Result.sources){,([object[]]@($s.source,$s.label,$s.role,$s.file,$s.sheet,$s.headerRow,([string]$s.sha256).Substring(0,[Math]::Min(12,([string]$s.sha256).Length)),[double]$s.rowsRead,[double]$s.emptyRows,[double]$s.filtered,[double]$s.noKey,[double]$s.rowsUsed,[double]$s.patients))})
+  if($Result.conflicts.Count){$null=Add-CmbSheet $pkg $used 'Audit - Conflicts' @('Patient','Field','Chosen value','Chosen from','Other values [source]','How','Rule row') @(foreach($c in $Result.conflicts){,([object[]]@($c.patient,$c.field,$c.chosen,$c.from,$c.others,$c.how,$(if($c.ruleIndex -ge 0){[double]($c.ruleIndex+1)}else{'(default)'})))}) $null @(18,18,28,14,60,12,9)}
+  if($Result.keyConflicts.Count){$null=Add-CmbSheet $pkg $used 'Audit - Key conflicts' @('Key','Shared value','Earlier key','First patient has','Second patient has','Sources') @(foreach($c in $Result.keyConflicts){,([object[]]@($c.key,$c.value,$c.earlierKey,$c.first,$c.second,$c.sources))})}
+  if($Result.excluded.Count){$null=Add-CmbSheet $pkg $used 'Audit - Excluded' @('Patient','Removed by rule row','Filter') @(foreach($e in $Result.excluded){$q=$e[0];$ri=$e[1];,([object[]]@([CmbRt]::Text($Result.keyText[$q]),[double]($ri+1),(Get-CmbRuleSummary $plan.rules[$ri])))}) $null @(20,10,80)}
+  if($plan.config.lineage){
+   $n=$Result.P;$fixed=@{};foreach($t in @('(built-in)','(derived)')){$a=[object[]]::new($n);for($q=0;$q -lt $n;$q++){$a[$q]=$t};$fixed[$t]=$a}
+   $arrs=[object[]]@(foreach($c in $cols){if($Result.LIN.ContainsKey($c.key)){,([object[]]$Result.LIN[$c.key])}elseif($c.key.StartsWith('_')){,$fixed['(built-in)']}else{,$fixed['(derived)']}})
+   $keys=[object[]]::new($n);for($q=0;$q -lt $n;$q++){$keys[$q]=[CmbRt]::Text($Result.keyText[$q])}
+   $null=Add-CmbSheet $pkg $used 'Audit - Value sources' ([string[]](@('Patient')+@($cols|ForEach-Object{$_.header}))) (Get-CmbSheetRows $arrs $order $b $keys)
+  }
+  $meta=@(,([object[]]@('Config',[string]$Run.configName)),([object[]]@('Config file',[string]$Run.configPath)),([object[]]@('Config SHA-256',[string]$Run.configSha256)),([object[]]@('Built',(Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))),([object[]]@('today() is',$plan.config.asOf.ToString('yyyy-MM-dd'))),([object[]]@('','')),([object[]]@('Rules (exactly as used, one per row)','')))
+  $ri=0;foreach($r in $plan.rules){$ri++;$meta+=,([object[]]@([string]$ri,(ConvertTo-CmbRuleText $r)))}
+  $null=Add-CmbSheet $pkg $used 'Audit - Config' @('Item','Value') $meta $null @(34,150)
+  $tmp=$Path+'.'+$PID+'.tmp';[IO.File]::WriteAllBytes($tmp,$pkg.GetAsByteArray());Move-Item -LiteralPath $tmp -Destination $Path -Force
+ }finally{$pkg.Dispose()}
+}
+function Get-CmbEffectRows($Result){
+ $plan=$Result.plan;$out=@()
+ for($i=0;$i -lt $plan.rules.Count;$i++){
+  $r=$plan.rules[$i];$type='';if($r -is [Collections.IDictionary]){$type=([string](Get-CmbValue $r 'rule' '')).ToLowerInvariant()}
+  $e='';if($Result.effects.ContainsKey($i)){$e=[string]$Result.effects[$i]}
+  $pr=@($plan.problems|Where-Object{$_.rule -eq ($i+1)}|ForEach-Object{$_.severity+': '+$_.message}) -join ' | '
+  $out+=,([object[]]@([double]($i+1),$type,(Get-CmbRuleSummary $r),$e,$pr,$(if($r -is [Collections.IDictionary]){Get-CmbText $r 'note'}else{''})))
+ }
+ # Mapped fields without a field rule are combined by priority; their effects are listed after the rules.
+ foreach($k in @($Result.fieldNotes.Keys)){$f=$plan.fields[$k];$out+=,([object[]]@('','field (default)',($f.name+' = first non-blank value trying '+(@($f.from) -join ', ')+' in order'),[string]$Result.fieldNotes[$k],'','No field rule; combined by source priority'))}
+ return $out
+}
+function Get-CmbRunPath([string]$Id){if($Id -notmatch '^[a-f0-9]{32}$'){throw 'Invalid run ID.'};return (Join-Path $script:Paths.State ('cmbrun-'+$Id+'.json'))}
+function Get-CmbRuns{return @(Get-ChildItem $script:Paths.State -Filter 'cmbrun-*.json' -File -ErrorAction SilentlyContinue|ForEach-Object{Json $_.FullName}|Where-Object{$null -ne $_}|Sort-Object -Property @{Expression={ConvertTo-IsoText (Get-P $_ 'requestedUtc' '')}} -Descending)}
+function Get-CmbPicks($Plan,[object[]]$Assignments){
+ # Source key -> @{pick;file} from a run's saved assignments; the file must still be loaded and unchanged.
+ $picks=@{}
+ foreach($a in $Assignments){
+  $k=([string](Get-P $a 'source' '')).ToLowerInvariant();$tok=[string](Get-P $a 'token' '');if(!$tok){continue}
+  $f=Get-CmbFile $tok;if([string](Get-P $f 'sha256' '') -ne [string](Get-P $a 'sha256' '')){throw ('"'+[string]$f.originalName+'" changed since the run was requested.')}
+  $sheet=[string](Get-P $a 'sheet' '');$s=@(@(Get-P $f 'sheets' @())|Where-Object{[string]$_.name -eq $sheet});if(!$s.Count){throw ('Sheet "'+$sheet+'" is not in '+[string]$f.originalName+'.')}
+  $picks[$k]=@{pick=@{token=$tok;sheet=$sheet;headerRow=[int]$s[0].headerRow;headers=@(Get-P $s[0] 'headers' @());file=[string]$f.originalName};file=$f}
+ }
+ return $picks
+}
+function Invoke-CmbRun([string]$Id){
+ # Runs in its own worker process: checks the saved config against the chosen files, combines them and writes the workbook.
+ $path=Get-CmbRunPath $Id;$run=Json $path;if(!$run){throw 'Run was not found.'}
+ $sw=[Diagnostics.Stopwatch]::StartNew()
+ try{
+  Set-P $run 'workerPid' $PID;Set-P $run 'startedUtc' ([DateTime]::UtcNow.ToString('o'));Set-RunProgress $run $path 2 'Checking the config'
+  $cfg=Read-CmbConfigText ([string]$run.configText);if(@($cfg.errors).Count){throw ('The config could not be read: '+$cfg.errors[0].message)}
+  $rules=@($cfg.rules);$plan0=Get-CmbPlan $rules
+  $picks=Get-CmbPicks $plan0 @(Get-P $run 'assignments' @())
+  $tables=@{};foreach($k in @($picks.Keys)){$p=$picks[$k].pick;$tables[$k]=@{headers=$p.headers;file=('"'+$p.file+'"')}}
+  $plan=Get-CmbPlan $rules $tables -Strict
+  if($plan.errorCount){$first=@($plan.problems|Where-Object{$_.severity -eq 'error'}|Select-Object -First 3|ForEach-Object{$(if($_.rule){'row '+$_.rule+': '}else{''})+$_.message});throw ('The config has '+$plan.errorCount+' problem'+$(if($plan.errorCount -eq 1){''}else{'s'})+' to fix first: '+($first -join ' | '))}
+  $progress={param([int]$pc,[string]$st)Set-RunProgress $run $path $pc $st}
+  $res=Invoke-CmbEngine $plan $picks $progress
+  Set-RunProgress $run $path 90 'Writing the workbook'
+  $stamp=(Get-Date).ToString('yyyy-MM-dd HHmmss');$base=(Get-SafeFileName ([string]$run.configName))+' - '+$stamp;$out=Join-Path $script:Paths.CombineOutputs ($base+'.xlsx');$n=2
+  while(Test-Path -LiteralPath $out){$out=Join-Path $script:Paths.CombineOutputs ($base+' ('+$n+').xlsx');$n++}
+  Write-CmbWorkbook $res $out $run
+  Set-RunProgress $run $path 97 'Saving the summary';$run=Json $path
+  Set-P $run 'result' (Get-CmbRunSummary $res)
+  Set-P $run 'outputPath' $out;$run.state='Completed';$run.percent=100;$run.stage='Combined';Set-P $run 'completedUtc' ([DateTime]::UtcNow.ToString('o'));Set-P $run 'seconds' ([Math]::Round($sw.Elapsed.TotalSeconds,1));Save-JsonAtomic $path $run
+  Log 'COMBINE_COMPLETED' 'OK' ([string]$run.configName+'; '+$res.order.Length+' patients in '+[Math]::Round($sw.Elapsed.TotalSeconds,1)+'s')
+ }catch{$msg=$_.Exception.Message;$cur=Json $path;if(!$cur){$cur=$run};$cur.state='Failed';$cur.stage='Run failed';Set-P $cur 'errorSummary' $msg;Set-P $cur 'completedUtc' ([DateTime]::UtcNow.ToString('o'));Save-JsonAtomic $path $cur;Log 'COMBINE_FAILED' 'FAILED' ($msg+' | '+$_.ScriptStackTrace)}
+}
+function Get-CmbRunSummary($Res){
+ # What the Output page shows without opening the workbook: counts, each rule's effect, sources, and the first rows of every table.
+ $plan=$Res.plan;$b=$plan.config.booleans;$cols=@($Res.outCols);$n=[Math]::Min($script:CmbPreviewRows,$Res.order.Length)
+ $prev=@(for($i=0;$i -lt $n;$i++){$q=$Res.order[$i];,([string[]]@(foreach($c in $cols){Format-CmbDisplay $Res.F[$c.key][$q] $b $c.format}))})
+ $views=@(foreach($v in $Res.views){
+  $fm=@(for($i=0;$i -lt $v.groupCount;$i++){''})+@($v.formats)
+  $fmtRow={param($r)[string[]]@(for($i=0;$i -lt $r.Count;$i++){Format-CmbDisplay $r[$i] $b ([string]$fm[$i])})}
+  [ordered]@{name=$v.name;headers=@($v.headers);groupCount=$v.groupCount;rows=@($v.rows|Select-Object -First 200|ForEach-Object{,(& $fmtRow $_)});totalRows=$v.rows.Count;total=$(if($v.total){,(& $fmtRow $v.total)}else{$null});patients=$v.patients}
+ })
+ $effects=@(Get-CmbEffectRows $Res|ForEach-Object{[ordered]@{index=$(if([string]$_[0]){[int]$_[0]}else{0});type=[string]$_[1];summary=[string]$_[2];effect=[string]$_[3];problems=[string]$_[4];note=[string]$_[5]}})
+ return [ordered]@{patients=$Res.order.Length;matched=$Res.P;records=$Res.records;noKey=$Res.noKey;conflicts=$Res.conflictCount;conflictRows=$Res.conflicts.Count;keyConflicts=$Res.keyConflicts.Count;excluded=$Res.excluded.Count;engineSeconds=$Res.seconds;asOf=$plan.config.asOf.ToString('yyyy-MM-dd');sheet=$plan.config.sheet
+  headers=@($cols|ForEach-Object{$_.header});preview=$prev;views=$views;effects=$effects;sources=@($Res.sources|ForEach-Object{$x=[ordered]@{};foreach($k in @($_.Keys)){if($k -ne 'token'){$x[$k]=$_[$k]}};$x})
+  conflictSample=@($Res.conflicts|Select-Object -First 50)}
+}
+function Start-CmbWorker([string]$Id){return (Start-RunWorker 'RunCombineId' $Id ('combine-'+$Id))}
+function Update-CmbLiveness($Run){
+ $id=[string]$Run.runId;$reason=Get-RunStallReason $Run $id 'combine' 'Run it again.' ('combine-'+$id)
+ if(!$reason){return $false}
+ $Run.state='Failed';$Run.stage='Run failed';Set-P $Run 'errorSummary' $reason;Save-JsonAtomic (Get-CmbRunPath $id) $Run;Log 'COMBINE_INTERRUPTED' 'WARN' $id;return $true
+}
+function Get-CmbRunModel([string]$Id,[switch]$Summary){
+ $run=Json (Get-CmbRunPath $Id);if(!$run){throw 'That run was not found.'}
+ $null=Update-CmbLiveness $run
+ $m=[ordered]@{runId=[string]$run.runId;state=[string]$run.state;percent=[int](Get-P $run 'percent' 0);stage=[string](Get-P $run 'stage' '');requestedUtc=(ConvertTo-IsoText (Get-P $run 'requestedUtc' ''));completedUtc=(ConvertTo-IsoText (Get-P $run 'completedUtc' ''));seconds=(Get-P $run 'seconds' $null);errorSummary=[string](Get-P $run 'errorSummary' '');configName=[string](Get-P $run 'configName' '');assignments=@(Get-P $run 'assignments' @()|ForEach-Object{[ordered]@{source=[string]$_.source;file=[string]$_.file;sheet=[string]$_.sheet;rows=[int](Get-P $_ 'rows' 0)}});result=$null;outputUrl=$null;outputFile='';outputError='';folder=$script:Paths.CombineOutputs;patients=$null}
+ if($m.state -eq 'Completed'){
+  $r=Get-P $run 'result' $null;if($r){$m.patients=[int](Get-P $r 'patients' 0);if(!$Summary){$m.result=$r}}
+  $op=[string](Get-P $run 'outputPath' '');if($op -and (Test-Path -LiteralPath $op)){$m.outputUrl='/combine/output.xlsx?id='+$m.runId;$m.outputFile=$op}else{$m.outputError='The workbook was moved or deleted from the combine\outputs folder.'}
+ }
+ return $m
+}
+function New-CmbRun($Body){
+ $name=[string](Get-P $Body 'name' '');$c=Read-CmbConfigFile $name;if(@($c.errors).Count){throw ('The config file could not be read (line '+$c.errors[0].line+': '+$c.errors[0].message+'); fix it on the Rules page.')}
+ $chosen=@{};$ch=Get-P $Body 'choices' $null;if($ch){foreach($p in $ch.PSObject.Properties){$chosen[$p.Name.ToLowerInvariant()]=[string]$p.Value}}
+ $files=@(Get-CmbFiles|Where-Object{Test-Path -LiteralPath ([string](Get-P $_ 'path' ''))})
+ $plan0=Get-CmbPlan $c.rules;$assign=Get-CmbAssignments $plan0 $files $chosen;$plan=Get-CmbPlan $c.rules (Get-CmbTablesFromAssignments $assign) -Strict
+ if($plan.errorCount){$first=@($plan.problems|Where-Object{$_.severity -eq 'error'}|Select-Object -First 3|ForEach-Object{$(if($_.rule){'row '+$_.rule+': '}else{''})+$_.message});throw ('Fix the config first ('+$plan.errorCount+' problem'+$(if($plan.errorCount -eq 1){''}else{'s'})+'): '+($first -join ' | '))}
+ foreach($r in @(Get-CmbRuns)){if([string](Get-P $r 'state' '') -in @('Starting','Running') -and !(Update-CmbLiveness $r)){throw 'A combine run is already running; wait for it to finish.'}}
+ $asg=@(foreach($k in @($assign.Keys)){$p=$assign[$k].pick;if(!$p){continue};$f=Get-CmbFile $p.token;[ordered]@{source=$assign[$k].source;token=$p.token;sheet=$p.sheet;file=$p.file;sha256=[string]$f.sha256;rows=$p.rows}})
+ $sha=[Security.Cryptography.SHA256]::Create();try{$hash=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($c.text))) -replace '-','')}finally{$sha.Dispose()}
+ $id=[Guid]::NewGuid().ToString('N');$path=Get-CmbRunPath $id
+ $run=[ordered]@{cmbRunVersion=1;runId=$id;state='Starting';percent=1;stage='Launching the combine worker';requestedUtc=[DateTime]::UtcNow.ToString('o');configName=$c.name;configPath=$c.path;configText=$c.text;configSha256=$hash;assignments=$asg;workerPid=0}
+ Save-JsonAtomic $path $run;Log 'COMBINE_REQUESTED' 'OK' ($c.name+'; '+(@($asg|ForEach-Object{$_.source+'='+$_.file}) -join ', '))
+ if($script:CmbInline){Invoke-CmbRun $id}
+ else{try{$null=Start-CmbWorker $id}catch{$run.state='Failed';$run.stage='Worker launch failed';$run['errorSummary']=$_.Exception.Message;Save-JsonAtomic $path $run;Log 'COMBINE_FAILED' 'FAILED' $_.Exception.Message}}
+ foreach($old in @(Get-CmbRuns|Select-Object -Skip $script:CmbRunKeep)){$oid=[string](Get-P $old 'runId' '');if($oid -match '^[a-f0-9]{32}$'){Remove-Item -LiteralPath (Get-CmbRunPath $oid) -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath (Join-Path $script:Paths.Logs ('combine-'+$oid+'.out.log')),(Join-Path $script:Paths.Logs ('combine-'+$oid+'.err.log')) -Force -ErrorAction SilentlyContinue}}
+ return (Get-CmbRunModel $id)
+}
+function Send-CmbOutput($Context,[string]$Id){
+ $run=Json (Get-CmbRunPath $Id);if(!$run -or [string](Get-P $run 'state' '') -ne 'Completed'){throw 'That run is not complete.'}
+ $full=[IO.Path]::GetFullPath([string](Get-P $run 'outputPath' ''));$root=[IO.Path]::GetFullPath($script:Paths.CombineOutputs).TrimEnd([IO.Path]::DirectorySeparatorChar)+[IO.Path]::DirectorySeparatorChar
+ if(!$full.StartsWith($root,[StringComparison]::OrdinalIgnoreCase) -or !(Test-Path -LiteralPath $full)){throw 'The workbook is not available; it may have been moved or deleted from the combine\outputs folder.'}
+ $name=[IO.Path]::GetFileName($full) -replace '[^\x20-\x7E]','_' -replace '"',''
+ Send-Bytes $Context 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ([IO.File]::ReadAllBytes($full)) ('attachment; filename="'+$name+'"')
+}
+
+# --- Combine LLM round trip: the request copied to the clipboard is one JSON document laid out one item per line, so it pastes into Excel
+# one row per line (every line starts with a quote or a bracket, never with = + - @) and an LLM reading the sheet sees ordinary JSON.
+function Format-CmbPromptDocument($Doc){
+ $lines=[Collections.Generic.List[string]]::new();$lines.Add('{');$keys=@($Doc.Keys)
+ for($i=0;$i -lt $keys.Count;$i++){
+  $k=$keys[$i];$v=$Doc[$k];$comma=$(if($i -lt $keys.Count-1){','}else{''});$name=(ConvertTo-CmbJsonString $k)+': '
+  if($v -is [Array]){
+   if($v.Count -eq 0){$lines.Add($name+'[]'+$comma);continue}
+   $lines.Add($name+'[');for($j=0;$j -lt $v.Count;$j++){$lines.Add((ConvertTo-CmbJson $v[$j])+$(if($j -lt $v.Count-1){','}else{''}))};$lines.Add(']'+$comma)
+  }elseif($v -is [Collections.IDictionary]){
+   $lines.Add($name+'{');$ik=@($v.Keys);for($j=0;$j -lt $ik.Count;$j++){$lines.Add((ConvertTo-CmbJsonString ([string]$ik[$j]))+': '+(ConvertTo-CmbJson $v[$ik[$j]])+$(if($j -lt $ik.Count-1){','}else{''}))};$lines.Add('}'+$comma)
+  }else{$lines.Add($name+(ConvertTo-CmbJson $v)+$comma)}
+ }
+ $lines.Add('}');return ($lines -join "`r`n")
+}
+function Get-CmbPrompt([string]$Name,[string]$Text,[string]$Request,[string[]]$Tokens,[bool]$Examples){
+ # The request for the enterprise LLM: what to do, how the system works, the current config with its problems, and the files' fingerprints.
+ $read=Read-CmbConfigText $Text;$rules=@($read.rules)
+ $files=@(foreach($t in $Tokens){if($t -match '^[a-f0-9]{32}$'){try{Get-CmbFile $t}catch{}}})
+ $check=Get-CmbCheck $rules $files
+ $usedBy=@{};foreach($s in $check.sources){if($s.chosen){$usedBy[$s.chosen]=$s.source}}
+ $spec=@(foreach($t in @($script:CmbRuleSpec.Keys)){$s=$script:CmbRuleSpec[$t];$ex=$null;try{$ex=ConvertFrom-CmbJson $s.example}catch{};[ordered]@{rule=$t;purpose=$s.purpose;properties=$s.props;example=$ex}})
+ $task=$Request.Trim();if(!$task){$task=$(if($rules.Count){'Review the current config against the files described below. Fix anything that is wrong, missing or would lose data, and keep everything that is already right.'}else{'Write a config that combines the files described below into one row per patient, with summary views by provider, location, risk pool and region where the data allows.'})}
+ $doc=[ordered]@{}
+ $doc['purpose']='This is a request to write a Data Combiner config. Read every part, then answer exactly as answerFormat says. Everything you need is here; the program that runs the config reads only the rule types, properties, cleaning steps and functions described below.'
+ $doc['task']=$task
+ $doc['howItWorks']=@($script:CmbGuide)
+ $doc['ruleTypes']=$spec
+ $doc['howMethods']=$script:CmbHowText
+ $doc['cleaningSteps']=$script:CmbCleanText
+ $doc['expressions']=@($script:CmbExprGuide)
+ $doc['functions']=$script:CmbFunctionText
+ $doc['answerFormat']=@($script:CmbAnswerGuide)
+ $doc['configName']=$Name
+ $doc['currentConfig']=@($rules)
+ $doc['problemsInCurrentConfig']=@(foreach($r in $check.rules){foreach($p in $r.problems){[ordered]@{row=$r.index;severity=$p.severity;message=$p.message}}})+@(foreach($p in $check.general){[ordered]@{row=0;severity=$p.severity;message=$p.message}})
+ $doc['files']=@(foreach($f in $files){foreach($s in @(Get-P $f 'sheets' @())){$k=[string]$f.token+'|'+[string]$s.name;$o=[ordered]@{file=[string]$f.originalName;sheet=[string]$s.name;headerRow=[int]$s.headerRow;rows=[int]$s.rows;layoutId=[string]$s.layoutId};if($usedBy.ContainsKey($k)){$o['usedBySource']=$usedBy[$k]};$o}})
+ $doc['columns']=@(foreach($f in $files){foreach($s in @(Get-P $f 'sheets' @())){foreach($c in @(Get-P $s 'columns' @())){
+  $o=[ordered]@{file=[string]$f.originalName;sheet=[string]$s.name;column=[string]$c.letter;header=[string]$c.header;type=[string]$c.type;filled=[int]$c.filled;blank=[int]$c.blank;distinct=[int]$c.distinct}
+  if([bool]$c.unique){$o['unique']=$true}
+  $sh=@(@(Get-P $c 'patterns' @())|ForEach-Object{[string]$_.shape+' '+[Math]::Round(100*[double]$_.share)+'%'});if($sh.Count){$o['shapes']=$sh}
+  $cm=@(@(Get-P $c 'common' @())|ForEach-Object{[string]$_.value+' ('+[int]$_.rows+')'});if($cm.Count){$o['values']=$cm}
+  if([string](Get-P $c 'min' '')){$o['min']=[string]$c.min;$o['max']=[string]$c.max}
+  if($Examples){$ex=@(Get-P $c 'examples' @());if($ex.Count){$o['examples']=@($ex|ForEach-Object{[string]$_})}}
+  $o
+ }}})
+ $out=Format-CmbPromptDocument $doc
+ return [ordered]@{text=$out;lines=($out -split "`n").Count;characters=$out.Length;files=$files.Count;rules=$rules.Count}
+}
+function ConvertTo-CmbFieldName([string]$Header){
+ $w=@(($Header -replace '[^A-Za-z0-9]+',' ').Trim() -split ' '|Where-Object{$_});if($w.Count -eq 0){return 'Field'}
+ $s=(@($w|ForEach-Object{$_.Substring(0,1).ToUpperInvariant()+$_.Substring(1)}) -join '');if($s -notmatch '^[A-Za-z]'){$s='F'+$s};if($s.Length -gt 40){$s=$s.Substring(0,40)};return $s
+}
+function New-CmbDraft([string]$Name,[string[]]$Tokens){
+ # A first config from loaded files: one source per file (matched by its most distinctive headers), every column mapped (the same header in
+ # several files becomes one field), the patient id as key when one is recognizable, explicit priority for shared fields, every field output,
+ # and views for provider, location, risk pool and region columns. Rules a person must check carry a QUESTION note.
+ $files=@(foreach($t in $Tokens){Get-CmbFile $t});if($files.Count -eq 0){throw 'Choose at least one loaded file.'}
+ $tables=@(foreach($f in $files){$s=@(@(Get-P $f 'sheets' @())|Sort-Object @{Expression={[int]$_.rows}} -Descending)[0];@{file=$f;sheet=$s}})
+ $count=@{};foreach($t in $tables){$seen=@{};foreach($h in @(Get-P $t.sheet 'headers' @())){$k=ConvertTo-CmbHeaderKey ([string]$h);if(!$seen.ContainsKey($k)){$seen[$k]=$true;$count[$k]=1+[int]$count[$k]}}}
+ $fieldOf=@{};$fieldUsed=@{};$ids=@{};$rules=[Collections.Generic.List[object]]::new()
+ $cfg=[ordered]@{};$cfg['rule']='config';$cfg['name']=$Name;$cfg['description']=('Draft made from '+$files.Count+' file'+$(if($files.Count -eq 1){''}else{'s'})+' on '+(Get-Date).ToString('yyyy-MM-dd')+'; review every rule.');$cfg['note']='Draft generated by the program; check the key, the field priorities and the views.';$rules.Add($cfg)
+ $keyRx='\b(mrn|medical record( number| no| num| #)?|patient id|pat id|patient number|pat num|enterprise id|empi|member id|person id|chart number)\b'
+ $keyField=$null;$keyVotes=@{}
+ $srcRules=[Collections.Generic.List[object]]::new();$mapRules=[Collections.Generic.List[object]]::new();$srcIds=@()
+ foreach($t in $tables){
+  $base=([IO.Path]::GetFileNameWithoutExtension([string]$t.file.originalName)).ToLowerInvariant() -replace '[^a-z0-9]+','_' -replace '^_+|_+$','';if($base -notmatch '^[a-z]'){$base='s_'+$base};if($base.Length -gt 24){$base=$base.Substring(0,24).TrimEnd('_')}
+  $id=$base;$k=2;while($ids.ContainsKey($id)){$id=$base+'_'+$k;$k++};$ids[$id]=$true;$srcIds+=$id
+  $cols=@(Get-P $t.sheet 'columns' @());$headers=@(Get-P $t.sheet 'headers' @()|ForEach-Object{[string]$_})
+  $distinctive=@($headers|Where-Object{$count[(ConvertTo-CmbHeaderKey $_)] -eq 1});$keyHeaders=@($headers|Where-Object{(ConvertTo-CmbHeaderKey $_) -match $keyRx})
+  $match=@(@($keyHeaders|Select-Object -First 1)+@($distinctive|Select-Object -First 5)+@($headers|Select-Object -First 6)|Select-Object -Unique|Select-Object -First 6)
+  $s=[ordered]@{};$s['rule']='source';$s['source']=$id;$s['label']=[string]$t.file.originalName;$s['match']=$match;if([IO.Path]::GetExtension([string]$t.file.originalName) -ieq '.xlsx'){$s['sheet']=[string]$t.sheet.name}
+  $s['note']=('Rows: '+[int]$t.sheet.rows+'. Matched by '+$(if($distinctive.Count){'columns only this file has'}else{'its columns (no column is unique to it; add fileName if two files look alike)'})+'.');$srcRules.Add($s)
+  foreach($c in $cols){
+   $h=[string]$c.header;$hk=ConvertTo-CmbHeaderKey $h;if([int]$c.filled -eq 0){continue}
+   if(!$fieldOf.ContainsKey($hk)){$fn=ConvertTo-CmbFieldName $h;$b2=$fn;$k=2;while($fieldUsed.ContainsKey($fn.ToLowerInvariant())){$fn=$b2+$k;$k++};$fieldUsed[$fn.ToLowerInvariant()]=$true;$fieldOf[$hk]=$fn}
+   $fn=$fieldOf[$hk];$m=[ordered]@{};$m['rule']='map';$m['source']=$id;$m['field']=$fn;$m['column']=$h
+   $type=[string]$c.type;$isKey=($hk -match $keyRx)
+   if($isKey){$keyVotes[$fn]=1+[int]$keyVotes[$fn];$shapes=@(@(Get-P $c 'patterns' @())|ForEach-Object{[string]$_.shape});if(@($shapes|Where-Object{$_ -notmatch '^9+$'}).Count -eq 0){$m['clean']=@('digits','stripLeadingZeros');$m['note']='Patient id: digits only, without leading zeros, so it matches across files'}else{$m['clean']=@('upper');$m['note']='Patient id'}}
+   elseif($type -eq 'date'){$m['type']='date'}elseif($type -eq 'number'){$m['type']='number'}elseif($type -eq 'bool'){$m['type']='bool'}
+   elseif($type -like 'mixed*'){$m['note']=('QUESTION: values are '+$type+'; choose a type or cleaning')}
+   $mapRules.Add($m)
+  }
+ }
+ foreach($r in $srcRules){$rules.Add($r)};foreach($r in $mapRules){$rules.Add($r)}
+ if($keyVotes.Count){$keyField=@($keyVotes.Keys|Sort-Object @{Expression={$keyVotes[$_]}} -Descending)[0]}
+ $kr=[ordered]@{};$kr['rule']='key'
+ if($keyField){$kr['fields']=@($keyField);$missing=@(for($i=0;$i -lt $tables.Count;$i++){$has=$false;foreach($m in $mapRules){if($m['source'] -eq $srcIds[$i] -and $m['field'] -eq $keyField){$has=$true}};if(!$has){$srcIds[$i]}});$kr['note']=$(if($missing.Count){'QUESTION: '+($missing -join ', ')+' has no '+$keyField+' column; map one, or add a second key rule (for example name and date of birth)'}else{$keyField+' is in every file'})}
+ else{$kr['fields']=@('MRN');$kr['note']='QUESTION: no patient id column was recognized; set fields to the column that identifies a patient in every file'}
+ $rules.Add($kr)
+ $shared=@{};foreach($m in $mapRules){$f=[string]$m['field'];if(!$shared.ContainsKey($f)){$shared[$f]=@()};$shared[$f]+=[string]$m['source']}
+ foreach($f in @($fieldOf.Values|Select-Object -Unique)){if($f -eq $keyField){continue};$s=@($shared[$f]|Select-Object -Unique);if($s.Count -lt 2){continue};$fr=[ordered]@{};$fr['rule']='field';$fr['field']=$f;$fr['how']='priority';$fr['from']=$s;$fr['note']=('In '+$s.Count+' files; the first non-blank value wins in this order. QUESTION: is this the right order, or should the latest value win?');$rules.Add($fr)}
+ $outFields=@();if($keyField){$outFields+=$keyField};foreach($m in $mapRules){$f=[string]$m['field'];if($outFields -notcontains $f){$outFields+=$f}};$outFields+='_sources'
+ foreach($f in $outFields){$o=[ordered]@{};$o['rule']='output';$o['field']=$f;if($f -eq '_sources'){$o['header']='Sources';$o['note']='Which files the patient was found in'};$rules.Add($o)}
+ $viewDefs=@(@('By provider','\b(pcp|provider|physician|attributed|clinician|doctor)\b'),@('By location','\b(location|site|practice|clinic|department|office)\b'),@('By risk pool','\b(risk pool|pool|payer|payor|plan|contract)\b'),@('By region','\b(region|market|division|area)\b'))
+ foreach($vd in $viewDefs){
+  $hit=@($fieldOf.Keys|Where-Object{$_ -match $vd[1] -and $_ -notmatch '\b(npi|id|date|phone|address)\b'}|Sort-Object @{Expression={$count[$_]}} -Descending);if($hit.Count -eq 0){continue}
+  $f=$fieldOf[$hit[0]];$v=[ordered]@{};$v['rule']='view';$v['view']=$vd[0];$v['groupBy']=@($f);$v['sortBy']='Patients';$v['desc']=$true;$v['note']=('QUESTION: grouped by '+$f+'; check this is the right column');$rules.Add($v)
+  $m=[ordered]@{};$m['rule']='measure';$m['view']=$vd[0];$m['name']='Patients';$m['agg']='count';$rules.Add($m)
+ }
+ return ,@($rules)
+}
+# --- Combine web: page models, request handling and the three pages (Files, Rules, Output).
+function Get-CmbLiveFiles{return @(Get-CmbFiles|Where-Object{Test-Path -LiteralPath ([string](Get-P $_ 'path' ''))})}
+function Get-CmbFilesModel{
+ $files=@(Get-CmbLiveFiles);$uses=@{}
+ foreach($c in @(Get-CmbConfigs)){try{$cf=Read-CmbConfigFile $c.name;$plan=Get-CmbPlan $cf.rules;foreach($s in $plan.sources){foreach($cand in @(Find-CmbFileCandidates $s $files)){$k=$cand.token;if(!$uses.ContainsKey($k)){$uses[$k]=@()};$uses[$k]+=($c.name+' / '+$s.id)}}}catch{}}
+ $list=@(foreach($f in $files){$m=Get-CmbFileModel ([string]$f.token);$m['usedBy']=@($(if($uses.ContainsKey([string]$f.token)){$uses[[string]$f.token]}else{@()}));$m})
+ return [ordered]@{files=$list;folder=$script:Paths.CombineFiles;keep=$script:CmbFileKeep;configs=@(Get-CmbConfigs|ForEach-Object{$_.name})}
+}
+function Remove-CmbFileRequest([string]$Token){
+ $f=Json (Get-CmbFilePath $Token);if(!$f){throw 'That file is not loaded.'}
+ foreach($r in @(Get-CmbRuns)){if([string](Get-P $r 'state' '') -in @('Starting','Running')){foreach($a in @(Get-P $r 'assignments' @())){if([string](Get-P $a 'token' '') -eq $Token){throw 'A run is reading this file; wait for it to finish.'}}}}
+ Remove-CmbFileRecord $f;Log 'COMBINE_FILE_REMOVED' 'OK' ([string]$f.originalName);return [ordered]@{removed=$true}
+}
+function Get-CmbChoices($Body){$c=@{};$ch=Get-P $Body 'choices' $null;if($ch){foreach($p in $ch.PSObject.Properties){$c[$p.Name.ToLowerInvariant()]=[string]$p.Value}};return $c}
+function Get-CmbConfigModel([string]$Name){
+ $c=Read-CmbConfigFile $Name;$check=Get-CmbCheck $c.rules @(Get-CmbLiveFiles)
+ return [ordered]@{name=$c.name;path=$c.path;readErrors=@($c.errors);check=$check;history=@(Get-CmbConfigHistory $c.name)}
+}
+function Get-CmbCheckModel($Body){
+ # Checks rules sent by the page (the editor's current text) without saving them.
+ $r=Read-CmbConfigText ([string](Get-P $Body 'text' ''))
+ if(@($r.errors).Count -and @($r.rules).Count -eq 0){return [ordered]@{readErrors=@($r.errors);check=$null}}
+ return [ordered]@{readErrors=@($r.errors);check=(Get-CmbCheck @($r.rules) @(Get-CmbLiveFiles) (Get-CmbChoices $Body))}
+}
+function Save-CmbConfigRequest($Body){
+ $name=Get-CmbConfigName ([string](Get-P $Body 'name' ''));$from=[string](Get-P $Body 'renameFrom' '');$create=[bool](Get-P $Body 'create' $false)
+ $r=Read-CmbConfigText ([string](Get-P $Body 'text' ''));if(@($r.errors).Count){$e=$r.errors[0];throw ('Not saved: '+$(if($e.line){'line '+$e.line+': '}else{''})+$e.message)}
+ $exists=Test-Path -LiteralPath (Get-CmbConfigPath $name)
+ if(($create -or ($from -and $from -ne $name)) -and $exists){throw ('A config named "'+$name+'" already exists; choose another name.')}
+ $sv=Save-CmbConfig $name @($r.rules) $(if($from -and $from -ne $name){'renamed from '+$from}elseif($create){'created'}else{'saved'})
+ if($from -and $from -ne $name -and (Test-Path -LiteralPath (Get-CmbConfigPath $from))){Remove-CmbConfig $from}
+ return (Get-CmbConfigModel $sv.name)
+}
+function Get-CmbAnswerModel($Body){
+ # An LLM answer pasted back: read row by row, compared with the editor's rules, and checked; nothing is saved here.
+ $ans=Read-CmbConfigText ([string](Get-P $Body 'answer' ''));$cur=Read-CmbConfigText ([string](Get-P $Body 'text' ''))
+ if(@($ans.rules).Count -eq 0){return [ordered]@{readErrors=@($ans.errors);rules=@();diff=@();check=$null}}
+ $d=Compare-CmbRules @($cur.rules) @($ans.rules)
+ return [ordered]@{readErrors=@($ans.errors);rules=@($ans.rules|ForEach-Object{ConvertTo-CmbRuleText $_});diff=$d;check=(Get-CmbCheck @($ans.rules) @(Get-CmbLiveFiles))}
+}
+function Get-CmbDiffModel($Body){$a=Read-CmbConfigText ([string](Get-P $Body 'before' ''));$b=Read-CmbConfigText ([string](Get-P $Body 'after' ''));$d=Compare-CmbRules @($a.rules) @($b.rules);return [ordered]@{diff=$d}}
+function Get-CmbGuideModel{
+ return [ordered]@{
+  guide=@($script:CmbGuide);expressions=@($script:CmbExprGuide);answer=@($script:CmbAnswerGuide)
+  ruleTypes=@(foreach($t in @($script:CmbRuleSpec.Keys)){$s=$script:CmbRuleSpec[$t];[ordered]@{rule=$t;purpose=$s.purpose;props=@(foreach($k in @($s.props.Keys)){[ordered]@{name=$k;text=$s.props[$k]}});example=$s.example}})
+  how=@(foreach($k in @($script:CmbHowText.Keys)){[ordered]@{name=$k;text=$script:CmbHowText[$k]}});clean=@(foreach($k in @($script:CmbCleanText.Keys)){[ordered]@{name=$k;text=$script:CmbCleanText[$k]}});functions=@(foreach($k in @($script:CmbFunctionText.Keys)){[ordered]@{name=$k;text=$script:CmbFunctionText[$k]}})
+ }
+}
+function Get-CmbSetupModel([string]$Name,[hashtable]$Choices){
+ $c=Read-CmbConfigFile $Name;$check=Get-CmbCheck $c.rules @(Get-CmbLiveFiles) $Choices
+ $problems=@(foreach($r in $check.rules){foreach($p in $r.problems){if($p.severity -eq 'error'){[ordered]@{row=$r.index;message=$p.message}}}})+@(foreach($p in $check.general){if($p.severity -eq 'error'){[ordered]@{row=0;message=$p.message}}})
+ return [ordered]@{name=$c.name;readErrors=@($c.errors);sources=$check.sources;errors=$check.errors;warnings=$check.warnings;problems=$problems;views=$check.views;fields=$check.fields}
+}
+function Get-CmbOutputPageModel{
+ $runs=@(Get-CmbRuns);$latest=$null;if($runs.Count){$latest=Get-CmbRunModel ([string]$runs[0].runId)}
+ return [ordered]@{configs=@(Get-CmbConfigs|ForEach-Object{$_.name});latest=$latest;history=@(foreach($r in $runs){if([string](Get-P $r 'state' '') -in @('Completed','Failed')){Get-CmbRunModel ([string]$r.runId) -Summary}});folder=$script:Paths.CombineOutputs}
+}
+function Send-CmbJson($Context,$Value){Send $Context 200 'application/json' ($Value|ConvertTo-Json -Depth 25)}
+function Invoke-CmbRequest($Context,[string]$Method,[string]$Path){
+ # Every Combine route; returns $false for paths it does not own.
+ $q=$Context.Request.QueryString
+ if($Method -eq 'GET'){
+  switch($Path){
+   '/combine'{Send $Context 200 'text/html; charset=utf-8' (Get-CmbPage 'files');return $true}
+   '/combine/rules'{Send $Context 200 'text/html; charset=utf-8' (Get-CmbPage 'rules');return $true}
+   '/combine/output'{Send $Context 200 'text/html; charset=utf-8' (Get-CmbPage 'output');return $true}
+   '/combine/output.xlsx'{Send-CmbOutput $Context ([string]$q['id']);return $true}
+   '/api/combine/files'{Send-CmbJson $Context (Get-CmbFilesModel);return $true}
+   '/api/combine/file'{Send-CmbJson $Context (Get-CmbFileModel ([string]$q['token']) -Full);return $true}
+   '/api/combine/configs'{Send-CmbJson $Context ([ordered]@{configs=@(Get-CmbConfigs);folder=$script:Paths.CombineConfigs});return $true}
+   '/api/combine/config'{Send-CmbJson $Context (Get-CmbConfigModel ([string]$q['name']));return $true}
+   '/api/combine/version'{Send-CmbJson $Context ([ordered]@{text=(Read-CmbConfigVersion ([string]$q['name']) ([string]$q['v']))});return $true}
+   '/api/combine/guide'{Send-CmbJson $Context (Get-CmbGuideModel);return $true}
+   '/api/combine/setup'{$ch=@{};$raw=[string]$q['choices'];if($raw){$o=$raw|ConvertFrom-Json;foreach($p in $o.PSObject.Properties){$ch[$p.Name.ToLowerInvariant()]=[string]$p.Value}};Send-CmbJson $Context (Get-CmbSetupModel ([string]$q['name']) $ch);return $true}
+   '/api/combine/output'{Send-CmbJson $Context (Get-CmbOutputPageModel);return $true}
+   '/api/combine/run'{Send-CmbJson $Context (Get-CmbRunModel ([string]$q['id']));return $true}
+  }
+  return $false
+ }
+ if($Method -eq 'POST'){
+  switch($Path){
+   '/api/combine/upload'{Send-CmbJson $Context (Receive-CmbUpload $Context);return $true}
+   '/api/combine/file-remove'{Send-CmbJson $Context (Remove-CmbFileRequest ([string]$q['token']));return $true}
+   '/api/combine/check'{Send-CmbJson $Context (Get-CmbCheckModel (Read-BodyJson $Context));return $true}
+   '/api/combine/save'{Send-CmbJson $Context (Save-CmbConfigRequest (Read-BodyJson $Context));return $true}
+   '/api/combine/delete'{Remove-CmbConfig ([string]$q['name']);Send-CmbJson $Context ([ordered]@{deleted=$true});return $true}
+   '/api/combine/answer'{Send-CmbJson $Context (Get-CmbAnswerModel (Read-BodyJson $Context));return $true}
+   '/api/combine/diff'{Send-CmbJson $Context (Get-CmbDiffModel (Read-BodyJson $Context));return $true}
+   '/api/combine/prompt'{$b=Read-BodyJson $Context;Send-CmbJson $Context (Get-CmbPrompt ([string](Get-P $b 'name' '')) ([string](Get-P $b 'text' '')) ([string](Get-P $b 'request' '')) ([string[]]@(Get-P $b 'tokens' @())) ([bool](Get-P $b 'examples' $false)));return $true}
+   '/api/combine/draft'{$b=Read-BodyJson $Context;$n=Get-CmbConfigName ([string](Get-P $b 'name' ''));$rules=New-CmbDraft $n ([string[]]@(Get-P $b 'tokens' @()));Send-CmbJson $Context ([ordered]@{name=$n;text=(Format-CmbConfigText $rules)});return $true}
+   '/api/combine/run'{Send-CmbJson $Context (New-CmbRun (Read-BodyJson $Context));return $true}
+  }
+ }
+ return $false
+}
+$script:CmbCss=@'
+body{font:14px Segoe UI,Arial;margin:0;background:#f4f7fb;color:#172033}header{background:#17365d;color:white;padding:22px 22px 12px}header h1{margin:0 0 4px}main{padding:16px 22px;max-width:1600px}
+.sub{display:flex;gap:6px;margin:0 0 6px}.sub a{padding:7px 14px;border-radius:16px;text-decoration:none;color:#17365d;background:#e4e9f0;font-weight:600}.sub a.on{background:#17365d;color:#fff}.sub .cfg{margin-left:auto;align-self:center;color:#667085}
+.card{background:white;border:1px solid #dce4ef;border-radius:8px;padding:16px 18px;margin:14px 0}.card h2{margin:0 0 8px;font-size:17px;color:#17365d}.muted{color:#667085}.error{color:#a61b1b}.warn{color:#9a5b00}.ok{color:#1d7a3a}
+.row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:8px 0}select,input[type=text],textarea{font:inherit;padding:5px 7px;border:1px solid #c8d2e0;border-radius:5px}textarea{width:100%;box-sizing:border-box;font:12.5px Consolas,monospace}
+button,a.btn{padding:6px 11px;cursor:pointer;background:#1769aa;color:#fff;border:0;border-radius:5px;font:inherit;text-decoration:none;display:inline-block}button:disabled{opacity:.5;cursor:default}button.alt,a.btn.alt{background:#e4e9f0;color:#172033}button.go{background:#1d7a3a;font-weight:600;padding:9px 16px}button.del{background:#a61b1b}button.mini{padding:2px 7px;font-size:12px}
+table.grid{border-collapse:collapse;width:100%}table.grid th,table.grid td{padding:6px 8px;border-bottom:1px solid #e6ecf3;text-align:left;vertical-align:top}table.grid th{background:#eaf1f8}.scroll table.grid th{position:sticky;top:0}table.grid td.n,table.grid th.n{text-align:right}
+.scroll{overflow:auto;max-height:560px;border:1px solid #e6ecf3;border-radius:6px}.wide td{white-space:nowrap}
+tr.err td{background:#fdecec}tr.wrn td{background:#fff6e5}tr.sel td{background:#eef6ff}
+.badge{display:inline-block;padding:1px 7px;border-radius:9px;font-size:12px;font-weight:600;background:#e4e9f0;color:#17365d}.b-source{background:#dbeafe}.b-map{background:#e0f2f1}.b-filter{background:#fde2e2}.b-key{background:#fef3c7}.b-field{background:#ede9fe}.b-derive{background:#fce7f3}.b-lookup{background:#e0e7ff}.b-sort,.b-output{background:#ecfccb}.b-view,.b-measure{background:#ffedd5}.b-config{background:#17365d;color:#fff}
+.prob{font-size:12.5px;margin:2px 0}.json{font:12px Consolas,monospace;white-space:pre-wrap;word-break:break-all;color:#334155}
+.tiles{display:grid;grid-template-columns:repeat(6,minmax(130px,1fr));gap:10px;margin:10px 0}.tile{border:1px solid #dce4ef;border-radius:8px;padding:9px 12px}.tile b{display:block;font-size:21px;color:#1f6d7a}.tile small{color:#667085}
+.modal{position:fixed;inset:0;background:#0007;display:none;align-items:center;justify-content:center;z-index:9}.modal.on{display:flex}.box{background:white;border-radius:8px;padding:18px;width:min(1100px,94vw);max-height:90vh;overflow:auto}
+.drop{border:2px dashed #9fb3cc;border-radius:8px;padding:18px;text-align:center;color:#667085}.drop.over{background:#eef6ff;border-color:#1769aa}
+.chips{display:flex;gap:5px;flex-wrap:wrap}.chip{border:1px solid #c8d2e0;border-radius:14px;padding:2px 9px;cursor:pointer;background:#f8fafc;font-size:12.5px}.chip.on{background:#17365d;color:#fff;border-color:#17365d}
+.diff td{font:12px Consolas,monospace;white-space:pre-wrap;word-break:break-all}.d-added{color:#1d7a3a}.d-removed{color:#a61b1b}.d-changed,.d-reordered{color:#9a5b00}
+.steps{counter-reset:s;margin:6px 0 0;padding-left:20px}.steps li{margin:3px 0}
+code{background:#eef2f7;padding:1px 5px;border-radius:3px;word-break:break-all}details summary{cursor:pointer;color:#17365d;font-weight:600}
+@media(max-width:900px){.tiles{grid-template-columns:1fr 1fr}}
+'@
+$script:CmbJs=@'
+const el=id=>document.getElementById(id);
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+async function api(u,o){const r=await fetch(u,o);const t=await r.text();let j=null;try{j=t?JSON.parse(t):null}catch(e){throw Error('Server returned invalid JSON: '+t.slice(0,200))}if(!r.ok)throw Error((j&&j.error)||('Request failed ('+r.status+')'));return j}
+function post(u,b){return api(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})})}
+function when(iso){if(!iso)return '';const d=new Date(iso);return isNaN(d)?iso:d.toLocaleString()}
+function num(n){return n==null?'':Number(n).toLocaleString()}
+function plural(n,w){return num(n)+' '+w+(n===1?'':'s')}
+function arr(x){return x==null?[]:(Array.isArray(x)?x:[x])}
+function curConfig(){let n='';try{n=new URL(location).searchParams.get('config')||localStorage.getItem('cmb.config')||''}catch(e){}return n}
+function rememberConfig(n){try{localStorage.setItem('cmb.config',n||'')}catch(e){}document.querySelectorAll('.sub a[data-p]').forEach(a=>{a.href=a.dataset.p+(n?'?config='+encodeURIComponent(n):'')});const c=el('subCfg');if(c)c.textContent=n?'Config: '+n:''}
+function modal(html){el('modalBody').innerHTML=html;el('modal').classList.add('on')}
+function closeModal(){el('modal').classList.remove('on')}
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal()});
+function diffHtml(d){d=arr(d);if(!d.length)return '<p class="ok">No differences.</p>';return '<table class="grid diff"><thead><tr><th>Change</th><th>Rule</th><th>Before</th><th>After</th></tr></thead><tbody>'+d.map(x=>'<tr><td class="d-'+esc(x.change)+'"><b>'+esc(x.change)+'</b></td><td>'+esc(x.identity)+'</td><td>'+esc(x.before)+'</td><td>'+esc(x.after)+'</td></tr>').join('')+'</tbody></table>'}
+'@
+function Get-CmbPage([string]$Which){
+ $sub='<nav class="sub"><a data-p="/combine" href="/combine"'+$(if($Which -eq 'files'){' class="on"'}else{''})+'>1. Files</a><a data-p="/combine/rules" href="/combine/rules"'+$(if($Which -eq 'rules'){' class="on"'}else{''})+'>2. Rules</a><a data-p="/combine/output" href="/combine/output"'+$(if($Which -eq 'output'){' class="on"'}else{''})+'>3. Output</a><span class="cfg" id="subCfg"></span></nav>'
+ $title=@{files='Combine - Files';rules='Combine - Rules';output='Combine - Output'}[$Which]
+ $body=@{files=$script:CmbFilesHtml;rules=$script:CmbRulesHtml;output=$script:CmbOutputHtml}[$Which]
+ $html='<!doctype html><html><head><meta charset="utf-8"><title>'+$title+'</title><style>'+$script:TabCss+$script:RunPageCss+$script:CmbCss+'</style><script>'+$script:CmbJs+'</script></head><body><header><h1>Combine</h1><p>Draft 6.0 - load exports, write the rules that combine them into one row per patient, and build the output with a full audit trail</p></header>'+(Get-NavHtml 'combine')+'<main>'+$sub+$body+'</main><div id="modal" class="modal" onclick="if(event.target===this)closeModal()"><div class="box"><div id="modalBody"></div><p><button class="alt" onclick="closeModal()">Close</button></p></div></div></body></html>'
+ return $html.Replace('__FOLDER__',[Net.WebUtility]::HtmlEncode($script:Paths.Combine)).Replace('__FILEKEEP__',[string]$script:CmbFileKeep)
+}
+$script:CmbFilesHtml=@'
+<section class="card"><h2>Load exports</h2>
+<p class="muted">Excel (.xlsx) or text (.csv, .txt, .tsv) database exports. Each file is fingerprinted when it loads: the header row is found (even under title rows), and every column gets its type, fill rate, distinct values, value shapes and common values. The newest __FILEKEEP__ files are kept in <code>__FOLDER__</code>; loading the same file again reuses it.</p>
+<div id="drop" class="drop">Drop files here, or <button id="pick">Choose files...</button><input id="file" type="file" accept=".xlsx,.csv,.txt,.tsv" multiple hidden></div>
+<div id="queue"></div>
+</section>
+<section class="card"><h2>Loaded files</h2>
+<div class="row"><button id="draft" disabled>Draft a config from the selected files...</button><span class="muted">Writes a first set of rules (sources, column maps, the patient key, field priorities, output columns and views) for you or your LLM to refine on the Rules page.</span></div>
+<div id="files"><span class="muted">Loading...</span></div>
+<p class="muted">Used by lists the config sources whose match columns this file has. Example values stay on this computer; they are sent to the LLM only if you tick that option on the Rules page.</p>
+</section>
+<script>
+let files=[];const open={};
+function sheetText(f){return arr(f.sheets).map(s=>(f.extension==='.xlsx'?esc(s.name)+': ':'')+plural(s.rows,'row')+', '+plural(s.columnCount,'column')+(s.headerRow>1?' (headers on row '+s.headerRow+')':'')).join('<br>')}
+function render(){
+ if(!files.length){el('files').innerHTML='<p class="muted">No files loaded yet.</p>';syncDraft();return}
+ el('files').innerHTML='<table class="grid"><thead><tr><th></th><th>File</th><th>Tables</th><th>Layout id</th><th>File date</th><th>Loaded</th><th>Used by</th><th></th></tr></thead><tbody>'+files.map(f=>'<tr><td><input type="checkbox" class="pickf" value="'+esc(f.token)+'"></td><td><b>'+esc(f.originalName)+'</b><br><span class="muted">'+num(Math.round(f.byteLength/1024))+' KB'+(f.seconds!=null?', read in '+f.seconds+' s':'')+'</span></td><td>'+sheetText(f)+'</td><td>'+arr(f.sheets).map(s=>'<code>'+esc(s.layoutId)+'</code>').join('<br>')+'</td><td>'+esc(when(f.fileDateUtc))+'</td><td>'+esc(when(f.loadedUtc))+'</td><td>'+(arr(f.usedBy).length?arr(f.usedBy).map(esc).join('<br>'):'<span class="muted">-</span>')+'</td><td style="white-space:nowrap"><button class="alt mini" data-cols="'+esc(f.token)+'">'+(open[f.token]?'Hide columns':'Columns')+'</button> <button class="alt mini" data-rm="'+esc(f.token)+'">Remove</button></td></tr>'+(open[f.token]?'<tr><td></td><td colspan="7" id="cols-'+esc(f.token)+'">Loading...</td></tr>':'')).join('')+'</tbody></table>';
+ for(const t in open){if(open[t])showColumns(t)}
+ syncDraft();
+}
+function syncDraft(){el('draft').disabled=!document.querySelectorAll('.pickf:checked').length}
+let showEx=false;
+async function showColumns(t){
+ const c=el('cols-'+t);if(!c)return;
+ try{const f=await api('/api/combine/file?token='+encodeURIComponent(t));
+  c.innerHTML='<label class="muted"><input type="checkbox" id="ex-'+esc(t)+'"'+(showEx?' checked':'')+'> show example values</label>'+arr(f.sheets).map(s=>'<h3 style="margin:10px 0 4px;font-size:14px">'+esc(s.name)+' <span class="muted">- headers on row '+s.headerRow+', '+plural(s.rows,'data row')+(s.delimiter?', '+esc(s.delimiter)+'-separated, '+esc(s.encoding):'')+(s.malformedLines?', <span class="warn">'+plural(s.malformedLines,'malformed line')+'</span>':'')+'</span></h3><div class="scroll"><table class="grid"><thead><tr><th>Col</th><th>Header</th><th>Type</th><th class="n">Filled</th><th class="n">Blank</th><th class="n">Distinct</th><th>Shapes</th><th>Common values</th><th>Range</th>'+(showEx?'<th>Examples</th>':'')+'</tr></thead><tbody>'+arr(s.columns).map(x=>'<tr><td>'+esc(x.letter)+'</td><td><b>'+esc(x.header)+'</b>'+(x.unique?' <span class="badge b-key" title="every filled value is different">unique</span>':'')+'</td><td>'+esc(x.type)+'</td><td class="n">'+num(x.filled)+'</td><td class="n">'+num(x.blank)+'</td><td class="n">'+num(x.distinct)+'</td><td>'+arr(x.patterns).map(p=>'<code>'+esc(p.shape)+'</code> '+Math.round(p.share*100)+'%').join('<br>')+'</td><td>'+arr(x.common).slice(0,8).map(v=>esc(v.value)+' <span class="muted">('+num(v.rows)+')</span>').join('<br>')+(arr(x.common).length>8?'<br><span class="muted">+'+(arr(x.common).length-8)+' more</span>':'')+'</td><td>'+(x.min?esc(x.min)+' to '+esc(x.max):'')+'</td>'+(showEx?'<td>'+arr(x.examples).map(esc).join('<br>')+'</td>':'')+'</tr>').join('')+'</tbody></table></div>').join('');
+  const cb=el('ex-'+t);if(cb)cb.onchange=()=>{showEx=cb.checked;for(const k in open){if(open[k])showColumns(k)}};
+ }catch(e){c.innerHTML='<span class="error">'+esc(e.message)+'</span>'}
+}
+el('files').addEventListener('click',async e=>{
+ const b=e.target.closest('button');if(!b)return;
+ if(b.dataset.cols){open[b.dataset.cols]=!open[b.dataset.cols];render();return}
+ if(b.dataset.rm){const f=files.find(x=>x.token===b.dataset.rm);if(!confirm('Remove '+(f?f.originalName:'this file')+' from the loaded files?'))return;try{await post('/api/combine/file-remove?token='+encodeURIComponent(b.dataset.rm));delete open[b.dataset.rm];await load()}catch(err){alert(err.message)}}
+});
+el('files').addEventListener('change',e=>{if(e.target.classList.contains('pickf'))syncDraft()});
+async function load(){const m=await api('/api/combine/files');files=arr(m.files);render()}
+async function uploadAll(list){
+ for(const f of list){
+  const id='q'+Math.random().toString(36).slice(2);el('queue').insertAdjacentHTML('beforeend','<div class="row" id="'+id+'"><b>'+esc(f.name)+'</b> <span class="muted">loading and fingerprinting...</span></div>');
+  try{const j=await api('/api/combine/upload',{method:'POST',headers:{'X-File-Name':encodeURIComponent(f.name),'X-File-Timestamp':String(f.lastModified)},body:f});
+   el(id).innerHTML='<b>'+esc(f.name)+'</b> <span class="ok">loaded</span> <span class="muted">'+arr(j.sheets).map(s=>plural(s.rows,'row')+' x '+plural(s.columnCount,'column')).join('; ')+'</span>';open[j.token]=list.length===1}
+  catch(e){el(id).innerHTML='<b>'+esc(f.name)+'</b> <span class="error">'+esc(e.message)+'</span>'}
+  await load();
+ }
+}
+el('pick').onclick=()=>{el('file').value='';el('file').click()};
+el('file').onchange=()=>uploadAll([...el('file').files]);
+const drop=el('drop');['dragenter','dragover'].forEach(n=>drop.addEventListener(n,e=>{e.preventDefault();drop.classList.add('over')}));['dragleave','drop'].forEach(n=>drop.addEventListener(n,e=>{e.preventDefault();drop.classList.remove('over')}));drop.addEventListener('drop',e=>uploadAll([...e.dataTransfer.files]));
+el('draft').onclick=async()=>{
+ const tokens=[...document.querySelectorAll('.pickf:checked')].map(x=>x.value);if(!tokens.length)return;
+ const name=prompt('Name for the new config:','Combined patients');if(!name)return;
+ try{const j=await post('/api/combine/draft',{name:name,tokens:tokens});sessionStorage.setItem('cmb.draft',JSON.stringify(j));location.href='/combine/rules?draft=1'}catch(e){alert(e.message)}
+};
+rememberConfig(curConfig());
+load().catch(e=>{el('files').innerHTML='<p class="error">'+esc(e.message)+'</p>'});
+</script>
+'@
+$script:CmbRulesHtml=@'
+<section class="card"><h2>Config</h2>
+<div class="row"><select id="cfg"></select><button class="alt" id="new">New</button><button class="alt" id="dup">Duplicate</button><button class="alt" id="ren">Rename</button><button class="alt" id="dl">Download .json</button><button class="del" id="del">Delete</button><span id="state" class="muted"></span></div>
+<div class="row"><button class="go" id="save" disabled>Save</button><button class="alt" id="revert" disabled>Undo unsaved changes</button><span id="path" class="muted"></span></div>
+<div id="general"></div>
+</section>
+<section class="card"><h2>Rules</h2>
+<p class="muted">One row per rule, applied in the order explained in the reference below. Edit opens the rule's JSON with the reference for its type; changes are checked at once against the loaded files and are kept only when you Save. Every save keeps the previous version.</p>
+<div class="row"><div class="chips" id="chips"></div><input type="text" id="find" placeholder="Find..." style="width:180px"><select id="addType"><option value="">Add a rule...</option></select></div>
+<div class="scroll" style="max-height:640px"><table class="grid" id="rulesTable"><thead><tr><th>#</th><th>Rule</th><th>What it does</th><th>Note</th><th>Check</th><th></th></tr></thead><tbody id="rules"><tr><td colspan="6" class="muted">Loading...</td></tr></tbody></table></div>
+</section>
+<section class="card"><h2>Source files</h2><div id="sources" class="muted">Loading...</div><p class="muted">Each source uses the newest loaded file that has its match columns. Load files on the <a href="/combine">Files</a> page; choose between several matches on the <a href="/combine/output">Output</a> page.</p></section>
+<section class="card"><h2>Work with your LLM</h2>
+<ol class="steps">
+<li>Describe the change (or leave it blank for a review), choose the files to describe, and copy the request. It is one JSON document laid out one item per line: it explains how this program works, every rule type and function, the current config with its problems, and each file's columns.</li>
+<li>Paste it into cell A1 of a blank Excel sheet (or straight into the LLM chat) and ask the LLM to follow it. It answers with a new sheet: column A, one rule per row.</li>
+<li>Copy column A of that sheet and paste it below, then Check the answer. You see exactly which rules it added, changed or removed, and any problems, before anything is saved.</li>
+</ol>
+<div class="row" style="align-items:flex-start"><textarea id="ask" rows="3" placeholder="What should change? e.g. Add a view by risk pool and region with AWV due counts. Leave blank to have the LLM review the config."></textarea></div>
+<div class="row"><b>Describe files:</b><span id="askFiles" class="muted">Loading...</span></div>
+<div class="row"><label><input type="checkbox" id="askEx"> include example values from each column <span class="warn">(these are patient data; only for an LLM approved for PHI)</span></label></div>
+<div class="row"><button id="copy">Copy request to clipboard</button><button class="alt" id="dlAsk">Download request (.txt)</button><span id="askNote" class="muted"></span></div>
+<textarea id="answer" rows="6" placeholder="Paste the LLM's answer here (column A copied from its sheet, or the JSON it wrote)."></textarea>
+<div class="row"><button id="checkAns">Check answer</button><span id="ansNote" class="muted"></span></div>
+<div id="ansOut"></div>
+</section>
+<section class="card"><h2>Versions</h2><div id="history" class="muted">Loading...</div></section>
+<section class="card"><details><summary>Reference: how rules work</summary><div id="guide" class="muted">Loading...</div></details></section>
+<script>
+let configs=[],cfgName='',rules=[],savedText='',check=null,guide=null,files=[],typeFilter='',history=[],answerRules=null,lastCheckText='';
+const ORDER=['config','source','map','filter','key','field','derive','lookup','sort','output','view','measure'];
+function textOf(list){return '[\r\n'+list.map(r=>JSON.stringify(r)).join(',\r\n')+'\r\n]\r\n'}
+function dirty(){return textOf(rules)!==savedText}
+function sync(){
+ const d=dirty();el('save').disabled=!d;el('revert').disabled=!d||!savedText;el('state').innerHTML=d?'<span class="warn"><b>Unsaved changes</b></span>':(cfgName?'<span class="ok">Saved</span>':'');
+ ['dup','ren','dl','del'].forEach(i=>el(i).disabled=!cfgName&&i!=='dl');
+}
+window.addEventListener('beforeunload',e=>{if(dirty()){e.preventDefault();e.returnValue=''}});
+function ruleType(r){return String((r&&r.rule)||'').toLowerCase()}
+function probHtml(ps){return arr(ps).map(p=>'<div class="prob '+(p.severity==='error'?'error':'warn')+'">'+esc(p.message)+'</div>').join('')}
+function render(){
+ const rows=check?arr(check.rules):[];const q=el('find').value.trim().toLowerCase();
+ const chips=['']. concat(ORDER.filter(t=>rules.some(r=>ruleType(r)===t)));
+ el('chips').innerHTML=chips.map(t=>'<span class="chip'+(t===typeFilter?' on':'')+'" data-t="'+t+'">'+(t?esc(t)+' ('+rules.filter(r=>ruleType(r)===t).length+')':'All ('+rules.length+')')+'</span>').join('');
+ el('rules').innerHTML=rules.map((r,i)=>{
+  const c=rows[i]||{},t=ruleType(r);if(typeFilter&&t!==typeFilter)return '';
+  const sum=c.summary||'',note=(r&&r.note)||'';if(q&&(sum+' '+note+' '+JSON.stringify(r)).toLowerCase().indexOf(q)<0)return '';
+  const ps=arr(c.problems),bad=ps.some(p=>p.severity==='error'),wn=!bad&&ps.length;
+  return '<tr class="'+(bad?'err':wn?'wrn':'')+'"><td class="n">'+(i+1)+'</td><td><span class="badge b-'+esc(t)+'">'+esc(t||'?')+'</span></td><td>'+esc(sum)+'</td><td>'+esc(note)+'</td><td>'+(ps.length?probHtml(ps):'<span class="ok">ok</span>')+'</td><td style="white-space:nowrap"><button class="mini" data-edit="'+i+'">Edit</button> <button class="alt mini" data-up="'+i+'" title="Move up">&uarr;</button><button class="alt mini" data-down="'+i+'" title="Move down">&darr;</button> <button class="alt mini" data-rm="'+i+'" title="Delete">&times;</button></td></tr>'}).join('')||'<tr><td colspan="6" class="muted">No rules'+(typeFilter||q?' match':'')+'.</td></tr>';
+ const g=check?arr(check.general):[];
+ el('general').innerHTML=(check?'<p>'+(check.errors?'<span class="error"><b>'+plural(check.errors,'problem')+' to fix before a run</b></span>':'<span class="ok"><b>Ready to run</b></span>')+(check.warnings?' &middot; <span class="warn">'+plural(check.warnings,'warning')+'</span>':'')+' &middot; '+plural(rules.length,'rule')+(arr(check.views).length?' &middot; views: '+arr(check.views).map(esc).join(', '):'')+'</p>':'')+probHtml(g);
+ el('sources').innerHTML=check&&arr(check.sources).length?'<table class="grid"><thead><tr><th>Source</th><th>Role</th><th>Match columns</th><th>File it would use</th><th class="n">Rows</th><th>Other matches</th></tr></thead><tbody>'+arr(check.sources).map(s=>'<tr><td><b>'+esc(s.source)+'</b><br><span class="muted">'+esc(s.label)+'</span></td><td>'+esc(s.role)+'</td><td>'+arr(s.match).map(esc).join(', ')+'</td><td>'+(s.file?esc(s.file)+(s.sheet&&/\.xlsx$/i.test(s.file)?' <span class="muted">sheet '+esc(s.sheet)+'</span>':''):'<span class="'+(s.required?'error':'warn')+'">no loaded file has these columns</span>')+'</td><td class="n">'+(s.file?num(s.rows):'')+'</td><td>'+(arr(s.candidates).length>1?arr(s.candidates).slice(1).map(x=>esc(x.file)).join('<br>'):'')+'</td></tr>').join('')+'</tbody></table>':'<span class="muted">No source rules yet.</span>';
+ sync();
+}
+let timer=null;
+function changed(){render();clearTimeout(timer);timer=setTimeout(recheck,250)}
+async function recheck(){const t=textOf(rules);lastCheckText=t;try{const j=await post('/api/combine/check',{text:t});if(t!==lastCheckText)return;check=j.check;render()}catch(e){el('general').innerHTML='<p class="error">'+esc(e.message)+'</p>'}}
+function loadRules(list,saved,name){rules=list;savedText=saved;cfgName=name;check=null;rememberConfig(name);el('path').innerHTML='';fillConfigs();render();recheck()}
+async function openConfig(name){
+ try{const m=await api('/api/combine/config?name='+encodeURIComponent(name));
+  const list=arr(m.check.rules).map(r=>r.json?JSON.parse(r.json):{});
+  rules=list;cfgName=m.name;savedText=textOf(list);check=m.check;history=arr(m.history);rememberConfig(cfgName);
+  el('path').innerHTML='<code>'+esc(m.path)+'</code>'+(arr(m.readErrors).length?' <span class="error">'+arr(m.readErrors).map(e=>'line '+e.line+': '+esc(e.message)).join('; ')+' (those lines are not shown and would be dropped on save)</span>':'');
+  fillConfigs();render();renderHistory();renderAskFiles()}
+ catch(e){el('general').innerHTML='<p class="error">'+esc(e.message)+'</p>'}
+}
+function fillConfigs(){const s=el('cfg');s.innerHTML=(cfgName&&!configs.includes(cfgName)?'<option value="'+esc(cfgName)+'">'+esc(cfgName)+' (not saved yet)</option>':'')+(configs.length||cfgName?'':'<option value="">No configs yet</option>')+configs.map(n=>'<option value="'+esc(n)+'">'+esc(n)+'</option>').join('');s.value=cfgName}
+async function loadConfigs(){const m=await api('/api/combine/configs');configs=arr(m.configs).map(c=>c.name)}
+el('cfg').onchange=async()=>{const n=el('cfg').value;if(dirty()&&!confirm('Discard unsaved changes to '+(cfgName||'this config')+'?')){el('cfg').value=cfgName;return}if(n)await openConfig(n)};
+el('chips').onclick=e=>{const c=e.target.closest('.chip');if(!c)return;typeFilter=c.dataset.t;render()};
+el('find').oninput=()=>render();
+el('rules').addEventListener('click',e=>{
+ const b=e.target.closest('button');if(!b)return;
+ if(b.dataset.edit!=null){editRule(+b.dataset.edit);return}
+ if(b.dataset.up!=null){const i=+b.dataset.up;if(i>0){[rules[i-1],rules[i]]=[rules[i],rules[i-1]];changed()}return}
+ if(b.dataset.down!=null){const i=+b.dataset.down;if(i<rules.length-1){[rules[i+1],rules[i]]=[rules[i],rules[i+1]];changed()}return}
+ if(b.dataset.rm!=null){const i=+b.dataset.rm;if(confirm('Delete rule '+(i+1)+'?\n'+JSON.stringify(rules[i]))){rules.splice(i,1);changed()}}
+});
+function specHtml(t){
+ if(!guide)return '';const s=arr(guide.ruleTypes).find(x=>x.rule===t);if(!s)return '<p class="error">Unknown rule type "'+esc(t)+'". Rule types: '+ORDER.join(', ')+'.</p>';
+ return '<p><b>'+esc(t)+'</b>: '+esc(s.purpose)+'</p><table class="grid"><tbody>'+arr(s.props).map(p=>'<tr><td><code>'+esc(p.name)+'</code></td><td>'+esc(p.text)+'</td></tr>').join('')+'<tr><td><code>note</code></td><td>optional. Why the rule exists; shown in the audit.</td></tr></tbody></table><p class="muted">Example: <code>'+esc(s.example)+'</code></p>'+(t==='field'?'<p class="muted">how: '+arr(guide.how).map(h=>'<b>'+esc(h.name)+'</b> '+esc(h.text)).join('; ')+'</p>':'')+(t==='map'?'<p class="muted">clean steps: '+arr(guide.clean).map(h=>'<code>'+esc(h.name)+'</code> '+esc(h.text)).join('; ')+'</p>':'');
+}
+function editRule(i,isNew){
+ const r=rules[i];
+ modal('<h2 style="margin-top:0">'+(isNew?'New':'Edit')+' rule '+(i+1)+'</h2><textarea id="ruleText" rows="12"></textarea><div class="row"><span id="ruleNote" class="muted"></span></div><div class="row"><button id="ruleApply">Apply</button><button class="alt" id="ruleCancel">Cancel</button></div><div id="ruleSpec"></div>');
+ const ta=el('ruleText');ta.value=JSON.stringify(r,null,2);
+ const upd=()=>{try{const o=JSON.parse(ta.value);if(!o||typeof o!=='object'||Array.isArray(o))throw Error('a rule is one JSON object { ... }');el('ruleNote').className='ok';el('ruleNote').textContent='Valid JSON';el('ruleApply').disabled=false;el('ruleSpec').innerHTML=specHtml(ruleType(o))}catch(e){el('ruleNote').className='error';el('ruleNote').textContent=e.message;el('ruleApply').disabled=true}};
+ ta.oninput=upd;upd();ta.focus();
+ el('ruleApply').onclick=()=>{rules[i]=JSON.parse(ta.value);closeModal();changed()};
+ el('ruleCancel').onclick=()=>{if(isNew){rules.splice(i,1);changed()}closeModal()};
+}
+el('addType').onchange=()=>{
+ const t=el('addType').value;el('addType').value='';if(!t||!guide)return;
+ const s=arr(guide.ruleTypes).find(x=>x.rule===t);let o={rule:t};try{o=JSON.parse(s.example)}catch(e){}
+ let at=rules.length;for(let i=rules.length-1;i>=0;i--){if(ORDER.indexOf(ruleType(rules[i]))<=ORDER.indexOf(t)){at=i+1;break}if(i===0)at=0}
+ rules.splice(at,0,o);typeFilter='';render();editRule(at,true);
+};
+el('save').onclick=async()=>{
+ let name=cfgName;if(!name){name=prompt('Name for this config:','');if(!name)return}
+ try{const m=await post('/api/combine/save',{name:name,text:textOf(rules),create:!configs.includes(name)});await loadConfigs();await openConfig(m.name)}catch(e){alert(e.message)}
+};
+el('revert').onclick=()=>{if(!confirm('Undo every unsaved change?'))return;openConfig(cfgName)};
+el('new').onclick=()=>{if(dirty()&&!confirm('Discard unsaved changes?'))return;const n=prompt('Name for the new config:','');if(!n)return;if(configs.includes(n)){alert('A config named '+n+' already exists.');return}history=[];renderHistory();loadRules([{rule:'config',name:n,note:'New config'}],'',n)};
+el('dup').onclick=async()=>{const n=prompt('Name for the copy:',cfgName+' copy');if(!n)return;try{const m=await post('/api/combine/save',{name:n,text:textOf(rules),create:true});await loadConfigs();await openConfig(m.name)}catch(e){alert(e.message)}};
+el('ren').onclick=async()=>{const n=prompt('New name:',cfgName);if(!n||n===cfgName)return;try{const m=await post('/api/combine/save',{name:n,text:textOf(rules),renameFrom:cfgName});await loadConfigs();await openConfig(m.name)}catch(e){alert(e.message)}};
+el('del').onclick=async()=>{if(!confirm('Delete config '+cfgName+'? Its file moves to the history folder.'))return;try{await post('/api/combine/delete?name='+encodeURIComponent(cfgName));savedText='';rules=[];await loadConfigs();if(configs.length)await openConfig(configs[0]);else loadRules([],'','')}catch(e){alert(e.message)}};
+function download(name,text,type){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type:type}));a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},500)}
+el('dl').onclick=()=>download((cfgName||'config')+'.json',textOf(rules),'application/json');
+function renderAskFiles(){
+ const used=new Set(check?arr(check.sources).map(s=>s.file).filter(x=>x):[]);
+ el('askFiles').innerHTML=files.length?files.map(f=>'<label style="margin-right:12px"><input type="checkbox" class="askf" value="'+esc(f.token)+'"'+(used.size===0||used.has(f.originalName)?' checked':'')+'> '+esc(f.originalName)+'</label>').join(''):'no files loaded (load them on the Files page so the LLM can see their columns)';
+}
+async function buildAsk(){const tokens=[...document.querySelectorAll('.askf:checked')].map(x=>x.value);return await post('/api/combine/prompt',{name:cfgName,text:textOf(rules),request:el('ask').value,tokens:tokens,examples:el('askEx').checked})}
+async function copyText(t){try{await navigator.clipboard.writeText(t);return true}catch(e){const ta=document.createElement('textarea');ta.value=t;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();let ok=false;try{ok=document.execCommand('copy')}catch(x){}ta.remove();return ok}}
+el('copy').onclick=async()=>{el('askNote').textContent='Building...';try{const j=await buildAsk();const ok=await copyText(j.text);el('askNote').innerHTML=(ok?'<span class="ok">Copied</span> ':'<span class="error">Could not copy; use Download</span> ')+num(j.lines)+' lines, '+num(j.characters)+' characters ('+plural(j.rules,'rule')+', '+plural(j.files,'file')+'). Paste into cell A1 of a blank sheet.'}catch(e){el('askNote').innerHTML='<span class="error">'+esc(e.message)+'</span>'}};
+el('dlAsk').onclick=async()=>{try{const j=await buildAsk();download('Combine request - '+(cfgName||'config')+'.txt',j.text,'text/plain')}catch(e){alert(e.message)}};
+el('checkAns').onclick=async()=>{
+ const t=el('answer').value;if(!t.trim()){el('ansNote').textContent='Paste the answer first.';return}
+ el('ansNote').textContent='Checking...';el('ansOut').innerHTML='';answerRules=null;
+ try{const j=await post('/api/combine/answer',{text:textOf(rules),answer:t});
+  const re=arr(j.readErrors);
+  if(!arr(j.rules).length){el('ansNote').innerHTML='<span class="error">No rules could be read.</span>';el('ansOut').innerHTML=re.map(e=>'<div class="prob error">'+(e.line?'Row '+e.line+': ':'')+esc(e.message)+'</div>').join('');return}
+  answerRules=arr(j.rules).map(x=>JSON.parse(x));const c=j.check||{};
+  el('ansNote').innerHTML=plural(answerRules.length,'rule')+' read'+(re.length?', <span class="error">'+plural(re.length,'row')+' could not be read</span>':'')+' &middot; '+(c.errors?'<span class="error">'+plural(c.errors,'problem')+'</span>':'<span class="ok">no problems</span>')+(c.warnings?', <span class="warn">'+plural(c.warnings,'warning')+'</span>':'');
+  el('ansOut').innerHTML=re.map(e=>'<div class="prob error">Row '+e.line+': '+esc(e.message)+'</div>').join('')+'<h3 style="font-size:14px">Changes compared with the editor</h3>'+diffHtml(j.diff)+(c.errors||c.warnings?'<h3 style="font-size:14px">Problems in the answer</h3>'+arr(c.rules).filter(r=>arr(r.problems).length).map(r=>'<div><b>Rule '+r.index+'</b> '+esc(r.summary)+probHtml(r.problems)+'</div>').join('')+probHtml(c.general):'')+'<div class="row"><button class="go" id="useAns">Use this answer in the editor</button><span class="muted">Nothing is saved until you select Save.</span></div>';
+  el('useAns').onclick=()=>{rules=answerRules;changed();el('ansOut').innerHTML='<p class="ok">The answer is in the editor. Review the rules above, then Save.</p>';window.scrollTo({top:0,behavior:'smooth'})};
+ }catch(e){el('ansNote').innerHTML='<span class="error">'+esc(e.message)+'</span>'}
+};
+function renderHistory(){
+ el('history').innerHTML=!cfgName?'<span class="muted">Not saved yet.</span>':history.length?'<table class="grid"><thead><tr><th>Saved before</th><th class="n">Rules</th><th></th></tr></thead><tbody>'+history.map(h=>'<tr><td>'+esc(when(h.savedUtc))+(/deleted/.test(h.version)?' <span class="warn">(deleted)</span>':'')+'</td><td class="n">'+num(h.rules)+'</td><td><a href="#" data-v="'+esc(h.version)+'" data-a="view">View</a> &middot; <a href="#" data-v="'+esc(h.version)+'" data-a="cmp">Compare with the editor</a> &middot; <a href="#" data-v="'+esc(h.version)+'" data-a="restore">Restore into the editor</a></td></tr>').join('')+'</tbody></table>':'<span class="muted">No earlier versions; each Save keeps the one before it.</span>';
+}
+el('history').addEventListener('click',async e=>{
+ const a=e.target.closest('a[data-v]');if(!a)return;e.preventDefault();
+ try{const j=await api('/api/combine/version?name='+encodeURIComponent(cfgName)+'&v='+encodeURIComponent(a.dataset.v));
+  if(a.dataset.a==='view'){modal('<h2 style="margin-top:0">Version '+esc(a.dataset.v)+'</h2><pre class="json">'+esc(j.text)+'</pre>');return}
+  if(a.dataset.a==='cmp'){const d=await post('/api/combine/diff',{before:j.text,after:textOf(rules)});modal('<h2 style="margin-top:0">From version '+esc(a.dataset.v)+' to the editor</h2>'+diffHtml(d.diff));return}
+  if(!confirm('Load that version into the editor? Nothing is saved until you select Save.'))return;
+  const c=await post('/api/combine/check',{text:j.text});if(!c.check){alert('That version could not be read.');return}rules=arr(c.check.rules).map(r=>JSON.parse(r.json));changed();
+ }catch(err){alert(err.message)}
+});
+function guideHtml(g){
+ return '<h3>How it works</h3>'+arr(g.guide).map(x=>'<p>'+esc(x)+'</p>').join('')+'<h3>Rule types</h3>'+arr(g.ruleTypes).map(s=>specHtml(s.rule)).join('<hr>')+'<h3>Expressions</h3>'+arr(g.expressions).map(x=>'<p>'+esc(x)+'</p>').join('')+'<table class="grid"><tbody>'+arr(g.functions).map(f=>'<tr><td><code>'+esc(f.name)+'</code></td><td>'+esc(f.text)+'</td></tr>').join('')+'</tbody></table><h3>Cleaning steps</h3><table class="grid"><tbody>'+arr(g.clean).map(f=>'<tr><td><code>'+esc(f.name)+'</code></td><td>'+esc(f.text)+'</td></tr>').join('')+'</tbody></table>';
+}
+(async()=>{
+ try{
+  guide=await api('/api/combine/guide');el('guide').className='';el('guide').innerHTML=guideHtml(guide);
+  el('addType').innerHTML='<option value="">Add a rule...</option>'+ORDER.map(t=>'<option value="'+t+'">'+t+'</option>').join('');
+  const fm=await api('/api/combine/files');files=arr(fm.files);
+  await loadConfigs();
+  let draft=null;if(new URL(location).searchParams.get('draft')){try{draft=JSON.parse(sessionStorage.getItem('cmb.draft')||'null')}catch(e){};sessionStorage.removeItem('cmb.draft')}
+  if(draft){const c=await post('/api/combine/check',{text:draft.text});history=[];renderHistory();loadRules(arr(c.check&&c.check.rules).map(r=>JSON.parse(r.json)),'',draft.name);if(configs.includes(draft.name))el('state').innerHTML='<span class="warn">A config named '+esc(draft.name)+' exists; Save would replace it</span>';renderAskFiles();return}
+  const want=curConfig();if(configs.length){await openConfig(configs.includes(want)?want:configs[0])}else{fillConfigs();render();renderHistory();renderAskFiles();el('general').innerHTML='<p class="muted">No configs yet. Load your exports on the Files page and use Draft a config, or select New.</p>'}
+ }catch(e){el('general').innerHTML='<p class="error">'+esc(e.message)+'</p>'}
+})();
+</script>
+'@
+$script:CmbOutputHtml=@'
+<section class="card"><h2>Run a config</h2>
+<div class="row"><b>Config</b><select id="cfg"></select><a class="btn alt" id="editLink" href="/combine/rules">Edit rules</a></div>
+<div id="setup" class="muted">Loading...</div>
+<div class="row"><button class="go" id="run" disabled>Combine</button><span id="runNote" class="muted"></span></div>
+</section>
+<section class="card"><h2>Result</h2><div id="result"><span class="muted">Loading...</span></div></section>
+<section class="card"><h2>Previous runs</h2><p class="muted">Every run, newest first. Each workbook is saved in <code id="folder"></code> with the patient sheet, one sheet per view, and audit sheets: every rule's effect, the files used (with their SHA-256), conflicts, key conflicts, excluded patients, the source of every value, and the exact config.</p><div id="history"><span class="muted">Loading...</span></div></section>
+<script>
+let configs=[],setup=null,current=null,history=[],timer=null,choices={};
+function busy(){return !!current&&(current.state==='Starting'||current.state==='Running')}
+function sync(){el('run').disabled=busy()||!setup||setup.errors>0||!!arr(setup.readErrors).length;el('run').textContent=busy()?'Combining...':'Combine'}
+async function loadSetup(){
+ const n=el('cfg').value;rememberConfig(n);el('editLink').href='/combine/rules?config='+encodeURIComponent(n);if(!n){setup=null;el('setup').innerHTML='<p class="muted">No configs yet; make one on the <a href="/combine/rules">Rules</a> page.</p>';sync();return}
+ try{setup=await api('/api/combine/setup?name='+encodeURIComponent(n)+'&choices='+encodeURIComponent(JSON.stringify(choices)));renderSetup()}catch(e){setup=null;el('setup').innerHTML='<p class="error">'+esc(e.message)+'</p>'}sync();
+}
+function renderSetup(){
+ const s=setup;let h='<table class="grid"><thead><tr><th>Source</th><th>Role</th><th>File</th><th class="n">Rows</th></tr></thead><tbody>'+arr(s.sources).map(x=>'<tr><td><b>'+esc(x.source)+'</b><br><span class="muted">'+esc(x.label)+'</span></td><td>'+esc(x.role)+(x.required?'':' <span class="muted">(optional)</span>')+'</td><td>'+(arr(x.candidates).length?'<select data-src="'+esc(x.source)+'">'+arr(x.candidates).map(c=>'<option value="'+esc(c.value)+'"'+(c.value===x.chosen?' selected':'')+'>'+esc(c.file)+(/\.xlsx$/i.test(c.file)?' - '+esc(c.sheet):'')+' (loaded '+esc(when(c.loadedUtc))+')</option>').join('')+'</select>':'<span class="'+(x.required?'error':'warn')+'">No loaded file has the columns '+arr(x.match).map(esc).join(', ')+'.</span> <a href="/combine">Load it</a>')+'</td><td class="n">'+(x.chosen?num(x.rows):'')+'</td></tr>').join('')+'</tbody></table>';
+ if(arr(s.readErrors).length)h+='<p class="error">The config file has lines that cannot be read; fix them on the Rules page.</p>';
+ if(s.errors)h+='<p class="error"><b>'+plural(s.errors,'problem')+' to fix first</b> (on the <a href="/combine/rules?config='+encodeURIComponent(s.name)+'">Rules</a> page):</p>'+arr(s.problems).slice(0,8).map(p=>'<div class="prob error">'+(p.row?'Rule '+p.row+': ':'')+esc(p.message)+'</div>').join('');
+ else h+='<p class="ok">Ready: '+plural(arr(s.fields).length,'field')+(arr(s.views).length?', views '+arr(s.views).map(esc).join(', '):'')+(s.warnings?' <span class="warn">('+plural(s.warnings,'warning')+'; see Rules)</span>':'')+'</p>';
+ el('setup').innerHTML=h;
+}
+el('setup').addEventListener('change',e=>{const s=e.target.closest('select[data-src]');if(!s)return;choices[s.dataset.src.toLowerCase()]=s.value;loadSetup()});
+el('cfg').onchange=()=>{choices={};loadSetup()};
+function tile(l,v,n){return '<div class="tile">'+esc(l)+'<b>'+v+'</b>'+(n?'<small>'+esc(n)+'</small>':'')+'</div>'}
+function table(headers,rows,total,groups){return '<div class="scroll"><table class="grid wide"><thead><tr>'+arr(headers).map((h,i)=>'<th'+(groups!=null&&i>=groups?' class="n"':'')+'>'+esc(h)+'</th>').join('')+'</tr></thead><tbody>'+arr(rows).map(r=>'<tr>'+arr(r).map((c,i)=>'<td'+(groups!=null&&i>=groups?' class="n"':'')+'>'+esc(c)+'</td>').join('')+'</tr>').join('')+(total?'<tr>'+arr(total).map((c,i)=>'<td'+(groups!=null&&i>=groups?' class="n"':'')+'><b>'+esc(c)+'</b></td>').join('')+'</tr>':'')+'</tbody></table></div>'}
+function showResult(o){
+ current=o;
+ if(!o){el('result').innerHTML='<span class="muted">No runs yet.</span>';sync();return}
+ if(busy()){el('result').innerHTML='<p>Combining '+esc(o.configName)+'... '+o.percent+'%</p><div class="progress"><span style="width:'+Math.max(0,Math.min(100,o.percent))+'%"></span></div><span class="muted">'+esc(o.stage)+'</span>';sync();return}
+ if(o.state==='Failed'){el('result').innerHTML='<p class="error">The run failed: '+esc(o.errorSummary)+'</p><span class="muted">'+esc(o.configName)+' &middot; requested '+esc(when(o.requestedUtc))+'</span>';sync();return}
+ const r=o.result||{};
+ let h='<div class="row"><b>'+esc(o.configName)+'</b><span class="muted">built '+esc(when(o.completedUtc))+(o.seconds!=null?' in '+o.seconds+' s':'')+' &middot; today() = '+esc(r.asOf)+'</span>'+(o.outputUrl?'<a class="btn" href="'+esc(o.outputUrl)+'">Download workbook</a>':'<span class="warn">'+esc(o.outputError)+'</span>')+'</div>';
+ h+='<div class="tiles">'+tile('Patients',num(r.patients),r.matched!==r.patients?num(r.matched)+' before patient filters':'')+tile('Rows used',num(r.records),'from '+plural(arr(r.sources).filter(s=>s.role==='patients').length,'source'))+tile('Rows without a key',num(r.noKey),'left out')+tile('Conflicts',num(r.conflicts),'patients where sources disagree')+tile('Key conflicts',num(r.keyConflicts),'joins refused')+tile('Excluded',num(r.excluded),'by patient filters')+'</div>';
+ h+=(o.outputFile?'<p class="muted">Saved as <code>'+esc(o.outputFile)+'</code></p>':'');
+ h+='<h3>'+esc(r.sheet||'Patients')+' <span class="muted">(first '+arr(r.preview).length+' of '+num(r.patients)+')</span></h3>'+table(r.headers,r.preview);
+ arr(r.views).forEach(v=>{h+='<h3>'+esc(v.name)+' <span class="muted">('+plural(v.totalRows,'group')+', '+plural(v.patients,'patient')+(v.totalRows>arr(v.rows).length?'; first '+arr(v.rows).length+' shown':'')+')</span></h3>'+table(v.headers,v.rows,v.total,v.groupCount)});
+ h+='<h3>What each rule did</h3><div class="scroll"><table class="grid"><thead><tr><th>#</th><th>Rule</th><th>What it does</th><th>Effect in this run</th></tr></thead><tbody>'+arr(r.effects).map(e=>'<tr><td class="n">'+(e.index||'')+'</td><td><span class="badge b-'+esc(String(e.type).split(' ')[0])+'">'+esc(e.type)+'</span></td><td>'+esc(e.summary)+(e.note?'<br><span class="muted">'+esc(e.note)+'</span>':'')+'</td><td>'+esc(e.effect)+(e.problems?'<div class="prob warn">'+esc(e.problems)+'</div>':'')+'</td></tr>').join('')+'</tbody></table></div>';
+ h+='<h3>Sources</h3>'+table(['Source','Role','File','Sheet','Rows read','Removed by filters','Without key','Rows used','Patients'],arr(r.sources).map(s=>[s.source,s.role,s.file,s.sheet,num(s.rowsRead),num(s.filtered),num(s.noKey),num(s.rowsUsed),s.role==='patients'?num(s.patients):'']));
+ if(arr(r.conflictSample).length)h+='<h3>Conflicts <span class="muted">(first '+arr(r.conflictSample).length+' of '+num(r.conflictRows)+'; all are on the Audit - Conflicts sheet)</span></h3>'+table(['Patient','Field','Chosen','From','Other values [source]'],arr(r.conflictSample).map(c=>[c.patient,c.field,c.chosen,c.from,c.others]));
+ el('result').innerHTML=h;sync();
+}
+function historyHtml(list){
+ if(!list.length)return '<span class="muted">None yet.</span>';
+ return '<table class="grid"><thead><tr><th>Built</th><th>Config</th><th>Files</th><th class="n">Patients</th><th></th></tr></thead><tbody>'+list.map(r=>'<tr><td>'+esc(when(r.completedUtc||r.requestedUtc))+(current&&current.runId===r.runId?' <span class="muted">(shown above)</span>':'')+'</td><td>'+esc(r.configName)+'</td><td>'+arr(r.assignments).map(a=>esc(a.source)+': '+esc(a.file)).join('<br>')+'</td><td class="n">'+num(r.patients)+'</td><td>'+(r.state==='Completed'?'<a href="#" data-view="'+esc(r.runId)+'">View</a>'+(r.outputUrl?' &middot; <a href="'+esc(r.outputUrl)+'">Workbook</a>':' &middot; <span class="warn">workbook missing</span>'):'<span class="error">Failed: '+esc(r.errorSummary)+'</span>')+'</td></tr>').join('')+'</tbody></table>';
+}
+el('history').addEventListener('click',async e=>{const a=e.target.closest('a[data-view]');if(!a)return;e.preventDefault();if(busy())return;try{showResult(await api('/api/combine/run?id='+encodeURIComponent(a.dataset.view)));el('history').innerHTML=historyHtml(history);el('result').scrollIntoView({behavior:'smooth'})}catch(err){el('result').innerHTML='<p class="error">'+esc(err.message)+'</p>'}});
+let pollErrors=0;
+function startPoll(id){if(timer)clearInterval(timer);pollErrors=0;timer=setInterval(async()=>{try{const o=await api('/api/combine/run?id='+encodeURIComponent(id));pollErrors=0;showResult(o);if(!busy()){clearInterval(timer);timer=null;await loadPage(false)}}catch(e){if(++pollErrors<5)return;clearInterval(timer);timer=null;el('result').innerHTML='<p class="error">'+esc(e.message)+'</p>'}},1500)}
+el('run').onclick=async()=>{if(el('run').disabled)return;el('run').disabled=true;try{const o=await post('/api/combine/run',{name:el('cfg').value,choices:choices});showResult(o);if(busy())startPoll(o.runId);else await loadPage(false)}catch(e){el('runNote').innerHTML='<span class="error">'+esc(e.message)+'</span>';sync()}};
+async function loadPage(first){
+ const m=await api('/api/combine/output');history=arr(m.history);el('folder').textContent=m.folder;
+ if(first){configs=arr(m.configs);const want=curConfig();el('cfg').innerHTML=configs.length?configs.map(n=>'<option value="'+esc(n)+'">'+esc(n)+'</option>').join(''):'<option value="">No configs yet</option>';el('cfg').value=configs.includes(want)?want:(configs[0]||'');await loadSetup();showResult(m.latest);if(busy())startPoll(m.latest.runId)}
+ el('history').innerHTML=historyHtml(history);
+}
+loadPage(true).catch(e=>{el('result').innerHTML='<p class="error">'+esc(e.message)+'</p>'});
+</script>
+'@
 # --- Draft 5.3: unattended runs - heartbeat, interrupted-worker recovery, sleep deferral ---
 $script:HeartbeatSeconds=15;$script:LastHeartbeat=[DateTime]::MinValue;$script:StallChecks=60;$script:MaxJobAttempts=2;$script:PdfTimeoutSeconds=180
 $script:JobWatch=@{};$script:KeepAwake=$false;$script:KeepAwakeBroken=$false;$script:StartupStaleMinutes=15
@@ -2859,4 +5159,4 @@ function Invoke-AnalysisJob([string]$JobId){$path=Join-Path $script:Paths.State 
 function Invoke-NextPendingJob{$jobs=@(Get-Jobs);if(@($jobs|Where-Object{$_.state -in @('Starting','Running')}).Count -gt 0){return};$j=@($jobs|Where-Object{$_.state -eq 'Prepared' -or $_.state -eq 'Queued'}|Sort-Object queuedUtc|Select-Object -First 1);if($j.Count -ne 1){return};$job=$j[0];$job.state='Starting';$job.percent=1;$attempt=1+[int](Get-P $job 'attempts' 0);Set-P $job 'attempts' $attempt;$job.stage=$(if($attempt -gt 1){'Launching background analysis worker (attempt '+$attempt+' of '+$script:MaxJobAttempts+')'}else{'Launching background analysis worker'});$jobPath=Join-Path $script:Paths.State ('job-'+$job.jobId+'.json');Save-JsonAtomic $jobPath $job;$exe=(Get-Process -Id $PID).Path;$out=Join-Path $script:Paths.Logs ('worker-'+$job.jobId+'.out.log');$err=Join-Path $script:Paths.Logs ('worker-'+$job.jobId+'.err.log');try{$quotedScript='"'+$PSCommandPath+'"';$p=Start-Process -FilePath $exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$quotedScript,'-RunJobId',$job.jobId,'-NoBrowser') -RedirectStandardOutput $out -RedirectStandardError $err -WindowStyle Hidden -PassThru;Set-P $job 'workerPid' $p.Id;Save-JsonAtomic $jobPath $job}catch{$job.state='Failed';$job.stage='Worker launch failed';Set-P $job 'errorSummary' $_.Exception.Message;Save-JsonAtomic $jobPath $job}};function Invoke-PendingJobs{while(@(Get-Jobs|Where-Object{$_.state -eq 'Prepared' -or $_.state -eq 'Queued'}).Count -gt 0){Invoke-NextPendingJob;Start-Sleep -Milliseconds 500}}
 function Send-JobOutput($Context,[string]$JobId,[string]$Type){if($JobId -notmatch '^[a-f0-9]{32}$'){throw 'Invalid job ID.'};$job=Json (Join-Path $script:Paths.State ('job-'+$JobId+'.json'));if(!$job){throw 'Job not found.'};$path=Resolve-JobOutputPath $job $Type;if(!$path){throw 'Output is not available; the file may have been moved or deleted.'};$bytes=[IO.File]::ReadAllBytes($path);$Context.Response.StatusCode=200;$Context.Response.ContentType=$(if($Type -eq 'pdf'){'application/pdf'}else{'text/html; charset=utf-8'});$Context.Response.Headers['Content-Disposition']='inline; filename="'+[IO.Path]::GetFileName($path)+'"';$Context.Response.ContentLength64=$bytes.Length;$Context.Response.Headers['Cache-Control']='no-store';$Context.Response.OutputStream.Write($bytes,0,$bytes.Length);$Context.Response.Close()}
 function Initialize-AnalysisJobRecovery{$script:RunNext=$false;foreach($f in Get-ChildItem $script:Paths.State -Filter 'job-*.json' -File -ErrorAction SilentlyContinue){$j=Json $f.FullName;if(!$j){continue};$state=[string](Get-P $j 'state' '');$err=[string](Get-P $j 'errorSummary' '');if($state -in @('Starting','Running')){if(Test-WorkerAlive $j){$age=([DateTime]::UtcNow-(Get-Item -LiteralPath $f.FullName).LastWriteTimeUtc).TotalMinutes;if($age -lt $script:StartupStaleMinutes){continue};Stop-WorkerProcess ([int](Get-P $j 'workerPid' 0));Reset-InterruptedJob $j $f.FullName ('it had made no progress for '+[int]$age+' minutes when the server restarted')}else{Reset-InterruptedJob $j $f.FullName 'the server was restarted while the report was running'}}elseif($state -eq 'Failed' -and $err -like '*ConvertTo-NumberValue*'){$j.state='Prepared';$j.percent=0;$j.stage='Recovered after Draft 4.2 helper/queue repair';Set-P $j 'errorSummary' '';Save-JsonAtomic $f.FullName $j}}}
-if($RunJobId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-AnalysisJob $RunJobId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};if($RunOverviewId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-OverviewRun $RunOverviewId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};if($RunNewListId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-NewListRun $RunNewListId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};if($RunPocId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-PocRun $RunPocId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};try{Initialize-AppFolders;Lock;Initialize-AppConfiguration;Test-ImportExcelModule;Initialize-AnalysisJobRecovery;Initialize-ProviderIndexes;Serve}catch{$detail=$_.Exception.Message+' | '+$_.ScriptStackTrace;try{Log 'APPLICATION' 'FAILED' $detail}catch{};Write-Error $detail;exit 1}finally{if($script:Listener){try{$script:Listener.Stop();$script:Listener.Close()}catch{}};if($script:Mutex){try{$script:Mutex.ReleaseMutex()}catch{};$script:Mutex.Dispose()};try{Log 'SERVER_STOP'}catch{}}
+if($RunJobId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-AnalysisJob $RunJobId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};if($RunOverviewId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-OverviewRun $RunOverviewId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};if($RunNewListId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-NewListRun $RunNewListId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};if($RunPocId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-PocRun $RunPocId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};if($RunCombineId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-CmbRun $RunCombineId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};try{Initialize-AppFolders;Lock;Initialize-AppConfiguration;Test-ImportExcelModule;Initialize-AnalysisJobRecovery;Initialize-ProviderIndexes;Serve}catch{$detail=$_.Exception.Message+' | '+$_.ScriptStackTrace;try{Log 'APPLICATION' 'FAILED' $detail}catch{};Write-Error $detail;exit 1}finally{if($script:Listener){try{$script:Listener.Stop();$script:Listener.Close()}catch{}};if($script:Mutex){try{$script:Mutex.ReleaseMutex()}catch{};$script:Mutex.Dispose()};try{Log 'SERVER_STOP'}catch{}}
