@@ -2785,10 +2785,10 @@ $script:CmbAggs=@('count','sum','avg','min','max','countDistinct','percent')
 $script:CmbBuiltins=@('_key','_sources','_rows','_matchedBy')
 $script:CmbRuleSpec=[ordered]@{
  config=[ordered]@{purpose='Settings for the whole config. Exactly one, normally the first row.';props=[ordered]@{name='required. Name of the config; also its file name.';description='optional. What the config produces.';asOf='optional. Date (YYYY-MM-DD) that today() returns, so a rerun gives the same answer. Default: the day the output is built.';sheet='optional. Name of the patient sheet in the output workbook. Default "Patients".';lineage='optional. true (default) adds an audit sheet showing which source supplied every value; false leaves it out for very large outputs.';booleans='optional. How true/false values are written: "Y/N" (default), "Yes/No", "TRUE/FALSE" or "1/0".'};example='{"rule":"config","name":"Panel reconciliation","description":"One row per attributed patient from the four registry exports","asOf":"2026-09-30","note":"asOf fixed so reruns match the September reports"}'}
- source=[ordered]@{purpose='Says which loaded file is which export. The order of source rules is the default priority: the first is the most trusted.';props=[ordered]@{source='required. Short id used by the other rules: letters, digits and underscore, e.g. "epic".';label='optional. Friendly name shown in the audit.';match='required. Array of column headers the file must contain (case and extra spaces are ignored). Choose headers that tell this export apart from the others.';fileName='optional. File name pattern with * wildcards, e.g. "*Panel*", for when several loaded files have the match columns.';sheet='optional. Worksheet name (.xlsx). Default: the first sheet with the match columns.';headerRow='optional. Row number of the column headers. Default: found automatically.';role='optional. "patients" (default): each row is about a patient. "lookup": a reference table (for example provider to location to region) used with lookup().';key='lookup sources only: the field (from this source''s map rules) that lookup() matches on.';required='optional. true (default) stops the run when no file matches; false skips the source.'};example='{"rule":"source","source":"epic","label":"Epic attributed panel","match":["MRN","Patient Name","PCP","Last Office Visit"],"note":"Most trusted for demographics and PCP"}'}
+ source=[ordered]@{purpose='Says which loaded file is which export. The order of source rules is the default priority: the first is the most trusted.';props=[ordered]@{source='required. Short id used by the other rules: letters, digits and underscore, e.g. "epic".';label='optional. Friendly name shown in the audit.';match='required. Array of column headers the file must contain (case and extra spaces are ignored). Choose headers that tell this export apart from the others.';fileName='optional. File name pattern with * wildcards, e.g. "*Panel*", for when several loaded files have the match columns.';sheet='optional. Worksheet name (.xlsx). Default: the first sheet with the match columns.';headerRow='optional. Row number of the column headers. Default: found automatically.';role='optional. "patients" (default): each row is about a patient. "lookup": a reference table (for example provider to location to region) used with lookup().';key='lookup sources only: the field (from this source''s map rules) that lookup() matches on.';required='optional. true (default) stops the run when no file matches; false skips the source.';unique='optional. Array of fields; rows whose combination of these values appears more than once in this source are left out (and counted), e.g. ["NPI","MemberID"] when a listing must not repeat a patient.';read='optional. "values" (default) reads what the cells hold; "text" (.xlsx) reads what Excel shows (rounded numbers, percent signs, formatted dates), as the provider reports do.'};example='{"rule":"source","source":"epic","label":"Epic attributed panel","match":["MRN","Patient Name","PCP","Last Office Visit"],"note":"Most trusted for demographics and PCP"}'}
  map=[ordered]@{purpose='Copies a source column (or a constant, or an expression) into a named field, cleaning and typing it. A field name used by several sources means the same thing in each, and is combined across them.';props=[ordered]@{source='required. The source id.';field='required. Field name to fill: letters, digits and underscore, starting with a letter.';column='The column header to read. Exactly one of column, columns, value, expr or special is required.';columns='Array of headers whose non-blank values are joined with sep.';sep='Separator for columns. Default one space.';value='A constant for every row, e.g. "Epic" or "2026-09-30".';expr='An expression over this source''s columns and the fields mapped above it.';special='"fileName", "fileDate" (the file''s modified date), "rowNumber" (row number in the file) or "sourceLabel".';clean='optional. Array of cleaning steps applied in order (see cleaningSteps).';type='optional. "text" (default), "number", "date" or "bool". Values that cannot be read as the type become blank and are counted in the audit.'};example='{"rule":"map","source":"epic","field":"MRN","column":"MRN","clean":["digits","stripLeadingZeros"],"note":"Claims file drops leading zeros, so strip them everywhere"}'}
  filter=[ordered]@{purpose='Drops rows of a source (when it names a source; applied after that source''s map rules) or drops patients (no source; applied after the derive rules).';props=[ordered]@{source='optional. With a source: filters that source''s rows. Without: filters patients.';keep='Expression; rows or patients where it is true are kept. Use keep or drop, not both.';drop='Expression; rows or patients where it is true are removed.'};example='{"rule":"filter","source":"epic","drop":"[Patient Status] in (''Deceased'',''Inactive'')","note":"Only active patients"}'}
- key=[ordered]@{purpose='Decides which rows are the same patient. Rows sharing a key value are joined. Key rules are tried in order; a later key never joins two patients that already have different values of an earlier key (that is reported as a key conflict instead). Key values compare ignoring case and extra spaces; clean them in the map rules so the formats agree. Rows with no usable key are left out and counted.';props=[ordered]@{fields='required. Array of fields that together identify a patient, e.g. ["MRN"] or ["LastName","FirstName","DOB"]. All must be non-blank for a row to use this key.';sources='optional. Array of source ids this key applies to. Default: every patient source that maps all the fields.'};example='{"rule":"key","fields":["MRN"],"note":"MRN is in every export"}'}
+ key=[ordered]@{purpose='Decides which rows are the same patient. Rows sharing a key value are joined. Key rules are tried in order; a later key never joins two patients that already have different values of an earlier key (that is reported as a key conflict instead). Key values compare ignoring case and extra spaces; clean them in the map rules so the formats agree. Rows with no usable key are left out and counted.';props=[ordered]@{fields='required. Array of fields that together identify a patient, e.g. ["MRN"] or ["LastName","FirstName","DOB"]. All must be non-blank for a row to use this key.';sources='optional. Array of source ids this key applies to. Default: every patient source that maps all the fields.';match='optional. "exact" (default) or "prefix": a row of these sources joins the one row of the "against" sources whose value begins with its own (with several fields, all but the last must be equal). Several such rows leave it out as ambiguous; none leaves it on its own.';against='prefix only: array of source ids to search. Default: the other patient sources that map the fields.'};example='{"rule":"key","fields":["MRN"],"note":"MRN is in every export"}'}
  field=[ordered]@{purpose='Combines one field across all of a patient''s rows. A mapped field with no field rule uses how "priority".';props=[ordered]@{field='required. Name of the combined field.';of='optional. The mapped field to combine. Default: the same name. Lets one mapped field give several combined fields, e.g. ClaimsPCP from PCP with from ["claims"].';how='optional. priority (default), latest, earliest, max, min, sum, avg, count, countDistinct, list, mostCommon, any, all or exists (see howMethods).';from='optional. Array of source ids to use, in priority order. Default: every source that maps the field, in source order.';by='latest and earliest: the date field that orders the rows; it must be mapped in those sources.';sep='list: separator. Default "; ".';conflicts='optional. "report" (default) lists rows whose value differs from the chosen one on the Conflicts audit sheet; "ignore" does not.';type='optional. Converts the combined value: "text", "number", "date" or "bool".'};example='{"rule":"field","field":"PCP","how":"latest","by":"AttributionDate","from":["claims","epic"],"note":"Use whichever source attributed the patient most recently"}'}
  derive=[ordered]@{purpose='Computes a new field for every patient with an expression, after the field rules, in the order listed. It can use any combined field, earlier derived fields and the built-in fields.';props=[ordered]@{field='required. Name of the new field.';expr='required. The expression.';type='optional. Converts the result: "text", "number", "date" or "bool".'};example='{"rule":"derive","field":"AWVDue","expr":"LastAWV is blank or daysBetween(LastAWV, today()) > 365","type":"bool","note":"Due when none in the past year"}'}
  lookup=[ordered]@{purpose='A small translation table written in the config, used with lookup(''table'', value). For a table kept in a file, use a source with role "lookup" instead.';props=[ordered]@{table='required. Table name.';values='required. Object of "input":"output" pairs; inputs match ignoring case.';default='optional. Value when the input is not in the table. Default blank.'};example='{"rule":"lookup","table":"Region","values":{"Middletown":"Hudson Valley","Monroe":"Hudson Valley","Mt Kisco":"Westchester"},"note":"Location to region"}'}
@@ -2801,7 +2801,7 @@ $script:CmbHowText=[ordered]@{priority='the first non-blank value, trying source
 $script:CmbCleanText=[ordered]@{
  'trim'='remove spaces at both ends (always done first)';'upper'='capitals';'lower'='lower case';'title'='Title Case';'collapseSpaces'='runs of spaces become one space'
  'digits'='keep only 0-9';'alnum'='keep only letters and digits';'stripLeadingZeros'='remove leading zeros';'pad:N'='left-pad with zeros to N characters, e.g. "pad:9"';'left:N'='keep the first N characters'
- 'removeBracketId'='drop a trailing [id], e.g. "SMITH, JOHN [12345]" becomes "SMITH, JOHN"';'nameKey'='a person''s name as "LAST, FIRST" in capitals (reads "First Last" and "Last, First Middle"; drops MD, DO, NP, PA-C and similar)'
+ 'fillDown'='a blank cell takes the value above it (reports that name a group only on its first row)';'removeBracketId'='drop a trailing [id], e.g. "SMITH, JOHN [12345]" becomes "SMITH, JOHN"';'nameKey'='a person''s name as "LAST, FIRST" in capitals (reads "First Last" and "Last, First Middle"; drops MD, DO, NP, PA-C and similar)'
  'blankIf:TEXT'='treat TEXT as blank, e.g. "blankIf:N/A"';'{"replace":"regex","with":"text"}'='regular expression replace';'{"extract":"regex"}'='keep the first group of the match (or the whole match); no match gives blank'
  '{"map":{"from":"to"},"else":"keep"}'='translate values (ignoring case); "else" is "keep" (default), "blank", or a value to use instead'
 }
@@ -2813,7 +2813,8 @@ $script:CmbFunctionText=[ordered]@{
  'today()'='the config''s asOf date, or the day the output is built';'year(d), month(d), day(d)'='parts of a date';'addDays(d, n), addMonths(d, n), addYears(d, n)'='date arithmetic'
  'daysBetween(a, b), monthsBetween(a, b), yearsBetween(a, b)'='whole days, months or years from a to b; yearsBetween(DOB, today()) is the age'
  'format(x, ''pattern'')'='a date or number as text, e.g. format(LastVisit, ''yyyy-MM'') or format(Score, ''0.0'')'
- 'lookup(''table'', x)'='the value for x in a lookup rule''s table';'lookup(''sourceId'', x, ''Field'')'='a field of the row of a lookup source whose key equals x'
+ 'join(sep, a, b, ...)'='the non-blank values joined with sep, e.g. join('', '', A, B)';'latestDate(x, onOrBefore)'='the latest date in a list of dates in text (separated by commas), optionally only dates on or before onOrBefore';'countItems(x, sep, ignore)'='how many non-blank items x has when split by sep (default comma), not counting items equal to ignore'
+ 'lookup(''table'', x)'='the value for x in a lookup rule''s table';'lookup(''sourceId'', x, ''Field'')'='a field of the row of a lookup source whose key equals x';'lookup(''profile:Export'', name, ''npi'')'='Provider Analysis profiles: the provider whose saved profile uses this name in that source (any source key: Export, PtListQuality, DiabetesScorecard, SerialScheduling, RiskPopulationOutreach, HR-CRH, HR-RIVPHNYCMM); fields npi, provider, location, riskPool';'lookup(''profiles'', npi, ''provider'')'='a saved profile by NPI; fields provider, location, riskPool'
 }
 $script:CmbGuide=@(
  'A config is a list of rules (JSON objects) that turns several spreadsheet (.xlsx) or text (.csv, .txt) exports into one row per patient, plus optional summary views. The source files are never changed.'
@@ -2934,6 +2935,16 @@ class CmbRt{
  static [object] Mul([object]$a,[object]$b){$x=[CmbRt]::Num($a);$y=[CmbRt]::Num($b);if($null -eq $x -or $null -eq $y){return $null};return ([double]$x*[double]$y)}
  static [object] Div([object]$a,[object]$b){$x=[CmbRt]::Num($a);$y=[CmbRt]::Num($b);if($null -eq $x -or $null -eq $y -or [double]$y -eq 0){return $null};return ([double]$x/[double]$y)}
  static [object] Neg([object]$a){$x=[CmbRt]::Num($a);if($null -eq $x){return $null};return -[double]$x}
+ static [object] JoinList([object]$sep,[object[]]$list){$p=[Collections.Generic.List[string]]::new();foreach($x in $list){if(-not [CmbRt]::IsBlank($x)){$p.Add([CmbRt]::Text($x).Trim())}};if($p.Count -eq 0){return $null};return [string]::Join([CmbRt]::Text($sep),$p)}
+ static [object] LatestDate([object]$text,[object]$upTo){
+  if([CmbRt]::IsBlank($text)){return $null};$lim=$null;if(-not [CmbRt]::IsBlank($upTo)){$lim=[CmbRt]::Date($upTo)};$best=$null
+  foreach($part in [CmbRt]::Text($text).Split([char[]]@([char]',',[char]';'))){$d=[CmbRt]::Date($part.Trim());if($null -eq $d){continue};if($null -ne $lim -and [DateTime]$d -gt [DateTime]$lim){continue};if($null -eq $best -or [DateTime]$d -gt [DateTime]$best){$best=$d}}
+  return $best
+ }
+ static [object] CountItems([object]$text,[object]$sep,[object]$ignore){
+  if([CmbRt]::IsBlank($text)){return [double]0};$sp=[CmbRt]::Text($sep);if($sp.Length -eq 0){$sp=','};$ig=[CmbRt]::Text($ignore).Trim();$n=0
+  foreach($part in [CmbRt]::Text($text).Split([string[]]@($sp),[StringSplitOptions]::None)){$t=$part.Trim();if($t.Length -gt 0 -and ($ig.Length -eq 0 -or $t -ne $ig)){$n++}};return [double]$n
+ }
  static [object] Coalesce([object[]]$list){foreach($x in $list){if(-not [CmbRt]::IsBlank($x)){return $x}};return $null}
  static [object] Pick([object[]]$list,[int]$sign){
   $best=$null;foreach($x in $list){if([CmbRt]::IsBlank($x)){continue};if($null -eq $best){$best=$x;continue};$c=[CmbRt]::Cmp($x,$best);if($null -ne $c -and [int]$c*$sign -gt 0){$best=$x}};return $best
@@ -3205,7 +3216,7 @@ $script:CmbFunctions=@{
  'if'=@(3,3);'coalesce'=@(1,20);'isblank'=@(1,1);'upper'=@(1,1);'lower'=@(1,1);'trim'=@(1,1);'len'=@(1,1);'left'=@(2,2);'right'=@(2,2);'mid'=@(3,3)
  'contains'=@(2,2);'startswith'=@(2,2);'endswith'=@(2,2);'matches'=@(2,2);'replace'=@(3,3);'extract'=@(2,2);'number'=@(1,1);'date'=@(1,1);'text'=@(1,1)
  'round'=@(1,2);'abs'=@(1,1);'min'=@(1,20);'max'=@(1,20);'today'=@(0,0);'year'=@(1,1);'month'=@(1,1);'day'=@(1,1);'adddays'=@(2,2);'addmonths'=@(2,2);'addyears'=@(2,2)
- 'daysbetween'=@(2,2);'monthsbetween'=@(2,2);'yearsbetween'=@(2,2);'format'=@(2,2);'lookup'=@(2,3)
+ 'daysbetween'=@(2,2);'monthsbetween'=@(2,2);'yearsbetween'=@(2,2);'format'=@(2,2);'lookup'=@(2,3);'join'=@(2,60);'latestdate'=@(1,2);'countitems'=@(1,3)
 }
 $script:CmbBoolFunctions=@('isblank','contains','startswith','endswith','matches')
 function Get-CmbTokens([string]$Text){
@@ -3345,6 +3356,9 @@ function ConvertTo-CmbCallCode($Node,$Ctx){
  $codes=@(foreach($x in $a){'('+(ConvertTo-CmbCode $x $Ctx).code+')'})
  switch($name){
   'coalesce'{return @{code=('[CmbRt]::Coalesce([object[]]@('+($codes -join ',')+'))');bool=$false}}
+  'join'{return @{code=('[CmbRt]::JoinList('+$codes[0]+',[object[]]@('+(@($codes|Select-Object -Skip 1) -join ',')+'))');bool=$false}}
+  'latestdate'{$u='$null';if($codes.Count -gt 1){$u=$codes[1]};return @{code=('[CmbRt]::LatestDate('+$codes[0]+','+$u+')');bool=$false}}
+  'countitems'{$sp=(Add-CmbConst $Ctx ',');$ig='$null';if($codes.Count -gt 1){$sp=$codes[1]};if($codes.Count -gt 2){$ig=$codes[2]};return @{code=('[CmbRt]::CountItems('+$codes[0]+','+$sp+','+$ig+')');bool=$false}}
   'min'{return @{code=('[CmbRt]::Min([object[]]@('+($codes -join ',')+'))');bool=$false}}
   'max'{return @{code=('[CmbRt]::Max([object[]]@('+($codes -join ',')+'))');bool=$false}}
   'isblank'{return @{code=('[CmbRt]::IsBlank('+$codes[0]+')');bool=$true}}
@@ -3431,7 +3445,7 @@ function Get-CmbUniqueHeaders([string[]]$Headers){
  }
  return ,$out
 }
-function Read-CmbSheets([string]$Path,[string]$OnlySheet='',[int]$HeaderRow=0,[string[]]$Want=$null,[string]$TextName=''){
+function Read-CmbSheets([string]$Path,[string]$OnlySheet='',[int]$HeaderRow=0,[string[]]$Want=$null,[string]$TextName='',[switch]$CellText){
  # Every non-empty table in a file as @{name;headerRow;headers;columns (header -> string[]);rows}. Want limits which columns are read
  # (header keys); HeaderRow (1-based) overrides the detected header row. Text files have one table named after the file.
  $ext=[IO.Path]::GetExtension($Path).ToLowerInvariant();$out=[Collections.Generic.List[object]]::new()
@@ -3448,7 +3462,7 @@ function Read-CmbSheets([string]$Path,[string]$OnlySheet='',[int]$HeaderRow=0,[s
     $headers=Get-CmbUniqueHeaders ([string[]]@(foreach($v in $grid[$h]){if($v -is [DateTime]){([DateTime]$v).ToString('yyyy-MM-dd')}else{[string]$v}}))
     $width=$headers.Count;while($width -gt 0 -and [string]$grid[$h][$width-1] -eq ''){$width--};if($width -eq 0){continue}
     $cols=[ordered]@{};$first=$h+2
-    for($c=0;$c -lt $width;$c++){$name=$headers[$c];if($null -ne $wantSet -and !$wantSet.ContainsKey((ConvertTo-CmbHeaderKey $name))){continue};if($last -ge $first){$cols[$name]=ConvertTo-CmbDateColumn $ws ($c+1) $first (Get-ColumnText $ws ($c+1) $first $last)}else{$cols[$name]=New-Object string[] 0}}
+    for($c=0;$c -lt $width;$c++){$name=$headers[$c];if($null -ne $wantSet -and !$wantSet.ContainsKey((ConvertTo-CmbHeaderKey $name))){continue};if($last -ge $first){if($CellText){$cols[$name]=Get-CmbCellTextColumn $ws ($c+1) $first $last}else{$cols[$name]=ConvertTo-CmbDateColumn $ws ($c+1) $first (Get-ColumnText $ws ($c+1) $first $last)}}else{$cols[$name]=New-Object string[] 0}}
     $n=[Math]::Max(0,$last-$first+1);$n=Get-CmbTrimmedCount $cols $n
     $out.Add(@{name=$ws.Name;headerRow=($h+1);headers=[string[]]$headers[0..($width-1)];columns=$cols;rows=$n})
    }
@@ -3468,6 +3482,12 @@ function Read-CmbSheets([string]$Path,[string]$OnlySheet='',[int]$HeaderRow=0,[s
  if(!$TextName){$TextName=[IO.Path]::GetFileNameWithoutExtension($Path)}
  $out.Add(@{name=$TextName;headerRow=($h+1);headers=$headers;columns=$cols;rows=$n;delimiter=$t.delimiter;encoding=$t.encoding;malformed=$t.malformed})
  return @($out)
+}
+function Get-CmbCellTextColumn($Worksheet,[int]$Column,[int]$FromRow,[int]$ToRow){
+ # What Excel shows in each cell, read the way the provider reports read their columns: real dates as ISO text, everything else as displayed.
+ $n=$ToRow-$FromRow+1;$out=[string[]]::new([Math]::Max(0,$n))
+ for($i=0;$i -lt $n;$i++){$cell=$Worksheet.Cells[($FromRow+$i),$Column];$v=$cell.Value;if($null -eq $v){$out[$i]='';continue};if($v -is [DateTime]){$out[$i]=([DateTime]$v).ToString('o')}else{$out[$i]=([string]$cell.Text).Trim()}}
+ return ,$out
 }
 function ConvertTo-CmbDateColumn($Worksheet,[int]$Column,[int]$FirstRow,[string[]]$Values){
  # Dates saved with a custom number format come back as day numbers; when the column's first value is a number shown as a date, every
@@ -3544,28 +3564,42 @@ function Remove-CmbFileRecord($File){
  Remove-Item -LiteralPath (Get-CmbFilePath ([string]$File.token)) -Force -ErrorAction SilentlyContinue
 }
 function Receive-CmbUpload($Context){
- # Saves one chosen export and fingerprints it. A file already loaded (same SHA-256) is reused and marked as loaded now.
+ # Saves one chosen export and fingerprints it.
  $name=[Net.WebUtility]::UrlDecode([string]$Context.Request.Headers['X-File-Name']);if([string]::IsNullOrWhiteSpace($name)){throw 'Missing file name.'}
  $name=[IO.Path]::GetFileName($name);$ext=[IO.Path]::GetExtension($name).ToLowerInvariant()
  if($ext -eq '.xls'){throw 'Old .xls workbooks cannot be read; open the file in Excel and save it as .xlsx.'};if($script:CmbExtensions -notcontains $ext){throw ('Only '+($script:CmbExtensions -join ', ')+' files can be loaded.')}
  $token=[Guid]::NewGuid().ToString('N');$path=Join-Path $script:Paths.CombineFiles ($token+$ext)
  $stream=[IO.File]::Create($path);try{$buffer=New-Object byte[] 1048576;$total=0;while(($read=$Context.Request.InputStream.Read($buffer,0,$buffer.Length)) -gt 0){$total+=$read;if($total -gt 2147483648){throw 'Upload exceeds 2 GB limit.'};$stream.Write($buffer,0,$read)}}finally{$stream.Dispose()}
  $fileDate=$null;try{$ms=[string]$Context.Request.Headers['X-File-Timestamp'];if($ms){$fileDate=[DateTimeOffset]::FromUnixTimeMilliseconds([int64]$ms).UtcDateTime.ToString('o')}}catch{}
- $sw=[Diagnostics.Stopwatch]::StartNew()
+ $m=Add-CmbFile $path $name $token $fileDate;Remove-OldCmbFiles;return $m
+}
+function Add-CmbFile([string]$Path,[string]$Name,[string]$Token,$FileDate){
+ # Fingerprints a file saved under combine\source-files. A file already loaded (same SHA-256) is reused and marked as loaded now.
+ $ext=[IO.Path]::GetExtension($Name).ToLowerInvariant();$sw=[Diagnostics.Stopwatch]::StartNew()
  try{
-  $hash=Get-FileHash256 $path
+  $hash=Get-FileHash256 $Path
   foreach($f in @(Get-CmbFiles)){
    if([string](Get-P $f 'sha256' '') -ne $hash -or !(Test-Path -LiteralPath ([string](Get-P $f 'path' '')))){continue}
-   Remove-Item -LiteralPath $path -Force;Set-P $f 'originalName' $name;Set-P $f 'loadedUtc' ([DateTime]::UtcNow.ToString('o'));if($fileDate){Set-P $f 'fileDateUtc' $fileDate};Save-JsonAtomic (Get-CmbFilePath ([string]$f.token)) $f
-   Log 'COMBINE_FILE_LOADED' 'OK' ($name+' (already loaded)');return (Get-CmbFileModel ([string]$f.token) -Full)
+   Remove-Item -LiteralPath $Path -Force;Set-P $f 'originalName' $Name;Set-P $f 'loadedUtc' ([DateTime]::UtcNow.ToString('o'));if($FileDate){Set-P $f 'fileDateUtc' $FileDate};Save-JsonAtomic (Get-CmbFilePath ([string]$f.token)) $f
+   Log 'COMBINE_FILE_LOADED' 'OK' ($Name+' (already loaded)');return (Get-CmbFileModel ([string]$f.token) -Full)
   }
-  $sheets=@(Get-CmbFingerprint $path ([IO.Path]::GetFileNameWithoutExtension($name)));if($sheets.Count -eq 0){throw 'No table was found in the file (every sheet is empty).'}
-  $rec=[ordered]@{cmbFileVersion=1;token=$token;originalName=$name;path=$path;extension=$ext;sha256=$hash;byteLength=(Get-Item -LiteralPath $path).Length;loadedUtc=[DateTime]::UtcNow.ToString('o');fileDateUtc=$fileDate;seconds=[Math]::Round($sw.Elapsed.TotalSeconds,1);sheets=$sheets}
-  Save-JsonAtomic (Get-CmbFilePath $token) $rec
- }catch{Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue;Log 'COMBINE_FILE' 'FAILED' $_.Exception.Message;throw}
- Log 'COMBINE_FILE_LOADED' 'OK' ($name+'; '+(@($sheets|ForEach-Object{$_.name+' '+$_.rows+' rows'}) -join ', ')+' in '+$rec.seconds+'s')
- Remove-OldCmbFiles
- return (Get-CmbFileModel $token -Full)
+  $sheets=@(Get-CmbFingerprint $Path ([IO.Path]::GetFileNameWithoutExtension($Name)));if($sheets.Count -eq 0){throw 'No table was found in the file (every sheet is empty).'}
+  $rec=[ordered]@{cmbFileVersion=1;token=$Token;originalName=$Name;path=$Path;extension=$ext;sha256=$hash;byteLength=(Get-Item -LiteralPath $Path).Length;loadedUtc=[DateTime]::UtcNow.ToString('o');fileDateUtc=$FileDate;seconds=[Math]::Round($sw.Elapsed.TotalSeconds,1);sheets=$sheets}
+  Save-JsonAtomic (Get-CmbFilePath $Token) $rec
+ }catch{Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue;Log 'COMBINE_FILE' 'FAILED' $_.Exception.Message;throw}
+ Log 'COMBINE_FILE_LOADED' 'OK' ($Name+'; '+(@($sheets|ForEach-Object{$_.name+' '+$_.rows+' rows'}) -join ', ')+' in '+$rec.seconds+'s')
+ return (Get-CmbFileModel $Token -Full)
+}
+function Import-CmbCanonicalFiles{
+ # The Provider Analysis sources (canonical-current) loaded into Combine under their canonical names; unchanged files are reused.
+ $out=@()
+ foreach($src in @(Registry)){
+  $p=Join-Path $script:Paths.CanonicalCurrent ([string]$src.canonicalFileName);if(!(Test-Path -LiteralPath $p)){continue}
+  $tok=[Guid]::NewGuid().ToString('N');$dest=Join-Path $script:Paths.CombineFiles ($tok+'.xlsx');Copy-Item -LiteralPath $p -Destination $dest -Force
+  $m=Add-CmbFile $dest ([string]$src.canonicalFileName) $tok ((Get-Item -LiteralPath $p).LastWriteTimeUtc.ToString('o'))
+  $out+=[ordered]@{sourceKey=[string]$src.sourceKey;file=[string]$m.originalName;token=[string]$m.token}
+ }
+ Remove-OldCmbFiles;return @($out)
 }
 function Get-CmbFileModel([string]$Token,[switch]$Full){
  $f=Get-CmbFile $Token
@@ -3630,7 +3664,7 @@ function Test-CmbName([string]$Name){return ($Name -match '^[A-Za-z][A-Za-z0-9_]
 function Get-CmbTypeOf([string]$Type){$t=$Type.Trim().ToLowerInvariant();if($t -in @('','text','string')){return 'text'};if($t -in @('number','numeric','integer','decimal')){return 'number'};if($t -in @('date','datetime')){return 'date'};if($t -in @('bool','boolean','yesno','flag')){return 'bool'};return $null}
 function ConvertTo-CmbCleanSteps($Steps){
  # Normalized cleaning steps (@{op;n;text;with;map;else}), or a message saying which step is wrong.
- $out=[Collections.Generic.List[object]]::new();$known=@('trim','upper','lower','title','collapsespaces','digits','alnum','stripleadingzeros','removebracketid','namekey')
+ $out=[Collections.Generic.List[object]]::new();$known=@('trim','upper','lower','title','collapsespaces','digits','alnum','stripleadingzeros','removebracketid','namekey','filldown')
  $list=@();if($null -eq $Steps){return @{steps=@();error=''}};if($Steps -is [Array]){$list=$Steps}else{$list=@($Steps)}
  foreach($s in $list){
   if($s -is [string]){
@@ -3700,7 +3734,8 @@ function Get-CmbPlan([object[]]$Rules,[hashtable]$Tables=@{},[switch]$Strict){
   $role=(Get-CmbText $r 'role').ToLowerInvariant();if(!$role){$role='patients'};if($role -notin @('patients','lookup')){& $add $no 'error' 'role must be "patients" or "lookup".';$role='patients'}
   $hr=Get-CmbValue $r 'headerRow' 0;$hrN=0;if($hr -is [double] -and $hr -ge 1 -and $hr -le 1000 -and [Math]::Floor($hr) -eq $hr){$hrN=[int]$hr}elseif([string]$hr -ne '0'){& $add $no 'error' 'headerRow must be a row number such as 1.'}
   $req=Get-CmbValue $r 'required' $true;if(!($req -is [bool])){& $add $no 'error' 'required must be true or false.';$req=$true}
-  $src=@{id=$id;key=$key;ruleIndex=$i;label=$(if((Get-CmbText $r 'label')){Get-CmbText $r 'label'}else{$id});match=$match;fileName=(Get-CmbText $r 'fileName');sheet=(Get-CmbText $r 'sheet');headerRow=$hrN;role=$role;required=$req;lookupKey=(Get-CmbText $r 'key');maps=[Collections.Generic.List[object]]::new();filters=[Collections.Generic.List[object]]::new();fields=[ordered]@{};rank=$P.sources.Count;table=$null}
+  $src=@{id=$id;key=$key;ruleIndex=$i;label=$(if((Get-CmbText $r 'label')){Get-CmbText $r 'label'}else{$id});match=$match;fileName=(Get-CmbText $r 'fileName');sheet=(Get-CmbText $r 'sheet');headerRow=$hrN;role=$role;required=$req;lookupKey=(Get-CmbText $r 'key');unique=@(Get-CmbList $r 'unique');read='values';maps=[Collections.Generic.List[object]]::new();filters=[Collections.Generic.List[object]]::new();fields=[ordered]@{};rank=$P.sources.Count;table=$null}
+  $rd=(Get-CmbText $r 'read').ToLowerInvariant();if($rd){if($rd -in @('values','text')){$src.read=$rd}else{& $add $no 'error' 'read must be "values" or "text".'}}
   if($Tables.ContainsKey($key)){$src.table=$Tables[$key]}
   elseif($Strict -and $req -and $match.Count){& $add $no 'error' ('No file is chosen for source "'+$id+'".')}
   if($role -eq 'lookup' -and !$src.lookupKey){& $add $no 'error' ('Lookup source "'+$id+'" needs "key": the field that lookup() matches on.')}
@@ -3744,6 +3779,7 @@ function Get-CmbPlan([object[]]$Rules,[hashtable]$Tables=@{},[switch]$Strict){
  foreach($src in $P.sources){
   if($src.maps.Count -eq 0){& $add ($src.ruleIndex+1) 'warning' ('Source "'+$src.id+'" has no map rules, so nothing is read from it.')}
   if($src.role -eq 'lookup' -and $src.lookupKey -and !$src.fields.Contains($src.lookupKey.ToLowerInvariant())){& $add ($src.ruleIndex+1) 'error' ('Lookup key "'+$src.lookupKey+'" is not a field mapped from "'+$src.id+'".')}
+  $badU=@($src.unique|Where-Object{!$src.fields.Contains($_.ToLowerInvariant())});if($badU.Count){& $add ($src.ruleIndex+1) 'error' ('unique: '+(@($badU|ForEach-Object{'"'+$_+'"'}) -join ', ')+' is not a field mapped from "'+$src.id+'".')}
  }
  # Field names and their types across patient sources (first map wins the display name and type).
  foreach($src in $P.sources){if($src.role -ne 'patients'){continue};foreach($k in @($src.fields.Keys)){if(!$P.fieldNames.ContainsKey($k)){$P.fieldNames[$k]=$src.fields[$k].name;$P.fieldTypes[$k]=$src.fields[$k].type}elseif($P.fieldTypes[$k] -ne $src.fields[$k].type){& $add ($src.fields[$k].map.ruleIndex+1) 'warning' ('Field "'+$src.fields[$k].name+'" is '+$src.fields[$k].type+' here but '+$P.fieldTypes[$k]+' in another source; values compare as '+$P.fieldTypes[$k]+'.')}}}
@@ -3766,7 +3802,14 @@ function Get-CmbPlan([object[]]$Rules,[hashtable]$Tables=@{},[switch]$Strict){
   $want=@(Get-CmbList $r 'sources');$use=@()
   if($want.Count){foreach($w in $want){if(!$P.sourceByKey.ContainsKey($w.ToLowerInvariant())){& $add $no 'error' ('Key rule names source "'+$w+'", which has no source rule.')}else{$s=$P.sourceByKey[$w.ToLowerInvariant()];$miss=@($fields|Where-Object{!$s.fields.Contains($_.ToLowerInvariant())});if($miss.Count){& $add $no 'error' ('Source "'+$s.id+'" does not map '+(@($miss|ForEach-Object{'"'+$_+'"'}) -join ', ')+'.')}else{$use+=$s.id}}}}
   else{$use=@(foreach($s in $patientSources){$all=$true;foreach($f in $fields){if(!$s.fields.Contains($f.ToLowerInvariant())){$all=$false}};if($all){$s.id}})}
-  $P.keys.Add(@{ruleIndex=$i;fields=@($fields|ForEach-Object{$P.fieldNames[$_.ToLowerInvariant()]});sources=@($use);label=(@($fields|ForEach-Object{$P.fieldNames[$_.ToLowerInvariant()]}) -join ' + ')})
+  $mt=(Get-CmbText $r 'match').ToLowerInvariant();if(!$mt){$mt='exact'};if($mt -notin @('exact','prefix')){& $add $no 'error' 'match must be "exact" or "prefix".';$mt='exact'}
+  $ag=@();$agWant=@(Get-CmbList $r 'against')
+  if($mt -eq 'prefix'){
+   if($agWant.Count){foreach($w in $agWant){if(!$P.sourceByKey.ContainsKey($w.ToLowerInvariant())){& $add $no 'error' ('against names source "'+$w+'", which has no source rule.')}else{$s=$P.sourceByKey[$w.ToLowerInvariant()];$miss=@($fields|Where-Object{!$s.fields.Contains($_.ToLowerInvariant())});if($miss.Count){& $add $no 'error' ('Source "'+$s.id+'" does not map '+(@($miss|ForEach-Object{'"'+$_+'"'}) -join ', ')+'.')}elseif($use -contains $s.id){& $add $no 'error' ('Source "'+$s.id+'" cannot be in both sources and against.')}else{$ag+=$s.id}}}}
+   else{$ag=@(foreach($s in $patientSources){if($use -contains $s.id){continue};$all=$true;foreach($f in $fields){if(!$s.fields.Contains($f.ToLowerInvariant())){$all=$false}};if($all){$s.id}})}
+   if($ag.Count -eq 0){& $add $no 'error' 'A prefix key needs other sources to match against ("against").'}
+  }elseif($agWant.Count){& $add $no 'warning' '"against" is only used with match "prefix".'}
+  $P.keys.Add(@{ruleIndex=$i;fields=@($fields|ForEach-Object{$P.fieldNames[$_.ToLowerInvariant()]});sources=@($use);match=$mt;against=@($ag);label=(@($fields|ForEach-Object{$P.fieldNames[$_.ToLowerInvariant()]}) -join ' + ')+$(if($mt -eq 'prefix'){' (prefix)'}else{''})})
  }
  if($P.keys.Count -eq 0 -and $patientSources.Count){& $add 0 'error' 'Add a key rule (for example {"rule":"key","fields":["MRN"]}) so rows can be matched to patients.'}
  foreach($s in $patientSources){$hit=$false;foreach($k in $P.keys){if($k.sources -contains $s.id){$hit=$true}};if(!$hit -and $P.keys.Count){& $add ($s.ruleIndex+1) 'warning' ('No key rule applies to source "'+$s.id+'" (it does not map the key fields), so all its rows will be left out.')}}
@@ -3872,7 +3915,22 @@ function Get-CmbLookupTablesForCheck($Plan,[object[]]$Rules){
  $t=@{};$n=0
  foreach($r in $Rules){if($r -is [Collections.IDictionary] -and ([string](Get-CmbValue $r 'rule' '')).Trim() -ieq 'lookup'){$name=Get-CmbText $r 'table';if($name){$t[$name.ToLowerInvariant()]=@{index=$n;fields=@()};$n++}}}
  foreach($s in $Plan.sources){if($s.role -eq 'lookup'){$t[$s.key]=@{index=$n;fields=@(foreach($k in @($s.fields.Keys)){$s.fields[$k].name})};$n++}}
+ foreach($k in @(Get-CmbProfileTableNames)){if(!$t.ContainsKey($k)){$t[$k]=@{index=$n;fields=@('npi','provider','location','riskPool')}};$n++}
  return $t
+}
+function Get-CmbProfileTableNames{return @(@(Registry|ForEach-Object{'profile:'+([string]$_.sourceKey).ToLowerInvariant()})+@('profiles'))}
+function Get-CmbProfileTables{
+ # Built-in lookup tables from the saved Provider Analysis profiles: profile:<source key> finds a provider by the name its rows carry in that
+ # source (the HR sources follow the reports' one-of-two rule), and profiles finds one by NPI. Fields: npi, provider, location, riskPool.
+ $t=[ordered]@{};$keys=@(Registry|ForEach-Object{[string]$_.sourceKey});foreach($k in $keys){$t['profile:'+$k.ToLowerInvariant()]=@{}};$byNpi=@{}
+ foreach($p in @(Get-ProviderProfiles)){
+  if($null -eq $p){continue};$npi=[string](Get-P $p 'npi' '');if($npi -notmatch '^\d{10}$'){continue}
+  $row=@{npi=$npi;provider=[string](Get-P $p 'displayName' $npi);location=([string](Get-P $p 'location' '')).Trim();riskPool=([string](Get-P $p 'riskPool' '')).Trim()}
+  if(!$byNpi.ContainsKey($npi)){$byNpi[$npi]=$row}
+  $a=Get-P $p 'aliases' $null
+  foreach($k in $keys){$al=Get-OverviewAlias $a $k;if(!$al){continue};$kk=[CmbRt]::Key($al);$tb=$t['profile:'+$k.ToLowerInvariant()];if(!$tb.ContainsKey($kk)){$tb[$kk]=$row}}
+ }
+ $t['profiles']=$byNpi;return $t
 }
 function Get-CmbRuleSummary($Rule){
  # One plain sentence per rule for the rules table and the audit sheet.
@@ -3980,6 +4038,7 @@ function Invoke-CmbClean([string[]]$Values,[object[]]$Steps){
    'stripleadingzeros'{for($i=0;$i -lt $n;$i++){$x=$v[$i];if($x.StartsWith('0')){$y=$x.TrimStart('0');if($y.Length -eq 0){$y='0'};$v[$i]=$y}}}
    'pad'{$w=[int]$s.n;for($i=0;$i -lt $n;$i++){if($v[$i].Length -gt 0){$v[$i]=$v[$i].PadLeft($w,'0')}}}
    'left'{$w=[int]$s.n;for($i=0;$i -lt $n;$i++){if($v[$i].Length -gt $w){$v[$i]=$v[$i].Substring(0,$w)}}}
+   'filldown'{$last='';for($i=0;$i -lt $n;$i++){if($v[$i].Length -eq 0){$v[$i]=$last}else{$last=$v[$i]}}}
    'removebracketid'{$rx=[regex]'\s*\[[^\]]*\]\s*$';for($i=0;$i -lt $n;$i++){$v[$i]=$rx.Replace($v[$i],'')}}
    'namekey'{$memo=@{};for($i=0;$i -lt $n;$i++){$x=$v[$i];if($x.Length -eq 0){continue};$y=$memo[$x];if($null -eq $y){$y=[CmbRt]::NameKey($x);$memo[$x]=$y};$v[$i]=$y}}
    'blankif'{$b=[string]$s.text;for($i=0;$i -lt $n;$i++){if([string]::Equals($v[$i],$b,[StringComparison]::OrdinalIgnoreCase)){$v[$i]=''}}}
@@ -4019,7 +4078,7 @@ function Read-CmbSource($Plan,$Src,$Pick,$File,[object[]]$TableList,[hashtable]$
  foreach($m in $Src.maps){if($m.mode -eq 'column'){$want[(ConvertTo-CmbHeaderKey $m.column)]=$true};if($m.mode -eq 'columns'){foreach($c in $m.columns){$want[(ConvertTo-CmbHeaderKey $c)]=$true}};if($m.mode -eq 'expr'){foreach($x in (Get-CmbExprNames $m.expr)){$want[(ConvertTo-CmbHeaderKey $x)]=$true}}}
  foreach($f in $Src.filters){foreach($x in (Get-CmbExprNames $f.expr)){$want[(ConvertTo-CmbHeaderKey $x)]=$true}}
  $hr=$Src.headerRow;if($hr -le 0){$hr=[int]$Pick.headerRow}
- $tables=@(Read-CmbSheets ([string]$File.path) ([string]$Pick.sheet) $hr ([string[]]@($want.Keys)) ([string]$Pick.sheet))
+ $tables=@(Read-CmbSheets ([string]$File.path) ([string]$Pick.sheet) $hr ([string[]]@($want.Keys)) ([string]$Pick.sheet) -CellText:($Src.read -eq 'text'))
  if($tables.Count -eq 0){throw ('Source "'+$Src.id+'": sheet "'+$Pick.sheet+'" was not found in '+[string]$File.originalName+'.')}
  $t=$tables[0];$n=[int]$t.rows
  $names=@{};$cols=[Collections.Generic.List[object]]::new()
@@ -4068,8 +4127,15 @@ function Read-CmbSource($Plan,$Src,$Pick,$File,[object[]]$TableList,[hashtable]$
   for($i=0;$i -lt $n;$i++){if(!$keep[$i]){continue};$before++;$hit=[bool]$r.values[$i];if($f.keep -ne $hit){$keep[$i]=$false;$d++}}
   $dropped+=$d;$effects[$f.ruleIndex]=('removed '+(Get-CmbNumberText $d)+' of '+(Get-CmbNumberText $before)+' rows'+$(if($r.errors.Count){'; the expression failed on '+(Get-CmbNumberText $r.errors.Count)+' rows (treated as false)'}else{''}))
  }
+ $notUnique=0
+ if($Src.unique.Count){
+  # A combination of the unique fields seen more than once in this source leaves out every row that has it.
+  $ua=[object[]]@(foreach($u in $Src.unique){,$fields[$u.ToLowerInvariant()]});$cnt=[Collections.Generic.Dictionary[string,int]]::new();$kv=[string[]]::new($n)
+  for($i=0;$i -lt $n;$i++){if(!$keep[$i]){continue};$parts=[string[]]::new($ua.Count);$ok=$true;for($j=0;$j -lt $ua.Count;$j++){$uk=[CmbRt]::Key($ua[$j][$i]);if($uk.Length -eq 0){$ok=$false;break};$parts[$j]=$uk};if(!$ok){continue};$k=[string]::Join('|',$parts);$kv[$i]=$k;if($cnt.ContainsKey($k)){$cnt[$k]++}else{$cnt[$k]=1}}
+  for($i=0;$i -lt $n;$i++){if($keep[$i] -and $null -ne $kv[$i] -and $cnt[$kv[$i]] -gt 1){$keep[$i]=$false;$notUnique++}}
+ }
  $rows=[Collections.Generic.List[int]]::new();for($i=0;$i -lt $n;$i++){if($keep[$i]){$rows.Add($i)}}
- return @{src=$Src;n=$n;fields=$fields;rows=$rows;effects=$effects;file=$label;sheet=$t.name;headerRow=$t.headerRow;empty=$empty;dropped=$dropped;fileName=[string]$File.originalName;sha256=[string](Get-P $File 'sha256' '');token=[string]$File.token}
+ return @{src=$Src;notUnique=$notUnique;n=$n;fields=$fields;rows=$rows;effects=$effects;file=$label;sheet=$t.name;headerRow=$t.headerRow;empty=$empty;dropped=$dropped;fileName=[string]$File.originalName;sha256=[string](Get-P $File 'sha256' '');token=[string]$File.token}
 }
 function Get-CmbRunTables($Plan,[hashtable]$Data){
  # lookup() tables in the order Get-CmbLookupTablesForCheck numbers them: inline lookup rules, then lookup sources (key -> row fields).
@@ -4084,6 +4150,8 @@ function Get-CmbRunTables($Plan,[hashtable]$Data){
   }
   $map[$s.key]=@{index=$list.Count;fields=@(foreach($f in @($s.fields.Keys)){$s.fields[$f].name})};$list.Add($tb)
  }
+ if(!$Plan.ContainsKey('profileTables')){$Plan['profileTables']=Get-CmbProfileTables}
+ foreach($k in @(Get-CmbProfileTableNames)){if(!$map.ContainsKey($k)){$map[$k]=@{index=$list.Count;fields=@('npi','provider','location','riskPool')}};$list.Add($Plan.profileTables[$k])}
  return @{list=$list.ToArray();map=$map;effects=$effects}
 }
 function Invoke-CmbEngine($Plan,[hashtable]$Picks,[scriptblock]$Progress={param($p,$s)}){
@@ -4110,11 +4178,38 @@ function Invoke-CmbEngine($Plan,[hashtable]$Picks,[scriptblock]$Progress={param(
  for($si=0;$si -lt $ps.Count;$si++){foreach($i in $data[$ps[$si].key].rows){$recSrc[$r]=$si;$recRow[$r]=$i;$r++}}
  $parent=[int[]]::new($N);for($i=0;$i -lt $N;$i++){$parent[$i]=$i}
  # Per key level: the group's key value at its root (kv) and the record it came from (kr, for the display text).
- $L=$Plan.keys.Count;$kv=@(for($j=0;$j -lt $L;$j++){,([string[]]::new($N))});$kr=@(for($j=0;$j -lt $L;$j++){$x=[int[]]::new($N);for($i=0;$i -lt $N;$i++){$x[$i]=-1};,$x});$mask=[int[]]::new($N);$hasKey=[bool[]]::new($N)
+ $L=$Plan.keys.Count;$kv=@(for($j=0;$j -lt $L;$j++){,([string[]]::new($N))});$kr=@(for($j=0;$j -lt $L;$j++){$x=[int[]]::new($N);for($i=0;$i -lt $N;$i++){$x[$i]=-1};,$x});$mask=[int[]]::new($N);$hasKey=[bool[]]::new($N);$ambiguous=[bool[]]::new($N)
  $keyArrs=@(for($j=0;$j -lt $L;$j++){$key=$Plan.keys[$j];,@(for($si=0;$si -lt $ps.Count;$si++){if($key.sources -contains $ps[$si].id){,@(foreach($f in $key.fields){,$data[$ps[$si].key].fields[$f.ToLowerInvariant()]})}else{,$null}})})
  $keyConflicts=[Collections.Generic.List[object]]::new();$keyEffects=@{}
  for($lv=0;$lv -lt $L;$lv++){
   $key=$Plan.keys[$lv];$seen=[Collections.Generic.Dictionary[string,int]]::new();$joined=0;$withKey=0;$blocked=0;$arrs=$keyArrs[$lv];$kvl=$kv[$lv];$krl=$kr[$lv];$bit=1 -shl [Math]::Min(30,$lv)
+  if($key.match -eq 'prefix'){
+   # Rows of the key's sources join the single row of the "against" sources whose value begins with theirs; several such rows make the
+   # row ambiguous (left out); none leaves it on its own (rows of these sources with the same value still join each other).
+   $ag=@(for($si=0;$si -lt $ps.Count;$si++){if($key.against -contains $ps[$si].id){,@(foreach($f in $key.fields){,$data[$ps[$si].key].fields[$f.ToLowerInvariant()]})}else{,$null}})
+   $cand=[Collections.Generic.Dictionary[string,int]]::new();$candFirst=[Collections.Generic.Dictionary[string,int]]::new()
+   for($r=0;$r -lt $N;$r++){$fa=$ag[$recSrc[$r]];if($null -eq $fa){continue};$val=Get-CmbRecordKey $fa $recRow[$r];if(!$val){continue};if($cand.ContainsKey($val)){$cand[$val]++}else{$cand[$val]=1;$candFirst[$val]=$r}}
+   $sorted=[string[]]@($cand.Keys);[Array]::Sort($sorted,[StringComparer]::Ordinal);$alone=0;$amb=0
+   for($r=0;$r -lt $N;$r++){
+    $fa=$arrs[$recSrc[$r]];if($null -eq $fa){continue};$val=Get-CmbRecordKey $fa $recRow[$r];if(!$val){continue};$withKey++
+    $ix=[Array]::BinarySearch($sorted,$val,[StringComparer]::Ordinal);if($ix -lt 0){$ix=-bnot $ix};$total=0;$target=-1
+    while($ix -lt $sorted.Length -and $sorted[$ix].StartsWith($val,[StringComparison]::Ordinal)){$total+=$cand[$sorted[$ix]];$target=$candFirst[$sorted[$ix]];$ix++}
+    if($total -gt 1){$amb++;$ambiguous[$r]=$true;continue}
+    $hasKey[$r]=$true
+    $a=$r;while($parent[$a] -ne $a){$parent[$a]=$parent[$parent[$a]];$a=$parent[$a]}
+    if($null -eq $kvl[$a]){$kvl[$a]=$val;$krl[$a]=$r}
+    if($total -eq 1){$b=$target}elseif($seen.ContainsKey($val)){$b=$seen[$val]}else{$seen[$val]=$r;$alone++;continue}
+    while($parent[$b] -ne $b){$parent[$b]=$parent[$parent[$b]];$b=$parent[$b]}
+    if($a -eq $b){continue}
+    $conf=-1;for($j=0;$j -lt $lv;$j++){$x=$kv[$j][$a];$y=$kv[$j][$b];if($null -ne $x -and $null -ne $y -and $x -ne $y){$conf=$j;break}}
+    if($conf -ge 0){$blocked++;continue}
+    $root=[Math]::Min($a,$b);$child=[Math]::Max($a,$b);$parent[$child]=$root;$joined++
+    for($j=0;$j -le $lv;$j++){if($null -eq $kv[$j][$root] -and $null -ne $kv[$j][$child]){$kv[$j][$root]=$kv[$j][$child];$kr[$j][$root]=$kr[$j][$child]}}
+    $mask[$root]=$mask[$root] -bor $mask[$child] -bor $bit
+   }
+   $keyEffects[$key.ruleIndex]=((Get-CmbNumberText $withKey)+' rows had this key; '+(Get-CmbNumberText $joined)+' joined by prefix or exact value; '+(Get-CmbNumberText $alone)+' matched no row of '+($key.against -join ', ')+$(if($amb){'; '+(Get-CmbNumberText $amb)+' left out because their value begins more than one row of '+($key.against -join ', ')}else{''})+$(if($blocked){'; '+(Get-CmbNumberText $blocked)+' joins refused because an earlier key differs'}else{''}))
+   continue
+  }
   for($r=0;$r -lt $N;$r++){
    $fa=$arrs[$recSrc[$r]];if($null -eq $fa){continue}
    $row=$recRow[$r]
@@ -4213,12 +4308,13 @@ function Invoke-CmbEngine($Plan,[hashtable]$Picks,[scriptblock]$Progress={param(
   $d=$data[$s.key];$si=-1;if($sIndex.ContainsKey($s.key)){$si=$sIndex[$s.key]}
   $pc=0;if($si -ge 0){$pc=$perSource[$si]}
   $nk=$(if($si -ge 0){$noKey[$si]}else{0})
-  if(!$effects.ContainsKey($s.ruleIndex)){$effects[$s.ruleIndex]=('read '+(Get-CmbNumberText $d.n)+' rows from '+$d.file+'; '+(Get-CmbNumberText ($d.rows.Count-$nk))+' used'+$(if($s.role -eq 'patients'){' for '+(Get-CmbNumberText $pc)+' patients'}else{''}))}
-  [ordered]@{source=$s.id;label=$s.label;role=$s.role;file=$d.fileName;sheet=$d.sheet;headerRow=$d.headerRow;sha256=$d.sha256;rowsRead=$d.n;emptyRows=$d.empty;filtered=$d.dropped;noKey=$nk;rowsUsed=($d.rows.Count-$nk);patients=$pc;token=$d.token}
+  if(!$effects.ContainsKey($s.ruleIndex)){$effects[$s.ruleIndex]=('read '+(Get-CmbNumberText $d.n)+' rows from '+$d.file+$(if($d.notUnique){'; '+(Get-CmbNumberText $d.notUnique)+' left out because their '+($s.unique -join ' + ')+' appears more than once'}else{''})+'; '+(Get-CmbNumberText ($d.rows.Count-$nk))+' used'+$(if($s.role -eq 'patients'){' for '+(Get-CmbNumberText $pc)+' patients'}else{''}))}
+  [ordered]@{source=$s.id;label=$s.label;role=$s.role;file=$d.fileName;sheet=$d.sheet;headerRow=$d.headerRow;sha256=$d.sha256;rowsRead=$d.n;emptyRows=$d.empty;filtered=($d.dropped+$d.notUnique);noKey=$nk;rowsUsed=($d.rows.Count-$nk);patients=$pc;token=$d.token}
  })
  $noKeyTotal=0;foreach($x in $noKey){$noKeyTotal+=$x}
  return @{plan=$Plan;fieldNotes=$fieldNotes;F=$FV;LIN=$LIN;P=$P;order=$order;outCols=$outCols;views=$views;effects=$effects;sources=$sources;conflicts=$conflicts;conflictCount=$conflictCount;keyConflicts=$keyConflicts;excluded=$excluded;keyText=$keyText;records=$N;noKey=$noKeyTotal;seconds=[Math]::Round($sw.Elapsed.TotalSeconds,1)}
 }
+function Get-CmbRecordKey([object[]]$Arrays,[int]$Row){if($Arrays.Count -eq 1){return [CmbRt]::Key($Arrays[0][$Row])};$p=[string[]]::new($Arrays.Count);for($i=0;$i -lt $Arrays.Count;$i++){$t=[CmbRt]::Key($Arrays[$i][$Row]);if($t.Length -eq 0){return ''};$p[$i]=$t};return [string]::Join('|',$p)}
 function Get-CmbKeyDisplay([object[]]$Arrays,[int]$Row){$p=[string[]]::new($Arrays.Count);for($i=0;$i -lt $Arrays.Count;$i++){$p[$i]=[CmbRt]::Text($Arrays[$i][$Row]).Trim()};return [string]::Join(' / ',$p)}
 function Get-CmbSortedOrder([int[]]$Order,[object[]]$Keys){
  # Stable multi-key sort without objects: each patient gets one ordinal-sortable string. Numbers and dates become fixed-width text,
@@ -4432,7 +4528,7 @@ function Write-CmbWorkbook($Result,[string]$Path,$Run){
    $null=Add-CmbSheet $pkg $used $v.name ([string[]]$v.headers) $vr ([string[]]$fm) $null $bold
   }
   $null=Add-CmbSheet $pkg $used 'Audit - Rules' @('Row','Rule','What it does','Effect in this run','Problems','Note') @(Get-CmbEffectRows $Result) $null @(6,10,70,60,40,50)
-  $null=Add-CmbSheet $pkg $used 'Audit - Sources' @('Source','Label','Role','File','Sheet','Header row','SHA-256','Rows read','Empty rows','Removed by filters','Rows without a key','Rows used','Patients') @(foreach($s in $Result.sources){,([object[]]@($s.source,$s.label,$s.role,$s.file,$s.sheet,$s.headerRow,([string]$s.sha256).Substring(0,[Math]::Min(12,([string]$s.sha256).Length)),[double]$s.rowsRead,[double]$s.emptyRows,[double]$s.filtered,[double]$s.noKey,[double]$s.rowsUsed,[double]$s.patients))})
+  $null=Add-CmbSheet $pkg $used 'Audit - Sources' @('Source','Label','Role','File','Sheet','Header row','SHA-256','Rows read','Empty rows','Removed (filters, unique)','Rows without a key','Rows used','Patients') @(foreach($s in $Result.sources){,([object[]]@($s.source,$s.label,$s.role,$s.file,$s.sheet,$s.headerRow,([string]$s.sha256).Substring(0,[Math]::Min(12,([string]$s.sha256).Length)),[double]$s.rowsRead,[double]$s.emptyRows,[double]$s.filtered,[double]$s.noKey,[double]$s.rowsUsed,[double]$s.patients))})
   if($Result.conflicts.Count){$null=Add-CmbSheet $pkg $used 'Audit - Conflicts' @('Patient','Field','Chosen value','Chosen from','Other values [source]','How','Rule row') @(foreach($c in $Result.conflicts){,([object[]]@($c.patient,$c.field,$c.chosen,$c.from,$c.others,$c.how,$(if($c.ruleIndex -ge 0){[double]($c.ruleIndex+1)}else{'(default)'})))}) $null @(18,18,28,14,60,12,9)}
   if($Result.keyConflicts.Count){$null=Add-CmbSheet $pkg $used 'Audit - Key conflicts' @('Key','Shared value','Earlier key','First patient has','Second patient has','Sources') @(foreach($c in $Result.keyConflicts){,([object[]]@($c.key,$c.value,$c.earlierKey,$c.first,$c.second,$c.sources))})}
   if($Result.excluded.Count){$null=Add-CmbSheet $pkg $used 'Audit - Excluded' @('Patient','Removed by rule row','Filter') @(foreach($e in $Result.excluded){$q=$e[0];$ri=$e[1];,([object[]]@([CmbRt]::Text($Result.keyText[$q]),[double]($ri+1),(Get-CmbRuleSummary $plan.rules[$ri])))}) $null @(20,10,80)}
@@ -4478,7 +4574,14 @@ function Invoke-CmbRun([string]$Id){
  $path=Get-CmbRunPath $Id;$run=Json $path;if(!$run){throw 'Run was not found.'}
  $sw=[Diagnostics.Stopwatch]::StartNew()
  try{
-  Set-P $run 'workerPid' $PID;Set-P $run 'startedUtc' ([DateTime]::UtcNow.ToString('o'));Set-RunProgress $run $path 2 'Checking the config'
+  Set-P $run 'workerPid' $PID;Set-P $run 'startedUtc' ([DateTime]::UtcNow.ToString('o'))
+  if([string](Get-P $run 'kind' '') -eq 'parity'){
+   $pr=Invoke-CmbParity $run $path;$run=Json $path
+   Set-P $run 'result' $pr.result;Set-P $run 'parity' $pr.parity;Set-P $run 'outputPath' $pr.outputPath;Set-P $run 'parityPath' $pr.parityPath;Set-P $run 'assignments' @(Get-P $run 'assignments' @())
+   $run.state='Completed';$run.percent=100;$run.stage='Compared';Set-P $run 'completedUtc' ([DateTime]::UtcNow.ToString('o'));Set-P $run 'seconds' ([Math]::Round($sw.Elapsed.TotalSeconds,1));Save-JsonAtomic $path $run
+   Log 'COMBINE_PARITY_COMPLETED' 'OK' ([string]$run.configName+'; '+$pr.parity.matched+' paired, '+$pr.parity.differentRows+' with differences, '+$pr.parity.onlyReports+' only in reports, '+$pr.parity.onlyCombine+' only in Combine');return
+  }
+  Set-RunProgress $run $path 2 'Checking the config'
   $cfg=Read-CmbConfigText ([string]$run.configText);if(@($cfg.errors).Count){throw ('The config could not be read: '+$cfg.errors[0].message)}
   $rules=@($cfg.rules);$plan0=Get-CmbPlan $rules
   $picks=Get-CmbPicks $plan0 @(Get-P $run 'assignments' @())
@@ -4520,10 +4623,12 @@ function Update-CmbLiveness($Run){
 function Get-CmbRunModel([string]$Id,[switch]$Summary){
  $run=Json (Get-CmbRunPath $Id);if(!$run){throw 'That run was not found.'}
  $null=Update-CmbLiveness $run
- $m=[ordered]@{runId=[string]$run.runId;state=[string]$run.state;percent=[int](Get-P $run 'percent' 0);stage=[string](Get-P $run 'stage' '');requestedUtc=(ConvertTo-IsoText (Get-P $run 'requestedUtc' ''));completedUtc=(ConvertTo-IsoText (Get-P $run 'completedUtc' ''));seconds=(Get-P $run 'seconds' $null);errorSummary=[string](Get-P $run 'errorSummary' '');configName=[string](Get-P $run 'configName' '');assignments=@(Get-P $run 'assignments' @()|ForEach-Object{[ordered]@{source=[string]$_.source;file=[string]$_.file;sheet=[string]$_.sheet;rows=[int](Get-P $_ 'rows' 0)}});result=$null;outputUrl=$null;outputFile='';outputError='';folder=$script:Paths.CombineOutputs;patients=$null}
+ $m=[ordered]@{runId=[string]$run.runId;state=[string]$run.state;percent=[int](Get-P $run 'percent' 0);stage=[string](Get-P $run 'stage' '');requestedUtc=(ConvertTo-IsoText (Get-P $run 'requestedUtc' ''));completedUtc=(ConvertTo-IsoText (Get-P $run 'completedUtc' ''));seconds=(Get-P $run 'seconds' $null);errorSummary=[string](Get-P $run 'errorSummary' '');configName=[string](Get-P $run 'configName' '');assignments=@(Get-P $run 'assignments' @()|ForEach-Object{[ordered]@{source=[string]$_.source;file=[string]$_.file;sheet=[string]$_.sheet;rows=[int](Get-P $_ 'rows' 0)}});result=$null;outputUrl=$null;outputFile='';outputError='';folder=$script:Paths.CombineOutputs;patients=$null;kind=[string](Get-P $run 'kind' 'combine');parity=$null;parityUrl=$null;parityFile='';differentRows=$null}
+ if(!$m.kind){$m.kind='combine'}
  if($m.state -eq 'Completed'){
   $r=Get-P $run 'result' $null;if($r){$m.patients=[int](Get-P $r 'patients' 0);if(!$Summary){$m.result=$r}}
   $op=[string](Get-P $run 'outputPath' '');if($op -and (Test-Path -LiteralPath $op)){$m.outputUrl='/combine/output.xlsx?id='+$m.runId;$m.outputFile=$op}else{$m.outputError='The workbook was moved or deleted from the combine\outputs folder.'}
+  if($m.kind -eq 'parity'){$pr=Get-P $run 'parity' $null;if($pr){$m.parity=$pr;$m.differentRows=[int](Get-P $pr 'differentRows' 0)};$pp=[string](Get-P $run 'parityPath' '');if($pp -and (Test-Path -LiteralPath $pp)){$m.parityUrl='/combine/parity.xlsx?id='+$m.runId;$m.parityFile=$pp}}
  }
  return $m
 }
@@ -4544,9 +4649,9 @@ function New-CmbRun($Body){
  foreach($old in @(Get-CmbRuns|Select-Object -Skip $script:CmbRunKeep)){$oid=[string](Get-P $old 'runId' '');if($oid -match '^[a-f0-9]{32}$'){Remove-Item -LiteralPath (Get-CmbRunPath $oid) -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath (Join-Path $script:Paths.Logs ('combine-'+$oid+'.out.log')),(Join-Path $script:Paths.Logs ('combine-'+$oid+'.err.log')) -Force -ErrorAction SilentlyContinue}}
  return (Get-CmbRunModel $id)
 }
-function Send-CmbOutput($Context,[string]$Id){
+function Send-CmbOutput($Context,[string]$Id,[string]$Which='outputPath'){
  $run=Json (Get-CmbRunPath $Id);if(!$run -or [string](Get-P $run 'state' '') -ne 'Completed'){throw 'That run is not complete.'}
- $full=[IO.Path]::GetFullPath([string](Get-P $run 'outputPath' ''));$root=[IO.Path]::GetFullPath($script:Paths.CombineOutputs).TrimEnd([IO.Path]::DirectorySeparatorChar)+[IO.Path]::DirectorySeparatorChar
+ $full=[IO.Path]::GetFullPath([string](Get-P $run $Which ''));$root=[IO.Path]::GetFullPath($script:Paths.CombineOutputs).TrimEnd([IO.Path]::DirectorySeparatorChar)+[IO.Path]::DirectorySeparatorChar
  if(!$full.StartsWith($root,[StringComparison]::OrdinalIgnoreCase) -or !(Test-Path -LiteralPath $full)){throw 'The workbook is not available; it may have been moved or deleted from the combine\outputs folder.'}
  $name=[IO.Path]::GetFileName($full) -replace '[^\x20-\x7E]','_' -replace '"',''
  Send-Bytes $Context 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ([IO.File]::ReadAllBytes($full)) ('attachment; filename="'+$name+'"')
@@ -4654,6 +4759,294 @@ function New-CmbDraft([string]$Name,[string[]]$Tokens){
  }
  return ,@($rules)
 }
+# --- Combine side by side: the reports' patient facts (New-PatientFacts) written as a config, and a check that runs both on the current
+# Provider Analysis files and compares them provider by provider, patient by patient, field by field.
+$script:CmbPaConfigName='Provider Analysis facts'
+$script:CmbProviderAnalysisConfig=@'
+[
+{"rule":"config","name":"Provider Analysis facts","description":"The patient facts behind the provider reports, as rules: one row per provider and patient, joined the way the report code (New-PatientFacts) joins the seven sources.","note":"Generated from the report code. The side-by-side check on the Output page compares this config with the reports, patient by patient."},
+{"rule":"source","source":"export","label":"Export","match":["MemberID","Provider Name","Last ACV Date","Total Care Gaps"],"fileName":"Export*","read":"text","note":"Defines the patients: a provider's report lists the Export rows under that provider's name"},
+{"rule":"source","source":"quality","label":"PtListQuality","match":["MemberID","Provider Name","OMW Critical Due Date","BCS"],"fileName":"PtListQuality*","read":"text","unique":["NPI","MemberID"],"note":"HEDIS status per measure; a Member ID listed twice under one provider is ignored, as in the reports"},
+{"rule":"source","source":"dsc","label":"Diabetes Scorecard","match":["Member ID","Provider","Eye Exam Gap Status","% eGFR last 12 mo."],"fileName":"DiabetesScorecard*","read":"text","unique":["NPI","MemberID"],"required":false,"note":"Diabetic patients; its KED, EED, GSD and Med Adherence DM override PtListQuality"},
+{"rule":"source","source":"serial","label":"Serial Scheduling","match":["Member ID","Provider Name","PCP Visit Dates"],"fileName":"SerialScheduling*","read":"text","unique":["NPI","MemberID"],"required":false,"note":"PCP visit dates, A1c date, future visits"},
+{"rule":"source","source":"rpo","label":"Risk Population Outreach","match":["Member ID","Epic Pcp","Next Acv"],"fileName":"RiskPopulationOutreach*","read":"text","unique":["NPI","MemberID"],"required":false,"note":"Next ACV (a booked ACV clears ACV due)"},
+{"rule":"source","source":"hr_crh","label":"HR-CRH","match":["Patient Insurance ID","PCP Name"],"fileName":"HR-CRH*","read":"text","required":false,"note":"High-risk list; used for a provider whose profile names them in HR-CRH"},
+{"rule":"source","source":"hr_riv","label":"HR-RIVPHNYCMM","match":["Patient Insurance ID","PCP Name"],"fileName":"HR-RIVPHNYCMM*","read":"text","required":false,"note":"High-risk list; used only for providers with no HR-CRH name, as in the reports"},
+{"rule":"map","source":"export","field":"MemberID","column":"MemberID"},
+{"rule":"map","source":"export","field":"ExportProvider","column":"Provider Name"},
+{"rule":"map","source":"export","field":"NPI","expr":"lookup('profile:Export', [Provider Name], 'npi')","note":"The provider whose saved profile uses this Export name; rows of providers without a profile get no key"},
+{"rule":"map","source":"export","field":"First","column":"First Name"},
+{"rule":"map","source":"export","field":"Last","column":"Last Name"},
+{"rule":"map","source":"export","field":"DOB","column":"Date of Birth","type":"date"},
+{"rule":"map","source":"export","field":"Payer","column":"Payer"},
+{"rule":"map","source":"export","field":"LastAcv","column":"Last ACV Date","type":"date"},
+{"rule":"map","source":"export","field":"LastQemNonPcp","column":"Last QEM date with non-PCP","type":"date"},
+{"rule":"map","source":"export","field":"PcpVisit","column":"Last QEM Visit Date with any PCP in assigned TIN","type":"date"},
+{"rule":"map","source":"export","field":"CompletedAttest","column":"Completed Attestations"},
+{"rule":"map","source":"export","field":"IncompletedAttest","column":"Incompleted Attestations"},
+{"rule":"map","source":"export","field":"OpenICD","column":"Open ICDs"},
+{"rule":"map","source":"export","field":"NewPatientFlag","column":"New Patient"},
+{"rule":"map","source":"export","field":"TotalCareGaps","column":"Total Care Gaps"},
+{"rule":"map","source":"export","field":"TcmFlag","column":"TCM"},
+{"rule":"map","source":"export","field":"Phone","column":"Phone Number"},
+{"rule":"map","source":"export","field":"ActiveDate","column":"Active Date","type":"date"},
+{"rule":"map","source":"quality","field":"MemberID","column":"MemberID"},
+{"rule":"map","source":"quality","field":"NPI","expr":"lookup('profile:PtListQuality', [Provider Name], 'npi')"},
+{"rule":"map","source":"quality","field":"Q_BCS","column":"BCS"},
+{"rule":"map","source":"quality","field":"Q_COLO","column":"COLO"},
+{"rule":"map","source":"quality","field":"Q_EED","column":"EED"},
+{"rule":"map","source":"quality","field":"Q_GSD","column":"GSD"},
+{"rule":"map","source":"quality","field":"Q_CBP","column":"CBP"},
+{"rule":"map","source":"quality","field":"Q_OMW","column":"OMW"},
+{"rule":"map","source":"quality","field":"Q_KED","column":"KED"},
+{"rule":"map","source":"quality","field":"Q_SPC","column":"SPC"},
+{"rule":"map","source":"quality","field":"Q_MAD","column":"MAD"},
+{"rule":"map","source":"quality","field":"Q_MAC","column":"MAC"},
+{"rule":"map","source":"quality","field":"Q_MAH","column":"MAH"},
+{"rule":"map","source":"quality","field":"Q_SUPD","column":"SUPD"},
+{"rule":"map","source":"quality","field":"Q_COB","column":"COB"},
+{"rule":"map","source":"quality","field":"Q_POLY","column":"POLY"},
+{"rule":"map","source":"quality","field":"OmwDue","column":"OMW Critical Due Date","type":"date"},
+{"rule":"map","source":"dsc","field":"DscProvider","column":"Provider","clean":["fillDown"],"note":"The scorecard names the provider only on the first row of each group"},
+{"rule":"map","source":"dsc","field":"NPI","expr":"lookup('profile:DiabetesScorecard', DscProvider, 'npi')"},
+{"rule":"map","source":"dsc","field":"MemberID","column":"Member ID"},
+{"rule":"map","source":"dsc","field":"MRN","column":"Mrn","clean":["blankIf:0"]},
+{"rule":"map","source":"dsc","field":"D_KED","column":"KED"},
+{"rule":"map","source":"dsc","field":"D_EED","column":"EED"},
+{"rule":"map","source":"dsc","field":"D_GSD","column":"GSD"},
+{"rule":"map","source":"dsc","field":"MedAdhDM","column":"Med Adherence DM"},
+{"rule":"map","source":"dsc","field":"EgfrPct","column":"% eGFR last 12 mo."},
+{"rule":"map","source":"dsc","field":"UacrPct","column":"% uACR last 12 mo."},
+{"rule":"map","source":"dsc","field":"NextAppt","column":"Next Appt Date","type":"date"},
+{"rule":"map","source":"dsc","field":"NextApptSpecialty","column":"Next Appt Specialty"},
+{"rule":"map","source":"dsc","field":"A1cText","column":"Avg Last A1c"},
+{"rule":"map","source":"dsc","field":"EyeStatus","column":"Eye Exam Gap Status"},
+{"rule":"map","source":"dsc","field":"EyeDate","column":"Eye Exam Date","type":"date"},
+{"rule":"map","source":"serial","field":"NPI","expr":"lookup('profile:SerialScheduling', [Provider Name], 'npi')"},
+{"rule":"map","source":"serial","field":"MemberID","column":"Member ID"},
+{"rule":"map","source":"serial","field":"MRN","column":"MRN","clean":["blankIf:0"]},
+{"rule":"map","source":"serial","field":"PcpVisitDates","column":"PCP Visit Dates"},
+{"rule":"map","source":"serial","field":"A1cDate","column":"A1c Date","type":"date"},
+{"rule":"map","source":"serial","field":"FutureVisits","column":"Future PCP Visits 2026"},
+{"rule":"map","source":"rpo","field":"NPI","expr":"lookup('profile:RiskPopulationOutreach', [Epic Pcp], 'npi')"},
+{"rule":"map","source":"rpo","field":"MemberID","column":"Member ID"},
+{"rule":"map","source":"rpo","field":"MRN","column":"Mrn","clean":["blankIf:0"]},
+{"rule":"map","source":"rpo","field":"NextAcv","column":"Next Acv","type":"date"},
+{"rule":"map","source":"hr_crh","field":"NPI","expr":"lookup('profile:HR-CRH', [PCP Name], 'npi')"},
+{"rule":"map","source":"hr_crh","field":"MemberID","column":"Patient Insurance ID"},
+{"rule":"map","source":"hr_crh","field":"HrFirst","column":"Patient First Name"},
+{"rule":"map","source":"hr_crh","field":"HrLast","column":"Patient Last Name"},
+{"rule":"map","source":"hr_crh","field":"HrDOB","column":"DOB","type":"date"},
+{"rule":"map","source":"hr_riv","field":"NPI","expr":"lookup('profile:HR-RIVPHNYCMM', [PCP Name], 'npi')"},
+{"rule":"map","source":"hr_riv","field":"MemberID","column":"Patient Insurance ID"},
+{"rule":"map","source":"hr_riv","field":"HrFirst","column":"Patient First Name"},
+{"rule":"map","source":"hr_riv","field":"HrLast","column":"Patient Last Name"},
+{"rule":"map","source":"hr_riv","field":"HrDOB","column":"DOB","type":"date"},
+{"rule":"key","fields":["NPI","MemberID"],"sources":["export","quality","dsc","serial","rpo"],"note":"Each provider's report joins only that provider's rows, by Member ID, so a patient here is one provider and one Member ID"},
+{"rule":"key","fields":["NPI","MemberID"],"sources":["hr_crh","hr_riv"],"match":"prefix","against":["export"],"note":"High-risk IDs can be cut short: one joins the single Export Member ID that begins with it; several matches leave it out; none makes a high-risk-only patient"},
+{"rule":"field","field":"MemberID","from":["export","hr_crh","hr_riv"],"conflicts":"ignore","note":"The Export Member ID; a shortened high-risk ID only for high-risk-only patients"},
+{"rule":"field","field":"MRN","from":["dsc","serial","rpo"],"note":"First MRN other than 0 from the scorecard, Serial Scheduling, then Risk Population Outreach"},
+{"rule":"field","field":"InExport","how":"exists","from":["export"]},
+{"rule":"field","field":"HighRisk","how":"exists","from":["hr_crh","hr_riv"],"note":"On the provider's high-risk list"},
+{"rule":"field","field":"Diabetic","how":"exists","from":["dsc"],"note":"On the Diabetes Scorecard"},
+{"rule":"derive","field":"Provider","expr":"lookup('profiles', NPI, 'provider')"},
+{"rule":"derive","field":"Location","expr":"lookup('profiles', NPI, 'location')"},
+{"rule":"derive","field":"RiskPool","expr":"lookup('profiles', NPI, 'riskPool')"},
+{"rule":"derive","field":"FirstName","expr":"if(InExport, First, HrFirst)"},
+{"rule":"derive","field":"LastName","expr":"if(InExport, Last, HrLast)"},
+{"rule":"derive","field":"BirthDate","expr":"if(InExport, DOB, HrDOB)"},
+{"rule":"derive","field":"ACOR","expr":"if(InExport, Payer = 'ACOR', blank)"},
+{"rule":"derive","field":"ACVDue","expr":"LastAcv is not blank and if(Payer = 'ACOR', daysBetween(LastAcv, today()) >= 366, LastAcv <= date(year(today()) & '-01-01')) and not (NextAcv is not blank and NextAcv >= today())","note":"ACOR: no ACV in the last 366 days; others: none this calendar year (as in the reports, an ACV dated January 1 counts as last year); a future ACV in Risk Population Outreach clears it"},
+{"rule":"derive","field":"Attest","expr":"coalesce(number(replace(CompletedAttest, '%$', '')), 0) + coalesce(number(replace(IncompletedAttest, '%$', '')), 0) > 0"},
+{"rule":"derive","field":"NewPatient","expr":"upper(trim(NewPatientFlag)) in ('1','Y','YES','TRUE')"},
+{"rule":"derive","field":"Egfr","expr":"coalesce(number(replace(EgfrPct, '%$', '')), 0)"},
+{"rule":"derive","field":"Uacr","expr":"coalesce(number(replace(UacrPct, '%$', '')), 0)"},
+{"rule":"derive","field":"S_BCS","expr":"if(Q_BCS in ('Needed','Non-compliant'), 'open', if(Q_BCS in ('Completed','Compliant'), 'closed', blank))"},
+{"rule":"derive","field":"S_COLO","expr":"if(Q_COLO in ('Needed','Non-compliant'), 'open', if(Q_COLO in ('Completed','Compliant'), 'closed', blank))"},
+{"rule":"derive","field":"S_EED","expr":"if(D_EED in ('Needed','Non-compliant'), 'open', if(D_EED in ('Completed','Compliant'), 'closed', if(Q_EED in ('Needed','Non-compliant'), 'open', if(Q_EED in ('Completed','Compliant'), 'closed', blank))))","note":"Scorecard EED overrides PtListQuality"},
+{"rule":"derive","field":"S_GSD","expr":"if(D_GSD in ('Needed','Non-compliant'), 'open', if(D_GSD in ('Completed','Compliant'), 'closed', if(Q_GSD in ('Needed','Non-compliant'), 'open', if(Q_GSD in ('Completed','Compliant'), 'closed', blank))))","note":"Scorecard GSD overrides PtListQuality"},
+{"rule":"derive","field":"S_CBP","expr":"if(Q_CBP in ('Needed','Non-compliant'), 'open', if(Q_CBP in ('Completed','Compliant'), 'closed', blank))"},
+{"rule":"derive","field":"S_OMW","expr":"if(Q_OMW in ('Needed','Non-compliant'), 'open', if(Q_OMW in ('Completed','Compliant'), 'closed', blank))"},
+{"rule":"derive","field":"S_KED","expr":"if(Diabetic and Egfr >= 100 and Uacr >= 100, 'closed', if(D_KED in ('Needed','Non-compliant'), 'open', if(D_KED in ('Completed','Compliant'), 'closed', if(Q_KED in ('Needed','Non-compliant'), 'open', if(Q_KED in ('Completed','Compliant'), 'closed', blank)))))","note":"Scorecard KED overrides PtListQuality; eGFR and uACR both at 100% close it"},
+{"rule":"derive","field":"S_SPC","expr":"if(Q_SPC in ('Needed','Non-compliant'), 'open', if(Q_SPC in ('Completed','Compliant'), 'closed', blank))"},
+{"rule":"derive","field":"S_MAD","expr":"if(MedAdhDM in ('Needed','Non-compliant'), 'open', if(MedAdhDM in ('Completed','Compliant'), 'closed', if(Q_MAD in ('Needed','Non-compliant'), 'open', if(Q_MAD in ('Completed','Compliant'), 'closed', blank))))","note":"Scorecard Med Adherence DM overrides PtListQuality"},
+{"rule":"derive","field":"S_MAC","expr":"if(Q_MAC in ('Needed','Non-compliant'), 'open', if(Q_MAC in ('Completed','Compliant'), 'closed', blank))"},
+{"rule":"derive","field":"S_MAH","expr":"if(Q_MAH in ('Needed','Non-compliant'), 'open', if(Q_MAH in ('Completed','Compliant'), 'closed', blank))"},
+{"rule":"derive","field":"S_SUPD","expr":"if(Q_SUPD in ('Needed','Non-compliant'), 'open', if(Q_SUPD in ('Completed','Compliant'), 'closed', blank))"},
+{"rule":"derive","field":"S_COB","expr":"if(Q_COB in ('Needed','Non-compliant'), 'open', if(Q_COB in ('Completed','Compliant'), 'closed', blank))"},
+{"rule":"derive","field":"S_POLY","expr":"if(Q_POLY in ('Needed','Non-compliant'), 'open', if(Q_POLY in ('Completed','Compliant'), 'closed', blank))"},
+{"rule":"derive","field":"OpenHedis","expr":"join(', ', if(S_BCS = 'open', 'BCS', blank), if(S_COLO = 'open', 'COLO', blank), if(S_EED = 'open', 'EED', blank), if(S_GSD = 'open', 'GSD', blank), if(S_CBP = 'open', 'CBP', blank), if(S_OMW = 'open', 'OMW', blank), if(S_KED = 'open', 'KED', blank), if(S_SPC = 'open', 'SPC', blank), if(S_MAD = 'open', 'MAD', blank), if(S_MAC = 'open', 'MAC', blank), if(S_MAH = 'open', 'MAH', blank), if(S_SUPD = 'open', 'SUPD', blank), if(S_COB = 'open', 'COB', blank), if(S_POLY = 'open', 'POLY', blank))","note":"Compared as a set: the reports may list the overridden measures in another order"},
+{"rule":"derive","field":"ClosedHedis","expr":"join(', ', if(S_BCS = 'closed', 'BCS', blank), if(S_COLO = 'closed', 'COLO', blank), if(S_EED = 'closed', 'EED', blank), if(S_GSD = 'closed', 'GSD', blank), if(S_CBP = 'closed', 'CBP', blank), if(S_OMW = 'closed', 'OMW', blank), if(S_KED = 'closed', 'KED', blank), if(S_SPC = 'closed', 'SPC', blank), if(S_MAD = 'closed', 'MAD', blank), if(S_MAC = 'closed', 'MAC', blank), if(S_MAH = 'closed', 'MAH', blank), if(S_SUPD = 'closed', 'SUPD', blank), if(S_COB = 'closed', 'COB', blank), if(S_POLY = 'closed', 'POLY', blank))"},
+{"rule":"derive","field":"LastVisit","expr":"max(LastQemNonPcp, LastAcv, PcpVisit)"},
+{"rule":"derive","field":"SerialLast","expr":"latestDate(PcpVisitDates, today())","note":"Latest PCP visit date in Serial Scheduling that is not in the future"},
+{"rule":"derive","field":"A1c","expr":"number(replace(A1cText, '%$', ''))"},
+{"rule":"derive","field":"EyeOpen","expr":"Diabetic and EyeStatus = 'Open'"},
+{"rule":"derive","field":"EgfrNeeded","expr":"Diabetic and Egfr < 100"},
+{"rule":"derive","field":"UacrNeeded","expr":"Diabetic and Uacr < 100"},
+{"rule":"derive","field":"TotalGaps","expr":"coalesce(number(replace(TotalCareGaps, '%$', '')), 0)"},
+{"rule":"derive","field":"IncompleteAttest","expr":"coalesce(number(replace(IncompletedAttest, '%$', '')), 0)"},
+{"rule":"derive","field":"OpenIcdCount","expr":"countItems(OpenICD, ',', '0')"},
+{"rule":"derive","field":"Tcm","expr":"upper(trim(TcmFlag)) in ('1','Y','YES','TRUE') or coalesce(number(replace(TcmFlag, '%$', '')), 0) > 0"},
+{"rule":"filter","keep":"InExport or HighRisk","note":"The reports list a provider's Export patients plus high-risk patients not found in Export"},
+{"rule":"sort","field":"Provider"},
+{"rule":"sort","field":"LastName"},
+{"rule":"sort","field":"FirstName"},
+{"rule":"output","field":"NPI"},
+{"rule":"output","field":"Provider"},
+{"rule":"output","field":"Location"},
+{"rule":"output","field":"RiskPool"},
+{"rule":"output","field":"MemberID"},
+{"rule":"output","field":"MRN"},
+{"rule":"output","field":"FirstName","header":"First"},
+{"rule":"output","field":"LastName","header":"Last"},
+{"rule":"output","field":"BirthDate","header":"DOB"},
+{"rule":"output","field":"ACOR"},
+{"rule":"output","field":"ACVDue"},
+{"rule":"output","field":"Attest"},
+{"rule":"output","field":"OpenICD"},
+{"rule":"output","field":"NewPatient"},
+{"rule":"output","field":"OpenHedis"},
+{"rule":"output","field":"ClosedHedis"},
+{"rule":"output","field":"HighRisk"},
+{"rule":"output","field":"LastVisit"},
+{"rule":"output","field":"SerialLast"},
+{"rule":"output","field":"A1cDate"},
+{"rule":"output","field":"FutureVisits"},
+{"rule":"output","field":"NextAppt"},
+{"rule":"output","field":"NextApptSpecialty"},
+{"rule":"output","field":"A1c"},
+{"rule":"output","field":"A1cText"},
+{"rule":"output","field":"Diabetic"},
+{"rule":"output","field":"EyeOpen"},
+{"rule":"output","field":"EyeDate"},
+{"rule":"output","field":"EgfrNeeded"},
+{"rule":"output","field":"UacrNeeded"},
+{"rule":"output","field":"MedAdhDM"},
+{"rule":"output","field":"OmwDue"},
+{"rule":"output","field":"TotalGaps"},
+{"rule":"output","field":"IncompleteAttest"},
+{"rule":"output","field":"OpenIcdCount"},
+{"rule":"output","field":"Tcm"},
+{"rule":"output","field":"Payer"},
+{"rule":"output","field":"Phone"},
+{"rule":"output","field":"ActiveDate"},
+{"rule":"output","field":"PcpVisit"},
+{"rule":"output","field":"NextAcv"},
+{"rule":"view","view":"By provider","groupBy":["Location","Provider"]},
+{"rule":"measure","view":"By provider","name":"Patients"},
+{"rule":"measure","view":"By provider","name":"ACV due","where":"ACVDue"},
+{"rule":"measure","view":"By provider","name":"High risk","where":"HighRisk"},
+{"rule":"measure","view":"By provider","name":"Diabetic","where":"Diabetic"},
+{"rule":"measure","view":"By provider","name":"With open HEDIS","where":"OpenHedis is not blank"},
+{"rule":"view","view":"By location","groupBy":["Location"]},
+{"rule":"measure","view":"By location","name":"Patients"},
+{"rule":"measure","view":"By location","name":"ACV due","where":"ACVDue"},
+{"rule":"measure","view":"By location","name":"High risk","where":"HighRisk"},
+{"rule":"measure","view":"By location","name":"Diabetic","where":"Diabetic"},
+{"rule":"measure","view":"By location","name":"With open HEDIS","where":"OpenHedis is not blank"},
+{"rule":"view","view":"By risk pool","groupBy":["RiskPool"]},
+{"rule":"measure","view":"By risk pool","name":"Patients"},
+{"rule":"measure","view":"By risk pool","name":"ACV due","where":"ACVDue"},
+{"rule":"measure","view":"By risk pool","name":"High risk","where":"HighRisk"},
+{"rule":"measure","view":"By risk pool","name":"Diabetic","where":"Diabetic"},
+{"rule":"measure","view":"By risk pool","name":"With open HEDIS","where":"OpenHedis is not blank"}
+]
+'@
+$script:CmbParityFields=[ordered]@{MemberID='text';MRN='text';First='text';Last='text';DOB='date';ACOR='bool';ACVDue='bool';Attest='bool';OpenICD='text';NewPatient='bool';OpenHedis='list';ClosedHedis='list';HighRisk='bool';LastVisit='date';SerialLast='date';A1cDate='date';FutureVisits='text';NextAppt='date';NextApptSpecialty='text';A1c='number';A1cText='text';Diabetic='bool';EyeOpen='bool';EyeDate='date';EgfrNeeded='bool';UacrNeeded='bool';MedAdhDM='text';OmwDue='date';TotalGaps='number';IncompleteAttest='number';OpenIcdCount='number';Tcm='bool';Payer='text';Phone='text';ActiveDate='date';PcpVisit='date';NextAcv='date'}
+function Set-CmbProviderAnalysisConfig{
+ # Writes the config that reproduces the reports' patient facts; an existing one is kept in its history first.
+ $r=Read-CmbConfigText $script:CmbProviderAnalysisConfig;if(@($r.errors).Count){throw ('The built-in config could not be read: '+$r.errors[0].message)}
+ $sv=Save-CmbConfig $script:CmbPaConfigName @($r.rules) 'written from the report code';return (Get-CmbConfigModel $sv.name)
+}
+function ConvertTo-CmbParityValue($V,[string]$Kind){
+ # One value in the form both sides are compared in: blank as '', true/false, dates as yyyy-MM-dd, numbers without trailing zeros, lists sorted.
+ if($null -eq $V){return ''};if($V -is [string] -and [string]::IsNullOrWhiteSpace($V)){return ''}
+ switch($Kind){
+  'bool'{if($V -is [bool]){if($V){return 'TRUE'};return 'FALSE'};$b=[CmbRt]::Bool($V);if($null -eq $b){return [CmbRt]::Text($V).Trim()};if($b){return 'TRUE'};return 'FALSE'}
+  'date'{$d=[CmbRt]::Date($V);if($null -eq $d){return [CmbRt]::Text($V).Trim()};$t=[DateTime]$d;if($t.TimeOfDay.Ticks -eq 0){return $t.ToString('yyyy-MM-dd')};return $t.ToString('yyyy-MM-dd HH:mm')}
+  'number'{$n=[CmbRt]::Num($V);if($null -eq $n){return [CmbRt]::Text($V).Trim()};return ([double]$n).ToString('0.######',[Globalization.CultureInfo]::InvariantCulture)}
+  'list'{return ((@(([CmbRt]::Text($V)) -split ','|ForEach-Object{$_.Trim()}|Where-Object{$_})|Sort-Object) -join ',')}
+ }
+ return [CmbRt]::Text($V).Trim()
+}
+function New-CmbParityRun($Body){
+ $name=[string](Get-P $Body 'name' '');$c=Read-CmbConfigFile $name;if(@($c.errors).Count){throw ('The config file could not be read (line '+$c.errors[0].line+': '+$c.errors[0].message+').')}
+ if(@(Get-ProviderProfiles|Where-Object{$null -ne $_ -and [string](Get-P $_ 'npi' '') -match '^\d{10}$'}).Count -eq 0){throw 'There are no saved provider profiles; the reports (and so the comparison) are built per provider.'}
+ foreach($r in @(Get-CmbRuns)){if([string](Get-P $r 'state' '') -in @('Starting','Running') -and !(Update-CmbLiveness $r)){throw 'A combine run is already running; wait for it to finish.'}}
+ $sha=[Security.Cryptography.SHA256]::Create();try{$hash=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($c.text))) -replace '-','')}finally{$sha.Dispose()}
+ $id=[Guid]::NewGuid().ToString('N');$path=Get-CmbRunPath $id
+ $run=[ordered]@{cmbRunVersion=1;runId=$id;kind='parity';state='Starting';percent=1;stage='Launching the side-by-side worker';requestedUtc=[DateTime]::UtcNow.ToString('o');configName=$c.name;configPath=$c.path;configText=$c.text;configSha256=$hash;assignments=@();workerPid=0}
+ Save-JsonAtomic $path $run;Log 'COMBINE_PARITY_REQUESTED' 'OK' $c.name
+ if($script:CmbInline){Invoke-CmbRun $id}
+ else{try{$null=Start-CmbWorker $id}catch{$run.state='Failed';$run.stage='Worker launch failed';$run['errorSummary']=$_.Exception.Message;Save-JsonAtomic $path $run;Log 'COMBINE_FAILED' 'FAILED' $_.Exception.Message}}
+ return (Get-CmbRunModel $id)
+}
+function Invoke-CmbParity($Run,[string]$Path){
+ # Combine side: the config on the current Provider Analysis files. Reports side: every saved profile's patient facts, read and joined by
+ # the report code. Rows pair up on NPI + Member ID; each field is compared after ConvertTo-CmbParityValue.
+ Set-RunProgress $Run $Path 2 'Loading the current Provider Analysis files into Combine'
+ $imp=@(Import-CmbCanonicalFiles);if($imp.Count -eq 0){throw 'No Provider Analysis source files have been imported yet (Sources tab).'}
+ $own=@{};foreach($x in $imp){$own[[string]$x.token]=$true}
+ $cfg=Read-CmbConfigText ([string]$Run.configText);$rules=@($cfg.rules);$files=@(Get-CmbLiveFiles);$plan0=Get-CmbPlan $rules
+ $choices=@{};foreach($s in $plan0.sources){foreach($c in @(Find-CmbFileCandidates $s $files)){if($own.ContainsKey($c.token)){$choices[$s.key]=$c.token+'|'+$c.sheet;break}}}
+ $assign=Get-CmbAssignments $plan0 $files $choices;$plan=Get-CmbPlan $rules (Get-CmbTablesFromAssignments $assign) -Strict
+ if($plan.errorCount){$first=@($plan.problems|Where-Object{$_.severity -eq 'error'}|Select-Object -First 3|ForEach-Object{$(if($_.rule){'row '+$_.rule+': '}else{''})+$_.message});throw ('The config has problems to fix first: '+($first -join ' | '))}
+ $picks=@{};$asg=@();foreach($k in @($assign.Keys)){$p=$assign[$k].pick;if(!$p){continue};$f=Get-CmbFile $p.token;$picks[$k]=@{pick=$p;file=$f};$asg+=[ordered]@{source=$assign[$k].source;token=$p.token;sheet=$p.sheet;file=$p.file;sha256=[string]$f.sha256;rows=$p.rows}}
+ Set-P $Run 'assignments' $asg
+ $sw=[Diagnostics.Stopwatch]::StartNew()
+ $res=Invoke-CmbEngine $plan $picks {param([int]$pc,[string]$st)Set-RunProgress $Run $Path ([int](4+$pc*0.5)) ('Combine: '+$st)}
+ $cmbSeconds=[Math]::Round($sw.Elapsed.TotalSeconds,1)
+ $hdr=@{};foreach($c in $res.outCols){if(!$hdr.ContainsKey($c.header)){$hdr[$c.header]=$c.key}}
+ foreach($need in @('NPI','MemberID')){if(!$hdr.ContainsKey($need)){throw ('The config''s output needs a column headed "'+$need+'" to pair rows with the reports.')}}
+ $fields=@($script:CmbParityFields.Keys|Where-Object{$hdr.ContainsKey($_)});$skipped=@($script:CmbParityFields.Keys|Where-Object{!$hdr.ContainsKey($_)})
+ # Reports side
+ $sw=[Diagnostics.Stopwatch]::StartNew()
+ $profiles=@(Get-ProviderProfiles|Where-Object{$null -ne $_ -and [string](Get-P $_ 'npi' '') -match '^\d{10}$'})
+ $read=Read-GroupSources $profiles $Run $Path 56 24
+ Set-RunProgress $Run $Path 82 'Reports: joining each provider''s patients'
+ $orig=[ordered]@{};$origDup=0;$names=@{}
+ foreach($p in $profiles){
+  $npi=[string]$p.npi;$names[$npi]=[string](Get-P $p 'displayName' $npi)
+  $f=Get-ProviderFactsFromGroups $read.groups $p
+  foreach($pt in @($f.facts.patients)){$k=$npi+'|'+[CmbRt]::Key($pt.MemberID);if($orig.Contains($k)){$origDup++}else{$orig[$k]=$pt}}
+ }
+ $repSeconds=[Math]::Round($sw.Elapsed.TotalSeconds,1)
+ # Combine rows
+ Set-RunProgress $Run $Path 90 'Comparing'
+ $FV=$res.F;$npiA=$FV[$hdr['NPI']];$midA=$FV[$hdr['MemberID']];$cmb=@{};$cmbDup=0
+ foreach($q in $res.order){$k=[CmbRt]::Text($npiA[$q]).Trim()+'|'+[CmbRt]::Key($midA[$q]);if($cmb.ContainsKey($k)){$cmbDup++}else{$cmb[$k]=$q}}
+ $diffCount=[ordered]@{};foreach($f in $fields){$diffCount[$f]=0};$diffs=[Collections.Generic.List[object]]::new();$matched=0;$identical=0;$onlyRep=[Collections.Generic.List[object]]::new()
+ foreach($k in @($orig.Keys)){
+  $pt=$orig[$k];$npi=$k.Substring(0,$k.IndexOf('|'))
+  if(!$cmb.ContainsKey($k)){$onlyRep.Add([ordered]@{npi=$npi;provider=[string]$names[$npi];memberId=[string]$pt.MemberID;name=(([string]$pt.Last).Trim()+', '+([string]$pt.First).Trim()).Trim(', ')});continue}
+  $q=$cmb[$k];$matched++;$same=$true
+  foreach($f in $fields){
+   $kind=$script:CmbParityFields[$f];$a=ConvertTo-CmbParityValue $pt.$f $kind;$b=ConvertTo-CmbParityValue $FV[$hdr[$f]][$q] $kind
+   if($a -cne $b){$same=$false;$diffCount[$f]++;if($diffs.Count -lt 100000){$diffs.Add([ordered]@{npi=$npi;provider=[string]$names[$npi];memberId=[string]$pt.MemberID;field=$f;reports=$a;combine=$b})}}
+  }
+  if($same){$identical++}
+ }
+ $onlyCmb=[Collections.Generic.List[object]]::new()
+ foreach($k in @($cmb.Keys)){if(!$orig.Contains($k)){$q=$cmb[$k];$npi=$k.Substring(0,$k.IndexOf('|'));$nm='';if($hdr.ContainsKey('Last')){$nm=[CmbRt]::Text($FV[$hdr['Last']][$q])};if($hdr.ContainsKey('First')){$nm=($nm+', '+[CmbRt]::Text($FV[$hdr['First']][$q])).Trim(', ')};$onlyCmb.Add([ordered]@{npi=$npi;provider=[string]$names[$npi];memberId=[CmbRt]::Text($midA[$q]);name=$nm})}}
+ # Workbooks: the usual Combine output, and the side-by-side comparison.
+ Set-RunProgress $Run $Path 94 'Writing the workbooks'
+ $stamp=(Get-Date).ToString('yyyy-MM-dd HHmmss');$base=(Get-SafeFileName ([string]$Run.configName))+' - '+$stamp
+ $out=Join-Path $script:Paths.CombineOutputs ($base+'.xlsx');$n=2;while(Test-Path -LiteralPath $out){$out=Join-Path $script:Paths.CombineOutputs ($base+' ('+$n+').xlsx');$n++}
+ Write-CmbWorkbook $res $out $Run
+ $pout=Join-Path $script:Paths.CombineOutputs ('Side by side - '+$base+'.xlsx');$n=2;while(Test-Path -LiteralPath $pout){$pout=Join-Path $script:Paths.CombineOutputs ('Side by side - '+$base+' ('+$n+').xlsx');$n++}
+ $sum=[ordered]@{providers=$profiles.Count;reportRows=$orig.Count;combineRows=$cmb.Count;matched=$matched;identical=$identical;onlyReports=$onlyRep.Count;onlyCombine=$onlyCmb.Count;reportDuplicates=$origDup;combineDuplicates=$cmbDup;differentRows=($matched-$identical);fieldsCompared=$fields.Count;fieldsNotCompared=$skipped;combineSeconds=$cmbSeconds;reportSeconds=$repSeconds;differences=@(foreach($f in $fields){[ordered]@{field=$f;rows=$diffCount[$f]}});samples=@($diffs|Select-Object -First 200);onlyReportsSample=@($onlyRep|Select-Object -First 100);onlyCombineSample=@($onlyCmb|Select-Object -First 100)}
+ $pkg=New-Object OfficeOpenXml.ExcelPackage;$used=@{}
+ try{
+  $items=@(@('Config',[string]$Run.configName),@('Built',(Get-Date).ToString('yyyy-MM-dd HH:mm:ss')),@('Providers with profiles',[double]$sum.providers),@('Patients in the reports',[double]$sum.reportRows),@('Patients in Combine',[double]$sum.combineRows),@('Paired (same NPI and Member ID)',[double]$sum.matched),@('Paired and identical in every compared field',[double]$sum.identical),@('Paired with differences',[double]$sum.differentRows),@('Only in the reports',[double]$sum.onlyReports),@('Only in Combine',[double]$sum.onlyCombine),@('Repeated in the reports (same provider and Member ID)',[double]$sum.reportDuplicates),@('Repeated in Combine',[double]$sum.combineDuplicates),@('Fields compared',($fields -join ', ')),@('Fields not compared (no output column)',($skipped -join ', ')))
+  $null=Add-CmbSheet $pkg $used 'Summary' @('Item','Value') @(foreach($x in $items){,([object[]]$x)}) $null @(52,90)
+  $null=Add-CmbSheet $pkg $used 'Field differences' @('Field','Rows that differ') @(foreach($f in $fields){,([object[]]@($f,[double]$diffCount[$f]))})
+  $null=Add-CmbSheet $pkg $used 'Differences' @('Provider','NPI','Member ID','Field','Reports','Combine') @(foreach($d in $diffs){,([object[]]@($d.provider,$d.npi,$d.memberId,$d.field,$d.reports,$d.combine))})
+  $null=Add-CmbSheet $pkg $used 'Only in the reports' @('Provider','NPI','Member ID','Name') @(foreach($d in $onlyRep){,([object[]]@($d.provider,$d.npi,$d.memberId,$d.name))})
+  $null=Add-CmbSheet $pkg $used 'Only in Combine' @('Provider','NPI','Member ID','Name') @(foreach($d in $onlyCmb){,([object[]]@($d.provider,$d.npi,$d.memberId,$d.name))})
+  [IO.File]::WriteAllBytes($pout,$pkg.GetAsByteArray())
+ }finally{$pkg.Dispose()}
+ return @{result=(Get-CmbRunSummary $res);parity=$sum;outputPath=$out;parityPath=$pout}
+}
 # --- Combine web: page models, request handling and the three pages (Files, Rules, Output).
 function Get-CmbLiveFiles{return @(Get-CmbFiles|Where-Object{Test-Path -LiteralPath ([string](Get-P $_ 'path' ''))})}
 function Get-CmbFilesModel{
@@ -4708,8 +5101,10 @@ function Get-CmbSetupModel([string]$Name,[hashtable]$Choices){
  return [ordered]@{name=$c.name;readErrors=@($c.errors);sources=$check.sources;errors=$check.errors;warnings=$check.warnings;problems=$problems;views=$check.views;fields=$check.fields}
 }
 function Get-CmbOutputPageModel{
- $runs=@(Get-CmbRuns);$latest=$null;if($runs.Count){$latest=Get-CmbRunModel ([string]$runs[0].runId)}
- return [ordered]@{configs=@(Get-CmbConfigs|ForEach-Object{$_.name});latest=$latest;history=@(foreach($r in $runs){if([string](Get-P $r 'state' '') -in @('Completed','Failed')){Get-CmbRunModel ([string]$r.runId) -Summary}});folder=$script:Paths.CombineOutputs}
+ $runs=@(Get-CmbRuns);$latest=$null;$latestParity=$null
+ foreach($r in $runs){$k=[string](Get-P $r 'kind' '');if($k -eq 'parity'){if(!$latestParity){$latestParity=Get-CmbRunModel ([string]$r.runId)}}elseif(!$latest){$latest=Get-CmbRunModel ([string]$r.runId)}}
+ $canon=@(foreach($src in @(Registry)){if(Test-Path -LiteralPath (Join-Path $script:Paths.CanonicalCurrent ([string]$src.canonicalFileName))){[string]$src.sourceKey}})
+ return [ordered]@{configs=@(Get-CmbConfigs|ForEach-Object{$_.name});latest=$latest;latestParity=$latestParity;paConfig=$script:CmbPaConfigName;canonicalSources=$canon;profiles=@(Get-OverviewProviders).Count;history=@(foreach($r in $runs){if([string](Get-P $r 'state' '') -in @('Completed','Failed')){Get-CmbRunModel ([string]$r.runId) -Summary}});folder=$script:Paths.CombineOutputs}
 }
 function Send-CmbJson($Context,$Value){Send $Context 200 'application/json' ($Value|ConvertTo-Json -Depth 25)}
 function Invoke-CmbRequest($Context,[string]$Method,[string]$Path){
@@ -4721,6 +5116,7 @@ function Invoke-CmbRequest($Context,[string]$Method,[string]$Path){
    '/combine/rules'{Send $Context 200 'text/html; charset=utf-8' (Get-CmbPage 'rules');return $true}
    '/combine/output'{Send $Context 200 'text/html; charset=utf-8' (Get-CmbPage 'output');return $true}
    '/combine/output.xlsx'{Send-CmbOutput $Context ([string]$q['id']);return $true}
+   '/combine/parity.xlsx'{Send-CmbOutput $Context ([string]$q['id']) 'parityPath';return $true}
    '/api/combine/files'{Send-CmbJson $Context (Get-CmbFilesModel);return $true}
    '/api/combine/file'{Send-CmbJson $Context (Get-CmbFileModel ([string]$q['token']) -Full);return $true}
    '/api/combine/configs'{Send-CmbJson $Context ([ordered]@{configs=@(Get-CmbConfigs);folder=$script:Paths.CombineConfigs});return $true}
@@ -4745,6 +5141,9 @@ function Invoke-CmbRequest($Context,[string]$Method,[string]$Path){
    '/api/combine/prompt'{$b=Read-BodyJson $Context;Send-CmbJson $Context (Get-CmbPrompt ([string](Get-P $b 'name' '')) ([string](Get-P $b 'text' '')) ([string](Get-P $b 'request' '')) ([string[]]@(Get-P $b 'tokens' @())) ([bool](Get-P $b 'examples' $false)));return $true}
    '/api/combine/draft'{$b=Read-BodyJson $Context;$n=Get-CmbConfigName ([string](Get-P $b 'name' ''));$rules=New-CmbDraft $n ([string[]]@(Get-P $b 'tokens' @()));Send-CmbJson $Context ([ordered]@{name=$n;text=(Format-CmbConfigText $rules)});return $true}
    '/api/combine/run'{Send-CmbJson $Context (New-CmbRun (Read-BodyJson $Context));return $true}
+   '/api/combine/parity'{Send-CmbJson $Context (New-CmbParityRun (Read-BodyJson $Context));return $true}
+   '/api/combine/pa-config'{Send-CmbJson $Context (Set-CmbProviderAnalysisConfig);return $true}
+   '/api/combine/import-canonical'{Send-CmbJson $Context ([ordered]@{imported=@(Import-CmbCanonicalFiles)});return $true}
   }
  }
  return $false
@@ -4797,6 +5196,7 @@ $script:CmbFilesHtml=@'
 <p class="muted">Excel (.xlsx) or text (.csv, .txt, .tsv) database exports. Each file is fingerprinted when it loads: the header row is found (even under title rows), and every column gets its type, fill rate, distinct values, value shapes and common values. The newest __FILEKEEP__ files are kept in <code>__FOLDER__</code>; loading the same file again reuses it.</p>
 <div id="drop" class="drop">Drop files here, or <button id="pick">Choose files...</button><input id="file" type="file" accept=".xlsx,.csv,.txt,.tsv" multiple hidden></div>
 <div id="queue"></div>
+<div class="row"><button class="alt" id="canon">Load the current Provider Analysis source files</button><span class="muted">Adds the seven files imported on the Sources tab, under their usual names, so a config can use them.</span></div>
 </section>
 <section class="card"><h2>Loaded files</h2>
 <div class="row"><button id="draft" disabled>Draft a config from the selected files...</button><span class="muted">Writes a first set of rules (sources, column maps, the patient key, field priorities, output columns and views) for you or your LLM to refine on the Rules page.</span></div>
@@ -4839,6 +5239,7 @@ async function uploadAll(list){
 }
 el('pick').onclick=()=>{el('file').value='';el('file').click()};
 el('file').onchange=()=>uploadAll([...el('file').files]);
+el('canon').onclick=async()=>{el('canon').disabled=true;el('queue').insertAdjacentHTML('beforeend','<div class="row" id="canonNote"><span class="muted">Loading the Provider Analysis source files...</span></div>');try{const j=await post('/api/combine/import-canonical');el('canonNote').innerHTML=arr(j.imported).length?'<span class="ok">Loaded</span> '+arr(j.imported).map(x=>esc(x.file)).join(', '):'<span class="warn">No source files have been imported on the Sources tab yet.</span>';await load()}catch(e){el('canonNote').innerHTML='<span class="error">'+esc(e.message)+'</span>'}el('canon').disabled=false;el('canonNote').removeAttribute('id')};
 const drop=el('drop');['dragenter','dragover'].forEach(n=>drop.addEventListener(n,e=>{e.preventDefault();drop.classList.add('over')}));['dragleave','drop'].forEach(n=>drop.addEventListener(n,e=>{e.preventDefault();drop.classList.remove('over')}));drop.addEventListener('drop',e=>uploadAll([...e.dataTransfer.files]));
 el('draft').onclick=async()=>{
  const tokens=[...document.querySelectorAll('.pickf:checked')].map(x=>x.value);if(!tokens.length)return;
@@ -5011,12 +5412,36 @@ $script:CmbOutputHtml=@'
 <div id="setup" class="muted">Loading...</div>
 <div class="row"><button class="go" id="run" disabled>Combine</button><span id="runNote" class="muted"></span></div>
 </section>
+<section class="card"><h2>Side by side with the provider reports</h2>
+<p class="muted">Checks a config against the code that builds the provider reports. It loads the current Provider Analysis source files (Sources tab) into Combine, runs the config on them, builds every saved provider's patient facts exactly as the reports do, and pairs the two by NPI and Member ID, comparing every field. The <b>Provider Analysis facts</b> config is that report logic written as rules, so a clean comparison shows the rules reproduce the reports.</p>
+<div class="row"><button class="alt" id="paCfg">Create or refresh the "Provider Analysis facts" config</button><button id="parity">Compare the selected config with the reports</button><span id="parityNote" class="muted"></span></div>
+<div id="parityOut"></div></section>
 <section class="card"><h2>Result</h2><div id="result"><span class="muted">Loading...</span></div></section>
 <section class="card"><h2>Previous runs</h2><p class="muted">Every run, newest first. Each workbook is saved in <code id="folder"></code> with the patient sheet, one sheet per view, and audit sheets: every rule's effect, the files used (with their SHA-256), conflicts, key conflicts, excluded patients, the source of every value, and the exact config.</p><div id="history"><span class="muted">Loading...</span></div></section>
 <script>
-let configs=[],setup=null,current=null,history=[],timer=null,choices={};
-function busy(){return !!current&&(current.state==='Starting'||current.state==='Running')}
-function sync(){el('run').disabled=busy()||!setup||setup.errors>0||!!arr(setup.readErrors).length;el('run').textContent=busy()?'Combining...':'Combine'}
+let configs=[],setup=null,current=null,history=[],timer=null,choices={},parityCur=null,paName='Provider Analysis facts',canon=[],profileCount=0;
+function running(o){return !!o&&(o.state==='Starting'||o.state==='Running')}
+function busy(){return running(current)||running(parityCur)}
+function sync(){el('run').disabled=busy()||!setup||setup.errors>0||!!arr(setup.readErrors).length;el('run').textContent=running(current)?'Combining...':'Combine';el('parity').disabled=busy()||!el('cfg').value||!canon.length||!profileCount;el('paCfg').disabled=busy();el('parity').textContent=running(parityCur)?'Comparing...':'Compare the selected config with the reports'}
+function showParity(o){
+ parityCur=o;const box=el('parityOut');
+ el('parityNote').textContent=(canon.length?canon.length+' Provider Analysis source files, ':'No Provider Analysis source files imported yet (Sources tab). ')+(profileCount?plural(profileCount,'provider profile'):'no provider profiles yet (Provider Wizard)');
+ if(!o){box.innerHTML='';sync();return}
+ if(running(o)){box.innerHTML='<p>Comparing '+esc(o.configName)+'... '+o.percent+'%</p><div class="progress"><span style="width:'+Math.max(0,Math.min(100,o.percent))+'%"></span></div><span class="muted">'+esc(o.stage)+'</span>';sync();return}
+ if(o.state==='Failed'){box.innerHTML='<p class="error">The comparison failed: '+esc(o.errorSummary)+'</p>';sync();return}
+ const p=o.parity||{};const clean=!p.differentRows&&!p.onlyReports&&!p.onlyCombine;
+ let h='<div class="row"><b>'+esc(o.configName)+'</b><span class="muted">compared '+esc(when(o.completedUtc))+(o.seconds!=null?' in '+o.seconds+' s':'')+'</span>'+(o.parityUrl?'<a class="btn" href="'+esc(o.parityUrl)+'">Download the comparison</a>':'')+(o.outputUrl?'<a class="btn alt" href="'+esc(o.outputUrl)+'">Combine workbook</a>':'')+'</div>';
+ h+='<p class="'+(clean?'ok':'warn')+'"><b>'+(clean?'Identical: every patient of every provider matches in all '+p.fieldsCompared+' fields.':'Differences found; see below and the Differences sheet.')+'</b></p>';
+ h+='<div class="tiles">'+tile('Providers',num(p.providers))+tile('Patients in the reports',num(p.reportRows))+tile('Patients in Combine',num(p.combineRows))+tile('Identical',num(p.identical),'of '+num(p.matched)+' paired')+tile('Only in the reports',num(p.onlyReports))+tile('Only in Combine',num(p.onlyCombine))+'</div>';
+ const d=arr(p.differences).filter(x=>x.rows>0);
+ h+='<p class="muted">'+num(p.fieldsCompared)+' fields compared'+(arr(p.fieldsNotCompared).length?'; not compared (no output column): '+arr(p.fieldsNotCompared).map(esc).join(', '):'')+'. Reports took '+p.reportSeconds+' s, Combine '+p.combineSeconds+' s.</p>';
+ if(d.length)h+='<h3>Fields that differ</h3>'+table(['Field','Patients'],d.map(x=>[x.field,num(x.rows)]),null,1)+'<h3>Differences <span class="muted">(first '+arr(p.samples).length+')</span></h3>'+table(['Provider','Member ID','Field','Reports','Combine'],arr(p.samples).map(x=>[x.provider,x.memberId,x.field,x.reports,x.combine]));
+ if(arr(p.onlyReportsSample).length)h+='<h3>Only in the reports</h3>'+table(['Provider','Member ID','Name'],arr(p.onlyReportsSample).map(x=>[x.provider,x.memberId,x.name]));
+ if(arr(p.onlyCombineSample).length)h+='<h3>Only in Combine</h3>'+table(['Provider','Member ID','Name'],arr(p.onlyCombineSample).map(x=>[x.provider,x.memberId,x.name]));
+ box.innerHTML=h;sync();
+}
+el('paCfg').onclick=async()=>{if(configs.includes(paName)&&!confirm('Replace the "'+paName+'" config with the rules written from the report code? Its current version is kept in its history.'))return;try{await post('/api/combine/pa-config');if(!configs.includes(paName)){configs.push(paName);configs.sort()}el('cfg').innerHTML=configs.map(n=>'<option value="'+esc(n)+'">'+esc(n)+'</option>').join('');el('cfg').value=paName;choices={};await loadSetup();el('parityNote').textContent='"'+paName+'" written; select Compare to check it against the reports.'}catch(e){alert(e.message)}};
+el('parity').onclick=async()=>{if(el('parity').disabled)return;el('parity').disabled=true;try{const o=await post('/api/combine/parity',{name:el('cfg').value});showParity(o);if(running(o))startPoll(o.runId)}catch(e){el('parityNote').innerHTML='<span class="error">'+esc(e.message)+'</span>';sync()}};
 async function loadSetup(){
  const n=el('cfg').value;rememberConfig(n);el('editLink').href='/combine/rules?config='+encodeURIComponent(n);if(!n){setup=null;el('setup').innerHTML='<p class="muted">No configs yet; make one on the <a href="/combine/rules">Rules</a> page.</p>';sync();return}
  try{setup=await api('/api/combine/setup?name='+encodeURIComponent(n)+'&choices='+encodeURIComponent(JSON.stringify(choices)));renderSetup()}catch(e){setup=null;el('setup').innerHTML='<p class="error">'+esc(e.message)+'</p>'}sync();
@@ -5044,21 +5469,22 @@ function showResult(o){
  h+='<h3>'+esc(r.sheet||'Patients')+' <span class="muted">(first '+arr(r.preview).length+' of '+num(r.patients)+')</span></h3>'+table(r.headers,r.preview);
  arr(r.views).forEach(v=>{h+='<h3>'+esc(v.name)+' <span class="muted">('+plural(v.totalRows,'group')+', '+plural(v.patients,'patient')+(v.totalRows>arr(v.rows).length?'; first '+arr(v.rows).length+' shown':'')+')</span></h3>'+table(v.headers,v.rows,v.total,v.groupCount)});
  h+='<h3>What each rule did</h3><div class="scroll"><table class="grid"><thead><tr><th>#</th><th>Rule</th><th>What it does</th><th>Effect in this run</th></tr></thead><tbody>'+arr(r.effects).map(e=>'<tr><td class="n">'+(e.index||'')+'</td><td><span class="badge b-'+esc(String(e.type).split(' ')[0])+'">'+esc(e.type)+'</span></td><td>'+esc(e.summary)+(e.note?'<br><span class="muted">'+esc(e.note)+'</span>':'')+'</td><td>'+esc(e.effect)+(e.problems?'<div class="prob warn">'+esc(e.problems)+'</div>':'')+'</td></tr>').join('')+'</tbody></table></div>';
- h+='<h3>Sources</h3>'+table(['Source','Role','File','Sheet','Rows read','Removed by filters','Without key','Rows used','Patients'],arr(r.sources).map(s=>[s.source,s.role,s.file,s.sheet,num(s.rowsRead),num(s.filtered),num(s.noKey),num(s.rowsUsed),s.role==='patients'?num(s.patients):'']));
+ h+='<h3>Sources</h3>'+table(['Source','Role','File','Sheet','Rows read','Removed (filters, unique)','Without key','Rows used','Patients'],arr(r.sources).map(s=>[s.source,s.role,s.file,s.sheet,num(s.rowsRead),num(s.filtered),num(s.noKey),num(s.rowsUsed),s.role==='patients'?num(s.patients):'']));
  if(arr(r.conflictSample).length)h+='<h3>Conflicts <span class="muted">(first '+arr(r.conflictSample).length+' of '+num(r.conflictRows)+'; all are on the Audit - Conflicts sheet)</span></h3>'+table(['Patient','Field','Chosen','From','Other values [source]'],arr(r.conflictSample).map(c=>[c.patient,c.field,c.chosen,c.from,c.others]));
  el('result').innerHTML=h;sync();
 }
 function historyHtml(list){
  if(!list.length)return '<span class="muted">None yet.</span>';
- return '<table class="grid"><thead><tr><th>Built</th><th>Config</th><th>Files</th><th class="n">Patients</th><th></th></tr></thead><tbody>'+list.map(r=>'<tr><td>'+esc(when(r.completedUtc||r.requestedUtc))+(current&&current.runId===r.runId?' <span class="muted">(shown above)</span>':'')+'</td><td>'+esc(r.configName)+'</td><td>'+arr(r.assignments).map(a=>esc(a.source)+': '+esc(a.file)).join('<br>')+'</td><td class="n">'+num(r.patients)+'</td><td>'+(r.state==='Completed'?'<a href="#" data-view="'+esc(r.runId)+'">View</a>'+(r.outputUrl?' &middot; <a href="'+esc(r.outputUrl)+'">Workbook</a>':' &middot; <span class="warn">workbook missing</span>'):'<span class="error">Failed: '+esc(r.errorSummary)+'</span>')+'</td></tr>').join('')+'</tbody></table>';
+ return '<table class="grid"><thead><tr><th>Built</th><th>Config</th><th>Files</th><th class="n">Patients</th><th></th></tr></thead><tbody>'+list.map(r=>'<tr><td>'+esc(when(r.completedUtc||r.requestedUtc))+(current&&current.runId===r.runId?' <span class="muted">(shown above)</span>':'')+'</td><td>'+esc(r.configName)+(r.kind==='parity'?' <span class="badge b-key">side by side</span>'+(r.state==='Completed'?' <span class="'+(r.differentRows?'warn':'ok')+'">'+(r.differentRows?plural(r.differentRows,'patient')+' differ':'identical')+'</span>':''):'')+'</td><td>'+arr(r.assignments).map(a=>esc(a.source)+': '+esc(a.file)).join('<br>')+'</td><td class="n">'+num(r.patients)+'</td><td>'+(r.state==='Completed'?'<a href="#" data-view="'+esc(r.runId)+'">View</a>'+(r.parityUrl?' &middot; <a href="'+esc(r.parityUrl)+'">Comparison</a>':'')+(r.outputUrl?' &middot; <a href="'+esc(r.outputUrl)+'">Workbook</a>':' &middot; <span class="warn">workbook missing</span>'):'<span class="error">Failed: '+esc(r.errorSummary)+'</span>')+'</td></tr>').join('')+'</tbody></table>';
 }
-el('history').addEventListener('click',async e=>{const a=e.target.closest('a[data-view]');if(!a)return;e.preventDefault();if(busy())return;try{showResult(await api('/api/combine/run?id='+encodeURIComponent(a.dataset.view)));el('history').innerHTML=historyHtml(history);el('result').scrollIntoView({behavior:'smooth'})}catch(err){el('result').innerHTML='<p class="error">'+esc(err.message)+'</p>'}});
+el('history').addEventListener('click',async e=>{const a=e.target.closest('a[data-view]');if(!a)return;e.preventDefault();if(busy())return;try{const o=await api('/api/combine/run?id='+encodeURIComponent(a.dataset.view));if(o.kind==='parity'){showParity(o);el('parityOut').scrollIntoView({behavior:'smooth'});return}showResult(o);el('history').innerHTML=historyHtml(history);el('result').scrollIntoView({behavior:'smooth'})}catch(err){el('result').innerHTML='<p class="error">'+esc(err.message)+'</p>'}});
 let pollErrors=0;
-function startPoll(id){if(timer)clearInterval(timer);pollErrors=0;timer=setInterval(async()=>{try{const o=await api('/api/combine/run?id='+encodeURIComponent(id));pollErrors=0;showResult(o);if(!busy()){clearInterval(timer);timer=null;await loadPage(false)}}catch(e){if(++pollErrors<5)return;clearInterval(timer);timer=null;el('result').innerHTML='<p class="error">'+esc(e.message)+'</p>'}},1500)}
+function startPoll(id){if(timer)clearInterval(timer);pollErrors=0;timer=setInterval(async()=>{try{const o=await api('/api/combine/run?id='+encodeURIComponent(id));pollErrors=0;if(o.kind==='parity')showParity(o);else showResult(o);if(!busy()){clearInterval(timer);timer=null;await loadPage(false)}}catch(e){if(++pollErrors<5)return;clearInterval(timer);timer=null;el('result').innerHTML='<p class="error">'+esc(e.message)+'</p>'}},1500)}
 el('run').onclick=async()=>{if(el('run').disabled)return;el('run').disabled=true;try{const o=await post('/api/combine/run',{name:el('cfg').value,choices:choices});showResult(o);if(busy())startPoll(o.runId);else await loadPage(false)}catch(e){el('runNote').innerHTML='<span class="error">'+esc(e.message)+'</span>';sync()}};
 async function loadPage(first){
  const m=await api('/api/combine/output');history=arr(m.history);el('folder').textContent=m.folder;
- if(first){configs=arr(m.configs);const want=curConfig();el('cfg').innerHTML=configs.length?configs.map(n=>'<option value="'+esc(n)+'">'+esc(n)+'</option>').join(''):'<option value="">No configs yet</option>';el('cfg').value=configs.includes(want)?want:(configs[0]||'');await loadSetup();showResult(m.latest);if(busy())startPoll(m.latest.runId)}
+ canon=arr(m.canonicalSources);profileCount=m.profiles||0;paName=m.paConfig||paName;
+ if(first){configs=arr(m.configs);const want=curConfig();el('cfg').innerHTML=configs.length?configs.map(n=>'<option value="'+esc(n)+'">'+esc(n)+'</option>').join(''):'<option value="">No configs yet</option>';el('cfg').value=configs.includes(want)?want:(configs[0]||'');await loadSetup();showResult(m.latest);showParity(m.latestParity);if(running(m.latest))startPoll(m.latest.runId);else if(running(m.latestParity))startPoll(m.latestParity.runId)}
  el('history').innerHTML=historyHtml(history);
 }
 loadPage(true).catch(e=>{el('result').innerHTML='<p class="error">'+esc(e.message)+'</p>'});
