@@ -1,5 +1,7 @@
 #requires -Version 5.1
-# ProviderAnalysisServer.ps1 - Draft 5.7 (ranked outreach lists, patient flags, Communication tab, unattended-run recovery, report server feeds, group Overview, new-patient lists, POC coding)
+# ProviderAnalysisServer.ps1 - Draft 5.8 (ranked outreach lists, patient flags, Communication tab, unattended-run recovery, report server feeds, group Overview, new-patient lists, POC coding, report continuity)
+# Draft 5.8: every report is compared with the report the provider last received (progress band, "Change since" column, changes appendix,
+# source file record), reports can be marked as sent, and the Provider Index exports the patient rollup behind chosen reports to Excel.
 # Adds provider indexes, guided cross-source mapping, fuzzy suggestions, NPI profiles, prepared job tracking, ranked outreach lists,
 # a flag mode (/flag?jobId=...) that excludes flagged patients from every list and panel on every later report for that provider,
 # and a Communication tab (/communication) that emails every provider in a risk pool a fresh report PDF via Outlook drafts.
@@ -237,7 +239,7 @@ function Request($Context){
   if($method -eq 'GET' -and $path -eq '/new-patients.file'){Send-NewListFile $Context ([string]$Context.Request.QueryString['id']) ([string]$Context.Request.QueryString['n']);return};
   if($method -eq 'GET' -and $path -eq '/poc-coding'){Send $Context 200 'text/html; charset=utf-8' (PocCodingPage);return};if($method -eq 'GET' -and $path -eq '/api/poc-coding'){Send $Context 200 'application/json' ((Get-PocPageModel)|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/poc-coding-upload'){$result=Receive-PocUpload $Context;Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/poc-coding-file'){Send $Context 200 'application/json' ((Get-PocFileModel ([string]$Context.Request.QueryString['token']))|ConvertTo-Json -Depth 8);return}
   if($method -eq 'POST' -and $path -eq '/api/poc-coding'){$result=New-PocRun (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/poc-coding-run'){Send $Context 200 'application/json' ((Get-PocRunModel ([string]$Context.Request.QueryString['id']))|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/poc-coding.report'){Send-PocReport $Context ([string]$Context.Request.QueryString['id']) ([string]$Context.Request.QueryString['download'] -eq '1');return}
- if($method -eq 'GET' -and $path -eq '/api/sync'){Send $Context 200 'application/json' ((Get-SyncModel)|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/sync-feed'){$b=Read-BodyJson $Context;$result=Register-ReportFeed ([string](Get-P $b 'text' ''));Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/sync-feed-remove'){$result=Remove-ReportFeed ([string]$Context.Request.QueryString['sourceKey']);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/sync-now'){$result=Invoke-FeedSync @([string]$Context.Request.QueryString['sourceKey']);Send $Context 200 'application/json' (ConvertTo-Json -InputObject @($result) -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/sync-schedule'){$result=Set-SyncSchedule (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/flags'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-ProviderFlags ([string]$Context.Request.QueryString['npi'])) -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/flag'){$result=Save-FlagFromRequest (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/run-next'){$script:RunNext=$true;Send $Context 202 'application/json' '{"status":"scheduled"}';return};if($method -eq 'GET' -and $path -eq '/api/jobs'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-Jobs) -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/job'){$result=New-PreparedJob (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/stage'){$result=Receive-Upload $Context;Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/confirm'){$result=Publish-StagedFile ([string]$Context.Request.QueryString['token']);$index=Update-ProviderIndexAfterImport ([string]$result.sourceKey) -Force;$result['providerCount']=$index.count;$result['indexSeconds']=$index.seconds;$result['indexError']=$index.error;Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/stop'){$script:Stop=$true;Send $Context 202 'application/json' '{"status":"stopping"}';return};Send $Context 404 'application/json' '{"error":"not found"}'}catch{$msg=Safe $_.Exception.Message;Log 'HTTP_REQUEST' 'FAILED' $msg;try{Send $Context 400 'application/json' (([ordered]@{error=$msg}|ConvertTo-Json -Compress))}catch{}}
+ if($method -eq 'GET' -and $path -eq '/api/sync'){Send $Context 200 'application/json' ((Get-SyncModel)|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/sync-feed'){$b=Read-BodyJson $Context;$result=Register-ReportFeed ([string](Get-P $b 'text' ''));Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/sync-feed-remove'){$result=Remove-ReportFeed ([string]$Context.Request.QueryString['sourceKey']);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/sync-now'){$result=Invoke-FeedSync @([string]$Context.Request.QueryString['sourceKey']);Send $Context 200 'application/json' (ConvertTo-Json -InputObject @($result) -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/sync-schedule'){$result=Set-SyncSchedule (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/flags'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-ProviderFlags ([string]$Context.Request.QueryString['npi'])) -Depth 6);return};if($method -eq 'GET' -and $path -eq '/rollup.xlsx'){Send-RollupWorkbook $Context;return};if($method -eq 'POST' -and $path -eq '/api/report-sent'){$b=Read-BodyJson $Context;if($null -eq $b){throw 'A JSON body is required.'};$result=Set-ReportSent ([string](Get-P $b 'jobId' '')) ([bool](Get-P $b 'sent' $false));Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 4);return};if($method -eq 'POST' -and $path -eq '/api/report-sent-bulk'){$b=Read-BodyJson $Context;if($null -eq $b){throw 'A JSON body is required.'};$result=Set-ReportsSentOnDate ([string](Get-P $b 'date' ''));Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 4);return};if($method -eq 'POST' -and $path -eq '/api/flag'){$result=Save-FlagFromRequest (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/run-next'){$script:RunNext=$true;Send $Context 202 'application/json' '{"status":"scheduled"}';return};if($method -eq 'GET' -and $path -eq '/api/jobs'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-Jobs) -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/job'){$result=New-PreparedJob (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/stage'){$result=Receive-Upload $Context;Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/confirm'){$result=Publish-StagedFile ([string]$Context.Request.QueryString['token']);$index=Update-ProviderIndexAfterImport ([string]$result.sourceKey) -Force;$result['providerCount']=$index.count;$result['indexSeconds']=$index.seconds;$result['indexError']=$index.error;Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/stop'){$script:Stop=$true;Send $Context 202 'application/json' '{"status":"stopping"}';return};Send $Context 404 'application/json' '{"error":"not found"}'}catch{$msg=Safe $_.Exception.Message;Log 'HTTP_REQUEST' 'FAILED' $msg;try{Send $Context 400 'application/json' (([ordered]@{error=$msg}|ConvertTo-Json -Compress))}catch{}}
 }
 
 
@@ -441,7 +443,7 @@ function Resolve-JobOutputPath($Job,[string]$Type){
  return ''
 }
 function Get-ProviderIndexModel{
- $jobs=@(Get-Jobs);$groups=@{}
+ $jobs=@(Get-Jobs);$groups=@{};$sentMap=Get-SentReportMap
  foreach($profile in @(Get-ProviderProfiles)){
   $npi=[string](Get-P $profile 'npi' '');if(!$npi){continue}
   $pool=ConvertTo-RiskPoolName ([string](Get-P $profile 'riskPool' ''));if(!$pool){$pool='UNASSIGNED'}
@@ -449,8 +451,8 @@ function Get-ProviderIndexModel{
   $reports=New-Object Collections.Generic.List[object];$active=$null
   foreach($job in @($jobs|Where-Object{[string](Get-P $_ 'providerKey' '') -eq $npi})){
    $state=[string](Get-P $job 'state' '')
-   $entry=[ordered]@{jobId=[string]$job.jobId;state=$state;percent=(Get-P $job 'percent' 0);stage=[string](Get-P $job 'stage' '');queuedUtc=[string](Get-P $job 'queuedUtc' '');completedUtc=[string](Get-P $job 'completedUtc' '');errorSummary=[string](Get-P $job 'errorSummary' '');location=[string](Get-P $job 'location' '');htmlUrl=$null;pdfUrl=$null;flagUrl=$null}
-   if($state -eq 'Completed'){if(Resolve-JobOutputPath $job 'html'){$entry.htmlUrl='/html?jobId='+$job.jobId};if(Resolve-JobOutputPath $job 'pdf'){$entry.pdfUrl='/pdf?jobId='+$job.jobId};if(Test-Path -LiteralPath (Join-Path $script:Paths.State ('analysis-'+$job.jobId+'.json'))){$entry.flagUrl='/flag?jobId='+$job.jobId};$reports.Add($entry)}
+   $entry=[ordered]@{jobId=[string]$job.jobId;state=$state;percent=(Get-P $job 'percent' 0);stage=[string](Get-P $job 'stage' '');queuedUtc=[string](Get-P $job 'queuedUtc' '');completedUtc=[string](Get-P $job 'completedUtc' '');errorSummary=[string](Get-P $job 'errorSummary' '');location=[string](Get-P $job 'location' '');htmlUrl=$null;pdfUrl=$null;flagUrl=$null;sentUtc='';sentLabel='';sentVia=''}
+   if($state -eq 'Completed'){if(Resolve-JobOutputPath $job 'html'){$entry.htmlUrl='/html?jobId='+$job.jobId};if(Resolve-JobOutputPath $job 'pdf'){$entry.pdfUrl='/pdf?jobId='+$job.jobId};if(Test-Path -LiteralPath (Join-Path $script:Paths.State ('analysis-'+$job.jobId+'.json'))){$entry.flagUrl='/flag?jobId='+$job.jobId};if($sentMap.ContainsKey([string]$job.jobId)){$s=$sentMap[[string]$job.jobId];$entry.sentUtc=[string]$s.sentUtc;$entry.sentLabel=[string]$s.label;$entry.sentVia=[string]$s.via};$reports.Add($entry)}
    elseif($state -eq 'Failed'){$reports.Add($entry)}
    elseif($null -eq $active){$active=$entry}
   }
@@ -619,24 +621,42 @@ details.loc{margin:8px 12px;border:1px solid #e5e9f0;border-radius:6px;backgroun
 button,a.btn{padding:7px 12px;cursor:pointer;background:#1769aa;color:#fff;border:0;border-radius:5px;text-decoration:none;font:inherit}button:disabled{opacity:.5;cursor:default}a.btn{background:#e4e9f0;color:#172033}
 details.reports{margin-top:8px}details.reports>summary{cursor:pointer;color:#17365d}.report{padding:6px 0 6px 14px;border-left:3px solid #dce4ef;margin:4px 0}
 .progress{height:10px;background:#e4e9f0;border-radius:6px;overflow:hidden;margin:7px 0}.progress span{display:block;height:100%;background:#1769aa;transition:width .3s}
+.sent{color:#1d7a55}button.secondary{background:#e4e9f0;color:#172033}.rollup{margin:8px 0 0;padding:10px 12px;background:#f7f9fc;border:1px solid #dce4ef;border-radius:6px}.rollup label{display:block;margin:3px 0}.rollup button{margin-top:6px}
 </style></head><body>
 <header><h1>Provider Index</h1><p>Draft 5.1 - saved provider profiles by risk pool, with every generated report and patient flags</p></header>__NAV__
-<main><div class="card"><p class="muted">Every provider with a saved profile, grouped by risk pool. <b>Generate report</b> runs a fresh analysis with the saved mapping and location; <b>Edit profile</b> opens it in the wizard; <b>Flag</b> opens a report in flag mode to exclude patients who are not current or whose data is wrong. Reports are listed newest first.</p><div id="index">Loading...</div></div></main>
+<main><div class="card"><b>Reports sent outside the Communication tab</b><p class="muted">Each new report is compared with the last report the provider received. Reports emailed from the Communication tab are recorded automatically. If you sent reports another way, enter the date you sent them: for every provider, the latest report completed on or before that date is marked as sent. Single reports can also be marked, or undone, in each provider's report list.</p><input type="date" id="sentDate"> <button id="sentBulk">Mark as sent</button> <span id="sentMsg" class="muted"></span></div><div class="card"><p class="muted">Every provider with a saved profile, grouped by risk pool. <b>Generate report</b> runs a fresh analysis with the saved mapping and location; <b>Edit profile</b> opens it in the wizard; <b>Flag</b> opens a report in flag mode to exclude patients who are not current or whose data is wrong; <b>Export rollup</b> downloads the patient data behind chosen reports as one Excel workbook. Reports are listed newest first.</p><div id="index">Loading...</div></div></main>
 <script>
-const el=id=>document.getElementById(id);let runner=false,busy=false,lastJson='',openState={};
+const el=id=>document.getElementById(id);let runner=false,busy=false,lastJson='',openState={},rollupOpen={},rollupSel={},lastGroups=[];
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 async function api(u,o){const r=await fetch(u,o);const text=await r.text();let j=null;try{j=text?JSON.parse(text):null}catch(e){throw Error('Server returned invalid JSON: '+text.slice(0,200))}if(!r.ok)throw Error((j&&j.error)||('Request failed ('+r.status+')'));return j}
 function when(iso){if(!iso)return '';const d=new Date(iso);return isNaN(d)?iso:d.toLocaleString()}
 function rememberOpen(){[...el('index').querySelectorAll('details[data-key]')].forEach(d=>openState[d.dataset.key]=d.open)}
 function isOpen(k,dflt){return openState[k]===undefined?dflt:openState[k]}
+function sentHtml(r){if(r.sentUtc)return ' &middot; <span class="sent">Sent '+esc(new Date(r.sentUtc).toLocaleDateString())+' ('+esc(r.sentLabel)+')</span>'+(r.sentVia==='manual'?' <a href="#" data-unsent="'+esc(r.jobId)+'">undo</a>':'');return ' &middot; <a href="#" data-sent="'+esc(r.jobId)+'">Mark as sent</a>'}
+function rollupSnaps(p){return p.reports.filter(r=>r.state==='Completed'&&r.flagUrl)}
+function rollupDefaults(p){const s=rollupSnaps(p),sel=new Set();if(s.length){sel.add(s[0].jobId);const b=s.slice(1).find(r=>r.sentUtc)||s[1];if(b)sel.add(b.jobId)}return sel}
+function rollupHtml(p){
+ if(!rollupOpen[p.npi])return '';const snaps=rollupSnaps(p);if(!snaps.length)return '<div class="rollup muted">No report with saved patient data yet; generate a report first.</div>';
+ if(!rollupSel[p.npi])rollupSel[p.npi]={jobs:rollupDefaults(p),changes:true};const st=rollupSel[p.npi];
+ return '<div class="rollup"><b>Export patient rollup</b> <span class="muted">One sheet per report chosen, plus About and Flags sheets. Contains PHI.</span>'+snaps.map((r,i)=>'<label><input type="checkbox" data-roll="'+esc(p.npi)+'" value="'+esc(r.jobId)+'"'+(st.jobs.has(r.jobId)?' checked':'')+'> '+esc(when(r.completedUtc))+(i===0?' (latest)':'')+(r.sentUtc?' <span class="sent">sent '+esc(new Date(r.sentUtc).toLocaleDateString())+'</span>':'')+'</label>').join('')+'<label><input type="checkbox" data-rollchg="'+esc(p.npi)+'"'+(st.changes?' checked':'')+'> Include a Changes sheet (newest report chosen compared with the next one chosen)</label><button data-rolldl="'+esc(p.npi)+'">Download .xlsx</button> <span class="muted" id="rollmsg-'+esc(p.npi)+'"></span></div>';
+}
+async function downloadRollup(npi,btn){
+ const st=rollupSel[npi],jobs=st?[...st.jobs]:[],msg=el('rollmsg-'+npi);if(!jobs.length){msg.textContent='Choose at least one report.';return}
+ btn.disabled=true;msg.textContent='Building workbook...';
+ try{const r=await fetch('/rollup.xlsx?npi='+encodeURIComponent(npi)+'&jobs='+jobs.join(',')+'&changes='+(st.changes&&jobs.length>1?'1':'0'));
+  if(!r.ok){const t=await r.text();let j=null;try{j=JSON.parse(t)}catch(e){}throw Error((j&&j.error)||('Request failed ('+r.status+')'))}
+  const blob=await r.blob(),m=/filename="([^"]+)"/.exec(r.headers.get('Content-Disposition')||''),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=m?m[1]:'Patient Rollup.xlsx';document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},2000);msg.textContent='Downloaded.'}
+ catch(e){msg.textContent='Could not export: '+e.message}finally{btn.disabled=false}
+}
+async function markSent(jobId,sent){try{await api('/api/report-sent',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jobId:jobId,sent:sent})});lastJson='';await refresh()}catch(e){alert('Could not update the report: '+e.message)}}
 function reportHtml(r){
- if(r.state==='Completed')return '<div class="report"><span>'+esc(when(r.completedUtc))+'</span>'+(r.location?' <span class="muted">'+esc(r.location)+'</span>':'')+(r.htmlUrl?' &middot; <a target="_blank" href="'+r.htmlUrl+'">Open HTML</a>':'')+(r.pdfUrl?' &middot; <a target="_blank" href="'+r.pdfUrl+'">Open PDF</a>':'')+(r.flagUrl?' &middot; <a target="_blank" href="'+r.flagUrl+'">Flag</a>':'')+(!r.htmlUrl&&!r.pdfUrl?' <span class="muted">(files no longer available)</span>':'')+'</div>';
+ if(r.state==='Completed')return '<div class="report"><span>'+esc(when(r.completedUtc))+'</span>'+(r.location?' <span class="muted">'+esc(r.location)+'</span>':'')+(r.htmlUrl?' &middot; <a target="_blank" href="'+r.htmlUrl+'">Open HTML</a>':'')+(r.pdfUrl?' &middot; <a target="_blank" href="'+r.pdfUrl+'">Open PDF</a>':'')+(r.flagUrl?' &middot; <a target="_blank" href="'+r.flagUrl+'">Flag</a>':'')+(!r.htmlUrl&&!r.pdfUrl?' <span class="muted">(files no longer available)</span>':'')+sentHtml(r)+'</div>';
  return '<div class="report"><span>'+esc(when(r.completedUtc||r.queuedUtc))+'</span> <span class="error">'+esc(r.state)+(r.errorSummary?': '+esc(r.errorSummary):'')+'</span></div>';
 }
 function providerHtml(p){
  const k='prov:'+p.npi;const done=p.reports.filter(r=>r.state==='Completed').length;
  const active=p.active?'<div class="progress"><span style="width:'+Math.max(0,Math.min(100,p.active.percent||0))+'%"></span></div><span class="muted">'+esc(p.active.state)+' '+(p.active.percent||0)+'% - '+esc(p.active.stage)+'</span>':'';
- return '<div class="provider"><div class="row"><div><b>'+esc(p.displayName)+'</b> <span class="muted">NPI '+esc(p.npi)+' &middot; '+(p.location?esc(p.location):'<em>no location saved</em>')+'</span></div><div><button data-npi="'+esc(p.npi)+'"'+(p.active?' disabled':'')+'>'+(p.active?'Running...':'Generate report')+'</button> <a class="btn" href="/providers?profile='+encodeURIComponent(p.npi)+'">Edit profile</a></div></div>'+active+'<details class="reports" data-key="'+esc(k)+'"'+(isOpen(k,false)?' open':'')+'><summary>Reports <span class="muted">('+done+' completed'+(p.reports.length-done?', '+(p.reports.length-done)+' failed':'')+')</span></summary>'+(p.reports.length?p.reports.map(reportHtml).join(''):'<div class="muted report">No reports yet.</div>')+'</details></div>';
+ return '<div class="provider"><div class="row"><div><b>'+esc(p.displayName)+'</b> <span class="muted">NPI '+esc(p.npi)+' &middot; '+(p.location?esc(p.location):'<em>no location saved</em>')+'</span></div><div><button data-npi="'+esc(p.npi)+'"'+(p.active?' disabled':'')+'>'+(p.active?'Running...':'Generate report')+'</button> <button class="secondary" data-rollup="'+esc(p.npi)+'">Export rollup</button> <a class="btn" href="/providers?profile='+encodeURIComponent(p.npi)+'">Edit profile</a></div></div>'+active+rollupHtml(p)+'<details class="reports" data-key="'+esc(k)+'"'+(isOpen(k,false)?' open':'')+'><summary>Reports <span class="muted">('+done+' completed'+(p.reports.length-done?', '+(p.reports.length-done)+' failed':'')+')</span></summary>'+(p.reports.length?p.reports.map(reportHtml).join(''):'<div class="muted report">No reports yet.</div>')+'</details></div>';
 }
 function locationGroups(g){
  const byKey={};
@@ -648,16 +668,23 @@ function render(groups){
  if(!groups.length){el('index').innerHTML='<p class="muted">No saved profiles yet. Map a provider in the Provider Wizard and tick "Save/update provider profile".</p>';return}
  el('index').innerHTML=groups.map(g=>{const k='pool:'+g.riskPool;const locs=locationGroups(g);return '<details class="pool" data-key="'+esc(k)+'"'+(isOpen(k,true)?' open':'')+'><summary><b>'+esc(g.riskPool)+'</b> <span class="muted">'+g.providers.length+' provider'+(g.providers.length===1?'':'s')+' &middot; '+locs.length+' location'+(locs.length===1?'':'s')+'</span></summary>'+locs.map(loc=>{const lk='loc:'+g.riskPool+'|'+loc.key;return '<details class="loc" data-key="'+esc(lk)+'"'+(isOpen(lk,true)?' open':'')+'><summary>'+esc(loc.name)+' <span class="muted">'+loc.providers.length+' provider'+(loc.providers.length===1?'':'s')+'</span></summary>'+loc.providers.map(providerHtml).join('')+'</details>'}).join('')+'</details>'}).join('');
  [...el('index').querySelectorAll('button[data-npi]')].forEach(b=>b.onclick=()=>generate(b.dataset.npi,b));
+ [...el('index').querySelectorAll('button[data-rollup]')].forEach(b=>b.onclick=()=>{rollupOpen[b.dataset.rollup]=!rollupOpen[b.dataset.rollup];render(lastGroups)});
+ [...el('index').querySelectorAll('input[data-roll]')].forEach(c=>c.onchange=()=>{const st=rollupSel[c.dataset.roll];if(c.checked)st.jobs.add(c.value);else st.jobs.delete(c.value)});
+ [...el('index').querySelectorAll('input[data-rollchg]')].forEach(c=>c.onchange=()=>{rollupSel[c.dataset.rollchg].changes=c.checked});
+ [...el('index').querySelectorAll('button[data-rolldl]')].forEach(b=>b.onclick=()=>downloadRollup(b.dataset.rolldl,b));
+ [...el('index').querySelectorAll('a[data-sent]')].forEach(a=>a.onclick=e=>{e.preventDefault();markSent(a.dataset.sent,true)});
+ [...el('index').querySelectorAll('a[data-unsent]')].forEach(a=>a.onclick=e=>{e.preventDefault();markSent(a.dataset.unsent,false)});
 }
 async function generate(npi,btn){btn.disabled=true;btn.textContent='Queuing...';try{await api('/api/profile-job?npi='+encodeURIComponent(npi),{method:'POST'});lastJson='';await refresh()}catch(e){alert('Could not queue the report: '+e.message);btn.disabled=false;btn.textContent='Generate report'}}
 async function refresh(){
  if(busy)return;busy=true;
- try{const groups=await api('/api/provider-index');const txt=JSON.stringify(groups);if(txt!==lastJson){lastJson=txt;render(groups)}
+ try{const groups=await api('/api/provider-index');lastGroups=groups;const txt=JSON.stringify(groups);if(txt!==lastJson){lastJson=txt;render(groups)}
   const all=groups.flatMap(g=>g.providers.flatMap(p=>p.reports.concat(p.active?[p.active]:[])));
   if(!runner&&all.some(r=>r.state==='Prepared'||r.state==='Queued')){runner=true;try{await fetch('/api/run-next',{method:'POST'})}finally{runner=false}}
  }catch(e){el('index').innerHTML='<p class="error">'+esc(e.message)+'</p>'}
  finally{busy=false}
 }
+el('sentBulk').onclick=async()=>{const d=el('sentDate').value,m=el('sentMsg'),b=el('sentBulk');if(!d){m.textContent='Choose a date first.';return}b.disabled=true;m.textContent='Marking...';try{const r=await api('/api/report-sent-bulk',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({date:d})});m.textContent='Marked '+r.marked+' report(s) as sent'+(r.alreadySent?'; '+r.alreadySent+' were already recorded as sent':'')+'.';lastJson='';await refresh()}catch(e){m.textContent='Error: '+e.message}finally{b.disabled=false}};
 refresh();setInterval(refresh,3000);
 </script></body></html>
 '@
@@ -1113,7 +1140,10 @@ function New-ProviderAnalysis($Job){
  Set-JobProgress $Job 62 'Scoring outreach needs'
  $flags=@(Get-ProviderFlags ([string]$Job.providerKey))
  $provider=[ordered]@{displayName=$Job.displayName;npi=$Job.providerKey;riskPool=$(Get-P $Job 'riskPool' $facts.riskPool);location=[string](Get-P $Job 'location' '');aliases=$Job.aliases}
- return (New-AnalysisModel $provider $facts $flags)
+ $model=New-AnalysisModel $provider $facts $flags;$model.jobId=[string]$Job.jobId;$model.sources=@(Get-SourceRecord $Job.aliases)
+ Set-JobProgress $Job 66 'Comparing with the last report sent'
+ try{Add-ReportComparison $model ([string]$Job.jobId)}catch{Log 'COMPARE_FAILED' 'WARN' ([string]$Job.jobId+' '+$_.Exception.Message);$model.comparison=[ordered]@{available=$false;reason=('The comparison with the last report could not be built: '+$_.Exception.Message)}}
+ return $model
 }
 function New-ReferenceTables([object[]]$Patients,[object[]]$NonRiskDsc){
  $now=Get-AsOfDate
@@ -1250,6 +1280,387 @@ function New-FlagSummary($Resolved,[object[]]$Outreach){
  $out.entries=@(foreach($e in @($applied+$review+$dormant)){[ordered]@{memberId=[string]$e.memberId;flagMemberId=[string]$e.flagMemberId;kind=[string]$e.kind;note=[string]$e.note;match=[string]$e.match}})
  return $out
 }
+# --- Draft 5.8: report continuity (each report is compared with the report the provider last received) ---
+# Baseline = the most recent report emailed through a campaign or marked as sent by hand; otherwise the previous completed report.
+# The comparison is frozen into analysis-<jobId>.json when the report is generated, so the published PDF can always be explained later.
+$script:Arrow=[string][char]0x2192;$script:UpArrow=[string][char]0x2191
+$script:CompareText=[ordered]@{
+ NoBaseline='No earlier report with saved patient data was found for this provider, so there is nothing to compare this report with yet.'
+ DoneTitle='Came off the outreach lists ({count})'
+ DoneNote='Still on this panel, and nothing that put them on an outreach list on the {date} report is still open in the source data.'
+ LeftTitle='No longer on this report ({count})'
+ LeftNote='On the {date} report, but no longer in this provider''s source data or now excluded by a flag. The reason column says which.'
+ ChangedTitle='Still on this panel, something changed ({count})'
+ ChangedNote='Every remaining patient whose measures, AWV, open ICDs, visits, appointments, A1c or high-risk status changed in the source data since the {date} report. Patients on an outreach list now are listed first.'
+ ChecksTitle='Data to verify ({count})'
+ ChecksNote='Values that moved in a direction they normally cannot, or patients matched by name and date of birth. They are shown so nobody is surprised; open the report in flag mode to mark any that are wrong.'
+ Rollover='The measurement year changed since the {date} report, so {count} measure(s) reopened when the new year began. They are not listed one by one here; the rollup export lists them.'
+ SourcesTitle='Source files and baseline'
+}
+function Get-SentReportMap{
+ # jobId -> when and how the report reached the provider: an Outlook draft created by a campaign, or a manual "Mark as sent".
+ $map=@{}
+ foreach($c in @(Get-Campaigns)){
+  if($null -eq $c){continue};$subject=[string](Get-P $c 'subject' '')
+  foreach($p in @(Get-P $c 'providers' @())){
+   if($null -eq $p){continue};$jid=[string](Get-P $p 'jobId' '');if(!$jid -or [string](Get-P $p 'draftState' '') -ne 'Created'){continue}
+   $when=ConvertTo-IsoText (Get-P $p 'draftUtc' '');if(!$map.ContainsKey($jid) -or $when -gt [string]$map[$jid].sentUtc){$map[$jid]=[ordered]@{sentUtc=$when;via='campaign';label=('emailed in campaign "'+$subject+'"')}}
+  }
+ }
+ foreach($j in @(Get-Jobs)){$s=ConvertTo-IsoText (Get-P $j 'sentUtc' '');$jid=[string](Get-P $j 'jobId' '');if(!$s -or !$jid -or $map.ContainsKey($jid)){continue};$map[$jid]=[ordered]@{sentUtc=$s;via='manual';label='marked as sent'}}
+ return $map
+}
+function Read-StoredAnalysis([string]$JobId){if($JobId -notmatch '^[a-f0-9]{32}$'){return $null};$s=Json (Join-Path $script:Paths.State ('analysis-'+$JobId+'.json'));if($null -eq $s -or $null -eq (Get-P $s 'facts' $null)){return $null};return $s}
+function Get-BaselineJob([string]$Npi,[string]$CurrentJobId,$SentMap){
+ $jobs=@(Get-Jobs|Where-Object{[string](Get-P $_ 'providerKey' '') -eq $Npi -and [string](Get-P $_ 'state' '') -eq 'Completed' -and [string](Get-P $_ 'jobId' '') -ne $CurrentJobId})
+ $sent=@($jobs|Where-Object{$SentMap.ContainsKey([string]$_.jobId)}|Sort-Object -Property @{Expression={[string]$SentMap[[string]$_.jobId].sentUtc}} -Descending)
+ $previous=@($jobs|Sort-Object -Property @{Expression={ConvertTo-IsoText (Get-P $_ 'completedUtc' '')}} -Descending)
+ foreach($pass in @(@{jobs=$sent;basis='sent'},@{jobs=$previous;basis='previous'})){
+  foreach($j in @($pass.jobs)){$stored=Read-StoredAnalysis ([string]$j.jobId);if($stored){return @{job=$j;stored=$stored;basis=$pass.basis}}}
+ }
+ return $null
+}
+function Get-PatientScoreMap([object[]]$Patients,$AsOf){
+ # Urgency and outreach items per member ID, scored as of the snapshot's own date (read-only: the patient objects are not changed).
+ $prev=$script:AsOf;$script:AsOf=$AsOf;$map=@{}
+ try{foreach($p in @($Patients)){if($null -eq $p){continue};$items=Get-PatientItems $p;$needs=@(Get-PatientNeeds $p);$u=0;foreach($k in @($items.Keys)){$u+=[int]$items[$k].weight};foreach($n in $needs){$u+=[int]$n.weight};$map[[string]$p.MemberID]=@{urgency=$u;items=@($items.Keys)}}}
+ finally{$script:AsOf=$prev}
+ return $map
+}
+function New-ComparisonSnapshot($Facts,$Outreach,$Tables,$Flags){
+ $patients=@(Get-Field $Facts 'patients' @()|Where-Object{$null -ne $_});$asOf=ConvertTo-DateValue (Get-Field $Facts 'asOf' $null)
+ $lists=@{};foreach($t in @($Outreach)){if($null -eq $t){continue};foreach($id in @(Get-Field $t 'memberIds' @())){if(!$lists.ContainsKey([string]$id)){$lists[[string]$id]=[string](Get-Field $t 'title' '')}}}
+ $panels=@{};if($null -ne $Tables){foreach($k in @($script:ReferencePanelTitles.Keys)){$tb=Get-Field $Tables $k $null;if($null -eq $tb){continue};foreach($id in @(Get-Field $tb 'memberIds' @())){$i=[string]$id;if(!$panels.ContainsKey($i)){$panels[$i]=@()};$panels[$i]+=[string]$script:ReferencePanelTitles[$k]}}}
+ $flagged=@{};foreach($e in @(Get-Field $Flags 'entries' @())){if($null -eq $e){continue};if(@('id','name') -contains [string](Get-Field $e 'match' '')){$flagged[[string](Get-Field $e 'memberId' '')]=@{kind=[string](Get-Field $e 'kind' '');flagMemberId=[string](Get-Field $e 'flagMemberId' '');note=[string](Get-Field $e 'note' '')}}}
+ $scores=@{};try{$scores=Get-PatientScoreMap $patients $asOf}catch{Log 'COMPARE_SCORE' 'WARN' $_.Exception.Message}
+ return @{patients=$patients;asOf=$asOf;lists=$lists;panels=$panels;flagged=$flagged;scores=$scores}
+}
+function Split-MeasureText([string]$Text){return @(([string]$Text) -split ',\s*'|ForEach-Object{$_.Trim()}|Where-Object{$_})}
+function Get-ShortDate($Value){$d=ConvertTo-DateValue $Value;if($d){return $d.ToString('M/d/yyyy')};return ''}
+function Compare-ReportSnapshots($Old,$New){
+ # Matches patients (member ID, then a unique last + first name + DOB match), then sorts every difference into the report groups
+ # (done / left / changed / data to verify) and a flat per-field event list for the rollup workbook.
+ $A=$script:Arrow
+ $newById=@{};$newByName=@{};foreach($p in $New.patients){$id=[string]$p.MemberID;$newById[$id]=$p;$nk=Get-FlagNameKey ([string]$p.Last) ([string]$p.First) ([string]$p.DOB);if($nk){if(!$newByName.ContainsKey($nk)){$newByName[$nk]=@()};$newByName[$nk]+=$id}}
+ $oldIds=@{};foreach($p in $Old.patients){$oldIds[[string]$p.MemberID]=$true}
+ $rollover=[bool]($Old.asOf -and $New.asOf -and $Old.asOf.Year -ne $New.asOf.Year)
+ $done=@();$left=@();$changed=@();$checks=@();$events=New-Object Collections.Generic.List[object];$matchedNew=@{};$oldFor=@{}
+ $tot=[ordered]@{gapsClosed=0;gapPatients=0;awvDone=0;awvDueBefore=0;awvScheduled=0;icdsRecaptured=0;icdPatients=0;seen=0;carried=0;cameOff=0;left=0;newToPanel=0;yearReopened=0;matchedById=0;matchedByName=0}
+ $ev={param($p,[string]$Field,$Before,$After,[string]$Change,[string]$Detail)$events.Add([ordered]@{memberId=[string]$p.MemberID;last=[string]$p.Last;first=[string]$p.First;dob=[string]$p.DOB;field=$Field;before=[string]$Before;after=[string]$After;change=$Change;detail=$Detail})}
+ foreach($o in $Old.patients){
+  $oid=[string]$o.MemberID;if($Old.flagged.ContainsKey($oid)){continue}
+  $name=Get-PatientDisplayName $o;$wasOn=$(if($Old.lists.ContainsKey($oid)){[string]$Old.lists[$oid]}elseif($Old.panels.ContainsKey($oid)){(@($Old.panels[$oid])-join '; ')}else{'Not on a list'})
+  if($o.ACVDue){$tot.awvDueBefore++}
+  $n=$null;$match='id'
+  if($newById.ContainsKey($oid)){$n=$newById[$oid]}
+  else{$nk=Get-FlagNameKey ([string]$o.Last) ([string]$o.First) ([string]$o.DOB);if($nk -and $newByName.ContainsKey($nk)){$cands=@($newByName[$nk]|Where-Object{!$oldIds.ContainsKey([string]$_)});if($cands.Count -eq 1){$n=$newById[[string]$cands[0]];$match='name'}elseif($cands.Count -gt 1){$checks+=@{id='';name=$name;dob=[string]$o.DOB;row=@($name,[string]$o.DOB,('Member ID '+$oid+' is gone and '+$cands.Count+' current patients share this name and DOB; not compared'))};& $ev $o 'Member ID' $oid '' 'Not compared' 'Several current patients share this name and DOB';continue}}}
+  $openText=@(@(Split-MeasureText $o.OpenHedis)+@($(if([int]$o.OpenIcdCount -gt 0){[string]$o.OpenIcdCount+' open ICD(s)'}else{@()}))) -join ', '
+  if($null -eq $n){$tot.left++;$left+=@{id=$oid;name=$name;dob=[string]$o.DOB;onList=($wasOn -ne 'Not on a list');reasonKey='data';row=@($name,[string]$o.DOB,$wasOn,'',$(if($openText){$openText}else{'None'}))};& $ev $o 'On panel' 'Yes' 'No' 'Left panel' '';continue}
+  $nid=[string]$n.MemberID;$matchedNew[$nid]=$true;$oldFor[$nid]=$oid
+  if($match -eq 'id'){$tot.matchedById++}else{$tot.matchedByName++;$checks+=@{id=$nid;name=$name;dob=[string]$o.DOB;row=@($name,[string]$o.DOB,('Member ID changed from '+$oid+' to '+$nid+'; matched by name and DOB'))};& $ev $n 'Member ID' $oid $nid 'Changed' 'Matched by name and DOB'}
+  if($New.flagged.ContainsKey($nid)){$f=$New.flagged[$nid];$tot.left++;$left+=@{id=$nid;name=$name;dob=[string]$o.DOB;onList=($wasOn -ne 'Not on a list');reasonKey='flag';flag=$f;row=@($name,[string]$o.DOB,$wasOn,'',$(if($openText){$openText}else{'None'}))};& $ev $n 'On report' 'Yes' 'No' 'Flagged' ([string]$script:FlagKinds[[string]$f.kind].label);continue}
+  $closedList=@();$newOpen=@();$other=@();$a1cText=''
+  $oOpen=@(Split-MeasureText $o.OpenHedis);$nOpen=@(Split-MeasureText $n.OpenHedis);$oClosed=@(Split-MeasureText $o.ClosedHedis);$nClosed=@(Split-MeasureText $n.ClosedHedis)
+  foreach($m in $oOpen){if($nOpen -contains $m){continue};if($nClosed -contains $m){$closedList+=$m;& $ev $n $m 'Open' 'Compliant' 'Closed' ''}else{$other+=($m+' no longer measured');& $ev $n $m 'Open' '(not listed)' 'No longer measured' ''}}
+  foreach($m in $nOpen){
+   if($oOpen -contains $m){continue}
+   if($rollover){$tot.yearReopened++;& $ev $n $m $(if($oClosed -contains $m){'Compliant'}else{'(not listed)'}) 'Open' 'Year reset' 'Measurement year changed';continue}
+   if($oClosed -contains $m){$checks+=@{id=$nid;name=$name;dob=[string]$n.DOB;row=@($name,[string]$n.DOB,($m+' Compliant '+$A+' Needed (reopened mid-year)'))};& $ev $n $m 'Compliant' 'Open' 'Reopened' 'Verify';continue}
+   $newOpen+=$m;& $ev $n $m '(not listed)' 'Open' 'Newly open' ''
+  }
+  if($closedList.Count -gt 0){$tot.gapsClosed+=$closedList.Count;$tot.gapPatients++}
+  $awvDone=$false
+  if($o.ACVDue -and !$n.ACVDue){$na=ConvertTo-DateValue (Get-P $n 'NextAcv' $null);if($na -and $New.asOf -and $na.Date -ge $New.asOf.Date){$tot.awvScheduled++;$other+=('AWV scheduled '+(Get-ShortDate $na));& $ev $n 'AWV due' 'Yes' 'No' 'Scheduled' (Get-ShortDate $na)}else{$awvDone=$true;$tot.awvDone++;& $ev $n 'AWV due' 'Yes' 'No' 'Completed' 'No longer due in source data'}}
+  elseif(!$o.ACVDue -and $n.ACVDue){$other+='AWV now due';& $ev $n 'AWV due' 'No' 'Yes' 'Now due' ''}
+  $oi=[int]$o.OpenIcdCount;$ni=[int]$n.OpenIcdCount;$recap=0
+  if($ni -lt $oi){$recap=$oi-$ni;$tot.icdsRecaptured+=$recap;$tot.icdPatients++;& $ev $n 'Open ICDs' $oi $ni 'Recaptured' ([string]$o.OpenICD)}elseif($ni -gt $oi){$other+=([string]($ni-$oi)+' new open ICD(s)');& $ev $n 'Open ICDs' $oi $ni 'New open ICDs' ([string]$n.OpenICD)}
+  $ov=Get-PatientLastVisit $o;$nv=Get-PatientLastVisit $n
+  if($nv -and (!$ov -or ([DateTime]$nv).Date -gt ([DateTime]$ov).Date)){$tot.seen++;$other+=('Seen '+(Get-ShortDate $nv));& $ev $n 'Last visit' (Get-ShortDate $ov) (Get-ShortDate $nv) 'Seen' ''}
+  elseif($ov -and (!$nv -or ([DateTime]$nv).Date -lt ([DateTime]$ov).Date)){$t=$(if($nv){'Last visit moved earlier: '+(Get-ShortDate $ov)+' '+$A+' '+(Get-ShortDate $nv)}else{'Last visit no longer on record (was '+(Get-ShortDate $ov)+')'});$checks+=@{id=$nid;name=$name;dob=[string]$n.DOB;row=@($name,[string]$n.DOB,$t)};& $ev $n 'Last visit' (Get-ShortDate $ov) (Get-ShortDate $nv) 'Moved earlier' 'Verify'}
+  $oa=ConvertTo-DateValue (Get-P $o 'NextAppt' $null);$na2=ConvertTo-DateValue (Get-P $n 'NextAppt' $null)
+  if($na2 -and $New.asOf -and $na2.Date -ge $New.asOf.Date -and (!$oa -or $oa.Date -ne $na2.Date)){$other+=('Appt booked '+(Get-ShortDate $na2));& $ev $n 'Next appt' (Get-ShortDate $oa) (Get-ShortDate $na2) 'Booked' ([string](Get-P $n 'NextApptSpecialty' ''))}
+  $oA1c=Get-P $o 'A1c' $null;$nA1c=Get-P $n 'A1c' $null
+  if($null -ne $oA1c -and $null -ne $nA1c -and [double]$oA1c -ne [double]$nA1c){$a1cText=('A1c '+[string](Get-P $o 'A1cText' $oA1c)+' '+$A+' '+[string](Get-P $n 'A1cText' $nA1c));$other+=$a1cText;& $ev $n 'A1c' (Get-P $o 'A1cText' $oA1c) (Get-P $n 'A1cText' $nA1c) $(if([double]$nA1c -gt [double]$oA1c){'Higher'}else{'Lower'}) ''}
+  if([bool]$o.HighRisk -ne [bool]$n.HighRisk){$other+=$(if($n.HighRisk){'Added to the high-risk list'}else{'Removed from the high-risk list'});& $ev $n 'High risk' $(if($o.HighRisk){'Yes'}else{'No'}) $(if($n.HighRisk){'Yes'}else{'No'}) 'Changed' ''}
+  $oList=$(if($Old.lists.ContainsKey($oid)){[string]$Old.lists[$oid]}else{''});$nList=$(if($New.lists.ContainsKey($nid)){[string]$New.lists[$nid]}else{''})
+  if($oList -ne $nList){& $ev $n 'Outreach list' $oList $nList $(if(!$oList){'Added'}elseif(!$nList){'Came off'}else{'Moved'}) ''}
+  $closedCell=@($closedList)+@($(if($awvDone){'AWV'}else{@()}))+@($(if($recap -gt 0){[string]$recap+' ICD(s) recaptured'}else{@()}))
+  $nScore=$(if($New.scores.ContainsKey($nid)){$New.scores[$nid]}else{$null});$stillQualifies=($null -ne $nScore -and @($nScore.items).Count -gt 0)
+  if($oList -and $nList){$tot.carried++}
+  if($oList -and !$nList -and !$stillQualifies){
+   $tot.cameOff++;$what=@();if($closedCell.Count -gt 0){$what+=('Closed: '+($closedCell -join ', '))};$what+=@($other)
+   if($what.Count -eq 0){$what=@('Nothing that put this patient on the list is open in the source data')}
+   $done+=@{id=$nid;name=$name;dob=[string]$n.DOB;row=@($name,[string]$n.DOB,$oList,($what -join '; '))};continue
+  }
+  if($oList -and !$nList -and $stillQualifies){$other+='Still has open items; not among the most urgent shown this time'}
+  if($closedCell.Count -gt 0 -or $newOpen.Count -gt 0 -or $other.Count -gt 0){$changed+=@{id=$nid;name=$name;dob=[string]$n.DOB;onList=[bool]$nList;urgency=$(if($nScore){[int]$nScore.urgency}else{0});row=@($name,[string]$n.DOB,$(if($nList){$nList}else{'Not on a list'}),$(if($closedCell.Count){$closedCell -join ', '}else{'None'}),$(if($newOpen.Count){$newOpen -join ', '}else{'None'}),$(if($other.Count){$other -join '; '}else{''}))}}
+ }
+ foreach($p in $New.patients){$id=[string]$p.MemberID;if($matchedNew.ContainsKey($id) -or $New.flagged.ContainsKey($id) -or $oldIds.ContainsKey($id)){continue};$tot.newToPanel++;& $ev $p 'On panel' 'No' 'Yes' 'Joined panel' $(if($New.lists.ContainsKey($id)){[string]$New.lists[$id]}else{''})}
+ return @{rollover=$rollover;totals=$tot;done=@($done|Sort-Object -Property @{Expression={[string]$_.name}});left=@($left|Sort-Object -Property @{Expression={-[int][bool]$_.onList}},@{Expression={[string]$_.name}});changed=@($changed|Sort-Object -Property @{Expression={-[int][bool]$_.onList}},@{Expression={-[int]$_.urgency}},@{Expression={[string]$_.name}});checks=@($checks|Sort-Object -Property @{Expression={[string]$_.name}});events=@($events.ToArray());oldFor=$oldFor;matchedNew=$matchedNew}
+}
+function Find-CurrentAttribution([string[]]$MemberIds,[string]$ProviderPool){
+ # Looks the departed member IDs up in the whole Export source: memberId -> "Now attributed to <provider>" (or why not).
+ $out=@{};$ids=@($MemberIds|Where-Object{$_});if($ids.Count -eq 0){return $out}
+ $set=@{};foreach($id in $ids){$set[$id]=$true}
+ $names=@{};foreach($pr in @(Get-ProviderProfiles)){$alias=Get-Alias (Get-P $pr 'aliases' $null) 'Export';if($alias -and !$names.ContainsKey($alias)){$names[$alias]=[string](Get-P $pr 'displayName' $alias)}}
+ $rows=@(Get-SourceRows 'Export' @('MemberID','Provider Name','Risk Pool') 'MemberID' '' $set)
+ foreach($r in $rows){$id=([string]$r.MemberID).Trim();if(!$id -or $out.ContainsKey($id)){continue};$prov=([string]$r.'Provider Name').Trim();$pool=ConvertTo-RiskPoolName ([string]$r.'Risk Pool')
+  if(!$prov){$out[$id]='In the current Export with no provider';continue}
+  $label=$(if($names.ContainsKey($prov)){$names[$prov]}else{$prov});$out[$id]=('Now attributed to '+$label+$(if($pool -and $ProviderPool -and $pool -ne (ConvertTo-RiskPoolName $ProviderPool)){' ('+$pool+')'}else{''}))}
+ foreach($id in $ids){if(!$out.ContainsKey($id)){$out[$id]='Not in the current Export for any provider'}}
+ return $out
+}
+function Get-SourceRecord($Aliases){
+ # The canonical files this report was built from (export date, rows, SHA-256), taken from the manifest at generation time.
+ $m=Json $script:ManifestPath;$src=$(if($m){Get-P $m 'sources' $null}else{$null});$out=@()
+ foreach($s in @(Registry)){$key=[string]$s.sourceKey;if(!(Get-Alias $Aliases $key)){continue};$e=$(if($src){Get-P $src $key $null}else{$null})
+  $out+=[ordered]@{sourceKey=$key;displayName=[string]$s.displayName;exportedUtc=$(if($e){ConvertTo-IsoText (Get-P $e 'sourceFileCreatedUtc' '')}else{''});importedUtc=$(if($e){ConvertTo-IsoText (Get-P $e 'importedUtc' '')}else{''});rowCount=$(if($e){[int](Get-P $e 'rowCount' 0)}else{0});sha256=$(if($e){[string](Get-P $e 'sha256' '')}else{''})}}
+ return $out
+}
+function New-ChangeTable([string[]]$Columns,[object[]]$Entries,[bool]$Clickable){return [ordered]@{columns=$Columns;rows=@(foreach($e in @($Entries)){,@($e.row)});memberIds=@(foreach($e in @($Entries)){$(if($Clickable){[string]$e.id}else{''})});memberNames=@(foreach($e in @($Entries)){[string]$e.name})}}
+function Add-ReportComparison($Model,[string]$CurrentJobId,$Stored=$null){
+ # New report ($Stored empty): choose the baseline and look up where departed patients went. Flag-mode rebuild: reuse what the report saved.
+ $npi=[string]$Model.provider.npi;$saved=$(if($null -ne $Stored){Get-P $Stored 'comparison' $null}else{$null});$sentMap=Get-SentReportMap
+ $attribution=@{};$baseJobId='';$basis='';$baseStored=$null;$baseJob=$null
+ if($null -ne $Stored){
+  if($null -eq $saved -or !(Get-Field $saved 'available' $false)){$Model.comparison=[ordered]@{available=$false;reason=$(if($saved){[string](Get-Field $saved 'reason' '')}else{''})};return}
+  $baseJobId=[string](Get-Field $saved 'baselineJobId' '');$basis=[string](Get-Field $saved 'basis' '');$baseStored=Read-StoredAnalysis $baseJobId;$baseJob=Json (Join-Path $script:Paths.State ('job-'+$baseJobId+'.json'))
+  $att=Get-Field $saved 'attribution' $null;if($att){foreach($pp in $att.PSObject.Properties){$attribution[[string]$pp.Name]=[string]$pp.Value}}
+  if($null -eq $baseStored){$Model.comparison=[ordered]@{available=$false;reason='The saved data for the baseline report is no longer available.'};return}
+ }else{
+  $b=Get-BaselineJob $npi $CurrentJobId $sentMap
+  if($null -eq $b){$Model.comparison=[ordered]@{available=$false;reason=$script:CompareText.NoBaseline};return}
+  $baseJob=$b.job;$baseStored=$b.stored;$baseJobId=[string]$b.job.jobId;$basis=[string]$b.basis
+ }
+ $baseFacts=ConvertFrom-PatientFacts (Get-P $baseStored 'facts' $null)
+ $old=New-ComparisonSnapshot $baseFacts @(Get-P $baseStored 'outreach' @()) (Get-P $baseStored 'tables' $null) (Get-P $baseStored 'flags' $null)
+ $new=New-ComparisonSnapshot $Model.facts @($Model.outreach) $Model.tables $Model.flags
+ $cmp=Compare-ReportSnapshots $old $new
+ $sent=$(if($sentMap.ContainsKey($baseJobId)){$sentMap[$baseJobId]}else{$null})
+ $baseWhen=$(if($sent){ConvertTo-DateValue $sent.sentUtc}else{ConvertTo-DateValue (Get-P $baseStored 'generatedUtc' (Get-P $baseJob 'completedUtc' ''))});if($baseWhen -and $baseWhen.Kind -eq [DateTimeKind]::Utc){$baseWhen=$baseWhen.ToLocalTime()}
+ $label=$(if($baseWhen){$baseWhen.ToString('M/d/yyyy')}else{'previous'});$short=$(if($baseWhen){$baseWhen.ToString('M/d')}else{'last report'})
+ if($null -eq $Stored){$need=@($cmp.left|Where-Object{$_.reasonKey -eq 'data'}|ForEach-Object{[string]$_.id});if($need.Count -gt 0){try{$attribution=Find-CurrentAttribution $need ([string]$Model.provider.riskPool)}catch{Log 'COMPARE_ATTRIBUTION' 'WARN' $_.Exception.Message}}}
+ $flagStore=@{};foreach($f in @(Get-ProviderFlags $npi)){if($null -ne $f){$flagStore[[string](Get-P $f 'memberId' '')]=$f}}
+ foreach($l in $cmp.left){
+  if($l.reasonKey -eq 'flag'){$f=$l.flag;$rec=$(if($flagStore.ContainsKey([string]$f.flagMemberId)){$flagStore[[string]$f.flagMemberId]}else{$null});$on=$(if($rec){Get-ShortDate (Get-P $rec 'updatedUtc' '')}else{''});$l.row[3]=('Flagged "'+[string]$script:FlagKinds[[string]$f.kind].label+'"'+$(if($on){' on '+$on}else{''})+$(if($f.note){': '+$f.note}else{''}))}
+  else{$l.row[3]=$(if($attribution.ContainsKey([string]$l.id)){[string]$attribution[[string]$l.id]}else{'No longer in this provider''s source data'})}
+ }
+ # "Since" column: carried patients inherit the date they first reached a list from the baseline's own comparison.
+ $baseSince=@{};$bc=Get-P $baseStored 'comparison' $null;if($bc){$ls=Get-Field $bc 'listSince' $null;if($ls){foreach($pp in $ls.PSObject.Properties){$baseSince[[string]$pp.Name]=[string]$pp.Value}}}
+ $thisDate=(ConvertTo-DateValue (Get-Field $Model 'generatedUtc' ([DateTime]::UtcNow.ToString('o'))));$thisLabel=$(if($thisDate){$thisDate.ToLocalTime().ToString('M/d/yyyy')}else{''})
+ $since=@{};$listSince=@{}
+ foreach($nid in @($new.lists.Keys)){
+  if(!$cmp.oldFor.ContainsKey($nid)){$since[$nid]=$(if($cmp.matchedNew.ContainsKey($nid)){'New to list'}else{'New to panel'});$listSince[$nid]=$thisLabel;continue}
+  $oid=[string]$cmp.oldFor[$nid]
+  if(!$old.lists.ContainsKey($oid)){$since[$nid]='New to list';$listSince[$nid]=$thisLabel;continue}
+  $first=$(if($baseSince.ContainsKey($oid)){$baseSince[$oid]}else{$label});$listSince[$nid]=$first;$parts=@()
+  $ou=$(if($old.scores.ContainsKey($oid)){[int]$old.scores[$oid].urgency}else{-1});$nu=$(if($new.scores.ContainsKey($nid)){[int]$new.scores[$nid].urgency}else{-1})
+  if($ou -ge 0 -and $nu -gt $ou){$parts+=($script:UpArrow+' urgency from '+$ou)}
+  $closedHere=@($cmp.changed|Where-Object{[string]$_.id -eq $nid}|ForEach-Object{[string]$_.row[3]}|Where-Object{$_ -and $_ -ne 'None'});if($closedHere.Count -gt 0){$parts+=('Closed: '+$closedHere[0])}
+  $parts+=('On list since '+$first);$since[$nid]=($parts -join '; ')
+ }
+ $Model.comparison=[ordered]@{available=$true;baselineJobId=$baseJobId;basis=$basis;baselineLabel=$label;baselineShort=$short;baselineSent=$(if($sent){[ordered]@{sentUtc=[string]$sent.sentUtc;via=[string]$sent.via;label=[string]$sent.label}}else{$null});baselineGeneratedUtc=(ConvertTo-IsoText (Get-P $baseStored 'generatedUtc' ''));baselineAsOf=[string](Get-P $baseStored 'asOf' '');baselineSources=@(Get-P $baseStored 'sources' @());rollover=$cmp.rollover;totals=$cmp.totals;since=$since;listSince=$listSince;attribution=$attribution
+  done=(New-ChangeTable @('Patient','DOB',('Was on ('+$short+')'),'What changed') $cmp.done $true)
+  left=(New-ChangeTable @('Patient','DOB',('Was on ('+$short+')'),'Reason','Open when last listed') $cmp.left $false)
+  changed=(New-ChangeTable @('Patient','DOB','List now','Closed in source data','Newly open','Other changes') $cmp.changed $true)
+  checks=(New-ChangeTable @('Patient','DOB','What looks off') $cmp.checks $true)}
+ Add-SinceColumn $Model
+}
+function Add-SinceColumn($Model){
+ # Inserts "Since <date>" after Urgency on every outreach list; the ranking and rows are unchanged.
+ $c=Get-Field $Model 'comparison' $null;if($null -eq $c -or !(Get-Field $c 'available' $false)){return}
+ $since=Get-Field $c 'since' $null;$header='Change since '+[string](Get-Field $c 'baselineShort' '')
+ foreach($t in @($Model.outreach)){
+  if($null -eq $t){continue};$cols=@($t.columns);if($cols -contains $header){continue};$at=[Array]::IndexOf($cols,'Urgency');if($at -lt 0){$at=$cols.Count-1}
+  $ids=@($t.memberIds);$rows=@();$i=0
+  foreach($row in @($t.rows)){$v=@($row);$id=$(if($i -lt $ids.Count){[string]$ids[$i]}else{''});$txt=[string](Get-Field $since $id '');$rows+=,(@($v[0..$at])+@($txt)+@($(if($at+1 -lt $v.Count){$v[($at+1)..($v.Count-1)]}else{@()})));$i++}
+  $t.columns=@($cols[0..$at])+@($header)+@($(if($at+1 -lt $cols.Count){$cols[($at+1)..($cols.Count-1)]}else{@()}));$t.rows=$rows
+ }
+}
+function Get-ComparisonBasisText($C){
+ $label=[string](Get-Field $C 'baselineLabel' '');$sent=Get-Field $C 'baselineSent' $null
+ if($sent){return ('Compared with the report '+[string](Get-Field $sent 'label' '')+' on '+$label+'.')}
+ return ('Compared with the previous report, generated '+$label+'. No report has been recorded as sent to this provider; use Mark as sent on the Provider Index to choose one.')
+}
+function ConvertTo-ComparisonBandHtml($Model){
+ $c=Get-Field $Model 'comparison' $null;if($null -eq $c){return ''}
+ if(!(Get-Field $c 'available' $false)){$r=[string](Get-Field $c 'reason' '');if(!$r){return ''};return '<section class="since"><h2>Since the last report</h2><p class="muted">'+(ConvertTo-HtmlEncoded $r)+'</p></section>'}
+ $t=Get-Field $c 'totals' $null;$label=[string](Get-Field $c 'baselineLabel' '');$v={param($k)[int](Get-Field $t $k 0)}
+ $tile={param([string]$Cls,[string]$Label,[int]$Value,[string]$Note)'<div class="tile '+$Cls+'"><span>'+(ConvertTo-HtmlEncoded $Label)+'</span><strong>'+$Value+'</strong><small>'+(ConvertTo-HtmlEncoded $Note)+'</small></div>'}
+ $tiles=''
+ if((& $v 'gapsClosed') -gt 0){$tiles+=& $tile 'good' 'Gaps closed' (& $v 'gapsClosed') ('HEDIS measures now compliant in source data, '+(& $v 'gapPatients')+' patient(s)')}
+ if((& $v 'awvDone') -gt 0){$tiles+=& $tile 'good' 'AWVs completed' (& $v 'awvDone') ('no longer due in source data; '+(& $v 'awvDueBefore')+' were due on '+$label)}
+ if((& $v 'icdsRecaptured') -gt 0){$tiles+=& $tile 'good' 'ICDs recaptured' (& $v 'icdsRecaptured') ('across '+(& $v 'icdPatients')+' patient(s)')}
+ if((& $v 'seen') -gt 0){$tiles+=& $tile 'good' 'Patients seen' (& $v 'seen') ('new visit since '+$label)}
+ if((& $v 'carried') -gt 0){$tiles+=& $tile 'warn' 'Still on a list' (& $v 'carried') ('patients carried over from '+$label)}
+ $done=@();if((& $v 'gapsClosed') -gt 0){$done+=([string](& $v 'gapsClosed')+' HEDIS gap(s) closed in source data')};if((& $v 'awvDone') -gt 0){$done+=([string](& $v 'awvDone')+' annual wellness visit(s) completed')};if((& $v 'icdsRecaptured') -gt 0){$done+=([string](& $v 'icdsRecaptured')+' open ICD(s) recaptured')};if((& $v 'seen') -gt 0){$done+=([string](& $v 'seen')+' patient(s) seen')}
+ $s=$(if($done.Count -gt 0){'Since the '+$label+' report, '+(Format-OutreachList $done)+'.'}else{'No progress has shown up in the source data since the '+$label+' report yet.'})
+ if((& $v 'cameOff') -gt 0){$s+=' '+(& $v 'cameOff')+' patient(s) came off every outreach list because nothing that put them there is still open.'}
+ if((& $v 'left') -gt 0 -or (& $v 'newToPanel') -gt 0){$s+=' '+(& $v 'left')+' patient(s) are no longer on this report and '+(& $v 'newToPanel')+' are new to the panel.'}
+ $top=@(@($Model.outreach)|Where-Object{$null -ne $_}|Sort-Object -Property @{Expression={-[int](Get-Field (Get-Field $_ 'counts' $null) 'qualifying' 0)}}|Select-Object -First 2)
+ if($top.Count -gt 0){$q={param($x)[string](Get-Field (Get-Field $x 'counts' $null) 'qualifying' 0)};$s+=' The largest remaining opportunity is "'+[string]$top[0].title+'" ('+(& $q $top[0])+' patients)'+$(if($top.Count -gt 1){', followed by "'+[string]$top[1].title+'" ('+(& $q $top[1])+')'}else{''})+'.'}
+ if((Get-Field $c 'rollover' $false) -and (& $v 'yearReopened') -gt 0){$s+=' '+$script:CompareText.Rollover.Replace('{date}',$label).Replace('{count}',[string](& $v 'yearReopened'))}
+ return '<section class="since"><h2>Since the '+(ConvertTo-HtmlEncoded $label)+' report</h2><p class="muted">'+(ConvertTo-HtmlEncoded (Get-ComparisonBasisText $c))+' Every change is listed under "Changes since the '+(ConvertTo-HtmlEncoded $label)+' report", and the source files behind both reports are listed at the end.</p>'+$(if($tiles){'<div class="tiles">'+$tiles+'</div>'}else{''})+'<p class="story">'+(ConvertTo-HtmlEncoded $s)+'</p></section>'
+}
+function ConvertTo-ChangesHtml($Model){
+ $c=Get-Field $Model 'comparison' $null;if($null -eq $c -or !(Get-Field $c 'available' $false)){return ''}
+ $label=[string](Get-Field $c 'baselineLabel' '');$T=$script:CompareText;$html='<h2 class="group">Changes since the '+(ConvertTo-HtmlEncoded $label)+' report</h2>'
+ if((Get-Field $c 'rollover' $false)){$n=[int](Get-Field (Get-Field $c 'totals' $null) 'yearReopened' 0);if($n -gt 0){$html+='<section><p>'+(ConvertTo-HtmlEncoded ($T.Rollover.Replace('{date}',$label).Replace('{count}',[string]$n)))+'</p></section>'}}
+ foreach($g in @(@('done','DoneTitle','DoneNote'),@('left','LeftTitle','LeftNote'),@('changed','ChangedTitle','ChangedNote'),@('checks','ChecksTitle','ChecksNote'))){
+  $tb=Get-Field $c $g[0] $null;if($null -eq $tb){continue};$n=@(Get-Field $tb 'rows' @()).Count
+  $title=([string]$T[$g[1]]).Replace('{count}',[string]$n);$note=([string]$T[$g[2]]).Replace('{date}',$label)
+  $html+=ConvertTo-TableHtml ('chg-'+$g[0]) $title $tb $note
+ }
+ return $html
+}
+function ConvertTo-SourceRecordHtml($Model){
+ $c=Get-Field $Model 'comparison' $null;$avail=($null -ne $c -and [bool](Get-Field $c 'available' $false));$cur=@(Get-Field $Model 'sources' @()|Where-Object{$null -ne $_})
+ if($cur.Count -eq 0 -and !$avail){return ''}
+ $day={param($v)$d=ConvertTo-DateValue $v;if($d){if($d.Kind -eq [DateTimeKind]::Utc){$d=$d.ToLocalTime()};$d.ToString('M/d/yyyy')}else{'-'}}
+ $hash={param($v)$h=[string]$v;if($h.Length -ge 8){$h.Substring(0,8)}else{'-'}}
+ $base=[ordered]@{};if($avail){foreach($s in @(Get-Field $c 'baselineSources' @())){if($null -ne $s){$base[[string](Get-Field $s 'sourceKey' '')]=$s}}}
+ $short=$(if($avail){[string](Get-Field $c 'baselineShort' '')}else{''})
+ $cols=@('Source','This report: export date','Rows','File (SHA-256)');if($avail){$cols+=@(($short+' report: export date'),'Rows','File (SHA-256)')}
+ $keys=@($cur|ForEach-Object{[string](Get-Field $_ 'sourceKey' '')});foreach($k in @($base.Keys)){if($keys -notcontains $k){$keys+=$k}}
+ $rows=@();foreach($k in $keys){$s=@($cur|Where-Object{[string](Get-Field $_ 'sourceKey' '') -eq $k})[0];$b=$(if($base.Contains($k)){$base[$k]}else{$null})
+  $name=$(if($s){[string](Get-Field $s 'displayName' $k)}elseif($b){[string](Get-Field $b 'displayName' $k)}else{$k})
+  $row=@($name,$(if($s){& $day (Get-Field $s 'exportedUtc' '')}else{'-'}),$(if($s){'{0:N0}' -f [int](Get-Field $s 'rowCount' 0)}else{'-'}),$(if($s){& $hash (Get-Field $s 'sha256' '')}else{'-'}))
+  if($avail){$row+=@($(if($b){& $day (Get-Field $b 'exportedUtc' '')}else{'-'}),$(if($b){'{0:N0}' -f [int](Get-Field $b 'rowCount' 0)}else{'-'}),$(if($b){& $hash (Get-Field $b 'sha256' '')}else{'-'}))}
+  $rows+=,$row}
+ $notes=@('This report: job '+([string](Get-Field $Model 'jobId' '')).PadRight(8).Substring(0,8).Trim()+', generated '+(& $day (Get-Field $Model 'generatedUtc' ''))+'. Export date is the creation date of each source export file; rows are the data rows in the whole file, not just this provider.')
+ if($avail){$t=Get-Field $c 'totals' $null;$notes+=('Baseline: job '+([string](Get-Field $c 'baselineJobId' '')).Substring(0,8)+', generated '+(& $day (Get-Field $c 'baselineGeneratedUtc' ''))+'. '+(Get-ComparisonBasisText $c)+' Patients were matched by member ID ('+[int](Get-Field $t 'matchedById' 0)+') or by name and DOB ('+[int](Get-Field $t 'matchedByName' 0)+').'+$(if($base.Count -eq 0){' The baseline report was generated before source files were recorded, so its columns are blank.'}else{''}))}
+ return (ConvertTo-TableHtml 'sources' $script:CompareText.SourcesTitle ([ordered]@{columns=$cols;rows=$rows;memberIds=@();memberNames=@()}) $notes)
+}
+# Patient rollup workbook: one sheet per chosen report snapshot (the patient facts exactly as that report used them), a Changes sheet, flags, and an About sheet.
+$script:RollupColumns=@(
+ @('MemberID','Member ID','Member ID from the Export source (HR-only patients use the HR list ID).'),
+ @('MRN','MRN','First MRN found in Diabetes Scorecard, Serial Scheduling or Risk Population Outreach.'),
+ @('Last','Last Name','Export source.'),@('First','First Name','Export source.'),@('DOB','DOB','Export source.'),
+ @('Payer','Payer','Export source.'),@('ACOR','ACOR','Yes when the Export payer is ACOR.'),@('NewPatient','New Patient','Export "New Patient" flag.'),
+ @('HighRisk','High Risk','On the HR (high-risk) list for this provider.'),
+ @('OpenHedis','Open HEDIS','Measures Needed or Non-compliant in PtListQuality, with Diabetes Scorecard overrides for KED, EED, GSD and MAD.'),
+ @('ClosedHedis','Closed HEDIS','Measures Completed or Compliant after the same overrides.'),
+ @('ACVDue','AWV Due','Last ACV older than 366 days (ACOR) or before January 1 (non-ACOR), and no future ACV booked.'),
+ @('NextAcv','Next AWV','Risk Population Outreach "Next Acv".'),
+ @('OpenICD','Open ICDs','Export "Open ICDs".'),@('OpenIcdCount','Open ICD Count','Number of open ICDs listed.'),
+ @('LastVisit','Last Visit','Latest of the Export non-PCP QEM, ACV and PCP-in-TIN dates.'),
+ @('SerialLast','Last PCP Visit (Serial)','Latest past date in Serial Scheduling "PCP Visit Dates".'),
+ @('PcpVisit','Last PCP Visit in TIN','Export "Last QEM Visit Date with any PCP in assigned TIN".'),
+ @('NextAppt','Next Appt','Diabetes Scorecard "Next Appt Date".'),@('NextApptSpecialty','Next Appt Specialty','Diabetes Scorecard.'),
+ @('FutureVisits','Future PCP Visits','Serial Scheduling future PCP visit count.'),
+ @('A1cText','Avg Last A1c','Diabetes Scorecard.'),@('A1cDate','Last A1c Date','Serial Scheduling "A1c Date".'),
+ @('Diabetic','On Diabetes Scorecard','Yes when the patient is on the Diabetes Scorecard.'),
+ @('EyeOpen','Eye Exam Gap Open','Diabetes Scorecard eye exam gap status is Open.'),@('EyeDate','Eye Exam Date','Diabetes Scorecard.'),
+ @('EgfrNeeded','eGFR Needed','Diabetes Scorecard eGFR below 100% in the last 12 months.'),@('UacrNeeded','uACR Needed','Diabetes Scorecard uACR below 100% in the last 12 months.'),
+ @('MedAdhDM','Med Adherence DM','Diabetes Scorecard.'),@('OmwDue','OMW Critical Due','PtListQuality "OMW Critical Due Date".'),
+ @('TotalGaps','Total Care Gaps','Export.'),@('IncompleteAttest','Incomplete Attestations','Export.'),@('Attest','Has Attestations','Export completed or incomplete attestations above zero.'),
+ @('Tcm','TCM','Export transitional care flag.'),@('Phone','Phone','Export.'),@('ActiveDate','Active Date','Export.')
+)
+$script:RollupComputed=@(@('Urgency','Urgency score the report ranked this patient by, as of that report''s date.'),@('Outreach List','The outreach list this patient appeared on in that report (blank = not shown on a list).'),@('Reference Panels','Reference panels this patient appeared on in that report.'),@('Flag','Flag that excluded this patient from that report.'))
+function Get-RollupSnapshot([string]$Npi,[string]$JobId,$SentMap){
+ if($JobId -notmatch '^[a-f0-9]{32}$'){throw 'Invalid report ID.'}
+ $job=Json (Join-Path $script:Paths.State ('job-'+$JobId+'.json'));if(!$job -or [string](Get-P $job 'providerKey' '') -ne $Npi){throw ('Report '+$JobId.Substring(0,8)+' does not belong to this provider.')}
+ $stored=Read-StoredAnalysis $JobId;if(!$stored){throw ('Report '+$JobId.Substring(0,8)+' has no saved patient data.')}
+ $facts=ConvertFrom-PatientFacts (Get-P $stored 'facts' $null)
+ $when=ConvertTo-DateValue (Get-P $stored 'generatedUtc' (Get-P $job 'completedUtc' ''));if($when -and $when.Kind -eq [DateTimeKind]::Utc){$when=$when.ToLocalTime()}
+ $snap=New-ComparisonSnapshot $facts @(Get-P $stored 'outreach' @()) (Get-P $stored 'tables' $null) (Get-P $stored 'flags' $null)
+ return @{jobId=$JobId;job=$job;stored=$stored;facts=$facts;when=$when;snap=$snap;sent=$(if($SentMap.ContainsKey($JobId)){$SentMap[$JobId]}else{$null})}
+}
+function Set-RollupCell($Ws,[int]$Row,[int]$Col,$Value){
+ if($null -eq $Value){return}
+ if($Value -is [bool]){$Ws.Cells[$Row,$Col].Value=$(if($Value){'Yes'}else{'No'});return}
+ if($Value -is [DateTime]){$Ws.Cells[$Row,$Col].Value=$Value;$Ws.Cells[$Row,$Col].Style.Numberformat.Format='m/d/yyyy';return}
+ if($Value -is [int] -or $Value -is [long] -or $Value -is [double] -or $Value -is [decimal]){$Ws.Cells[$Row,$Col].Value=$Value;return}
+ $Ws.Cells[$Row,$Col].Value=[string]$Value
+}
+function Set-RollupSheetStyle($Ws,[int]$LastRow,[int]$LastCol,[int]$HeaderRow=1){
+ $h=$Ws.Cells[$HeaderRow,1,$HeaderRow,$LastCol];$h.Style.Font.Bold=$true;$h.Style.Fill.PatternType=[OfficeOpenXml.Style.ExcelFillStyle]::Solid;$h.Style.Fill.BackgroundColor.SetColor([Drawing.Color]::FromArgb(234,241,248))
+ $Ws.View.FreezePanes($HeaderRow+1,1);if($LastRow -gt $HeaderRow){$Ws.Cells[$HeaderRow,1,$LastRow,$LastCol].AutoFilter=$true}
+ try{$Ws.Cells[$HeaderRow,1,[Math]::Max($HeaderRow,$LastRow),$LastCol].AutoFitColumns(8,60)}catch{}
+}
+function Get-RollupSheetName([string]$Base,[hashtable]$Used){$n=($Base -replace '[\[\]\*\?/\\:]',' ').Trim();if($n.Length -gt 28){$n=$n.Substring(0,28)};$name=$n;$i=2;while($Used.ContainsKey($name.ToLowerInvariant())){$name=$n+' ('+$i+')';$i++};$Used[$name.ToLowerInvariant()]=$true;return $name}
+function New-RollupWorkbook([string]$Npi,[string[]]$JobIds,[bool]$IncludeChanges){
+ if($Npi -notmatch '^\d{10}$'){throw 'Invalid NPI.'}
+ $ids=@($JobIds|Where-Object{$_}|Select-Object -Unique);if($ids.Count -eq 0){throw 'Choose at least one report.'};if($ids.Count -gt 24){throw 'Choose 24 reports or fewer.'}
+ try{Add-Type -AssemblyName System.Drawing -ErrorAction Stop}catch{}
+ $sentMap=Get-SentReportMap;$snaps=@($ids|ForEach-Object{Get-RollupSnapshot $Npi $_ $sentMap}|Sort-Object -Property @{Expression={if($_.when){$_.when}else{[DateTime]::MinValue}}} -Descending)
+ $profile=Json (Join-Path $script:Paths.Profiles ($Npi+'.json'));$sp=Get-P $snaps[0].stored 'provider' $null
+ $display=[string](Get-P $profile 'displayName' (Get-P $sp 'displayName' $Npi));$pool=[string](Get-P $profile 'riskPool' (Get-P $sp 'riskPool' ''))
+ $pkg=New-Object OfficeOpenXml.ExcelPackage
+ try{
+  $used=@{};$about=$pkg.Workbook.Worksheets.Add((Get-RollupSheetName 'About' $used))
+  $changesWs=$null;if($IncludeChanges -and $snaps.Count -ge 2){$changesWs=$pkg.Workbook.Worksheets.Add((Get-RollupSheetName 'Changes' $used))}
+  foreach($s in $snaps){$s.sheet=Get-RollupSheetName (($(if($s.when){$s.when.ToString('yyyy-MM-dd')}else{$s.jobId.Substring(0,8)}))+$(if($s.sent){' sent'}else{''})) $used}
+  # Snapshot sheets
+  foreach($s in $snaps){
+   $ws=$pkg.Workbook.Worksheets.Add($s.sheet);$c=1
+   foreach($col in $script:RollupColumns){$ws.Cells[1,$c].Value=$col[1];$c++};foreach($col in $script:RollupComputed){$ws.Cells[1,$c].Value=$col[0];$c++};$last=$c-1
+   $r=2
+   foreach($p in @($s.facts.patients|Sort-Object -Property @{Expression={[string]$_.Last}},@{Expression={[string]$_.First}})){
+    $c=1;foreach($col in $script:RollupColumns){Set-RollupCell $ws $r $c (Get-P $p $col[0] $null);$c++}
+    $id=[string]$p.MemberID;$sn=$s.snap
+    Set-RollupCell $ws $r $c $(if($sn.scores.ContainsKey($id)){[int]$sn.scores[$id].urgency}else{$null});$c++
+    Set-RollupCell $ws $r $c $(if($sn.lists.ContainsKey($id)){[string]$sn.lists[$id]}else{''});$c++
+    Set-RollupCell $ws $r $c $(if($sn.panels.ContainsKey($id)){(@($sn.panels[$id]) -join '; ')}else{''});$c++
+    Set-RollupCell $ws $r $c $(if($sn.flagged.ContainsKey($id)){[string]$script:FlagKinds[[string]$sn.flagged[$id].kind].label+$(if($sn.flagged[$id].note){': '+$sn.flagged[$id].note}else{''})}else{''});$r++
+   }
+   Set-RollupSheetStyle $ws ($r-1) $last
+  }
+  # Changes: newest chosen snapshot compared with the next one chosen
+  if($changesWs){
+   $new=$snaps[0];$old=$snaps[1];$cmp=Compare-ReportSnapshots $old.snap $new.snap
+   $att=@{};$nc=Get-P $new.stored 'comparison' $null;if($nc -and [string](Get-Field $nc 'baselineJobId' '') -eq $old.jobId){$a=Get-Field $nc 'attribution' $null;if($a){foreach($pp in $a.PSObject.Properties){$att[[string]$pp.Name]=[string]$pp.Value}}}
+   $heads=@('Member ID','Last Name','First Name','DOB','Field',$old.sheet,$new.sheet,'Change','Detail');for($i=0;$i -lt $heads.Count;$i++){$changesWs.Cells[1,($i+1)].Value=$heads[$i]}
+   $r=2;foreach($e in @($cmp.events|Sort-Object -Property @{Expression={[string]$_.last}},@{Expression={[string]$_.first}},@{Expression={[string]$_.field}})){
+    $detail=[string]$e.detail;if($e.change -eq 'Left panel'){$detail=$(if($att.ContainsKey([string]$e.memberId)){$att[[string]$e.memberId]}else{'No longer in this provider''s source data'})}
+    $vals=@($e.memberId,$e.last,$e.first,$e.dob,$e.field,$e.before,$e.after,$e.change,$detail);for($i=0;$i -lt $vals.Count;$i++){Set-RollupCell $changesWs $r ($i+1) ([string]$vals[$i])};$r++}
+   if($r -eq 2){$changesWs.Cells[2,1].Value='No differences between these two snapshots.'}
+   Set-RollupSheetStyle $changesWs ([Math]::Max(1,$r-1)) $heads.Count
+  }
+  # Flags in force today
+  $fws=$pkg.Workbook.Worksheets.Add((Get-RollupSheetName 'Flags' $used));$heads=@('Member ID','Last Name','First Name','DOB','Flag','Note','Flagged on','Last changed');for($i=0;$i -lt $heads.Count;$i++){$fws.Cells[1,($i+1)].Value=$heads[$i]};$r=2
+  foreach($f in @(Get-ProviderFlags $Npi)){if($null -eq $f){continue};$k=[string](Get-P $f 'kind' '');if(!$script:FlagKinds.Contains($k)){continue};$vals=@([string](Get-P $f 'memberId' ''),[string](Get-P $f 'last' ''),[string](Get-P $f 'first' ''),[string](Get-P $f 'dob' ''),[string]$script:FlagKinds[$k].label,[string](Get-P $f 'note' ''),(ConvertTo-DateValue (Get-P $f 'createdUtc' '')),(ConvertTo-DateValue (Get-P $f 'updatedUtc' '')));for($i=0;$i -lt $vals.Count;$i++){Set-RollupCell $fws $r ($i+1) $vals[$i]};$r++}
+  if($r -eq 2){$fws.Cells[2,1].Value='No patients are flagged for this provider.'}
+  Set-RollupSheetStyle $fws ([Math]::Max(1,$r-1)) $heads.Count
+  # About
+  $a=$about;$r=1;$put={param([int]$Row,[object[]]$Vals,[bool]$Bold)for($i=0;$i -lt $Vals.Count;$i++){Set-RollupCell $a $Row ($i+1) $Vals[$i];if($Bold){$a.Cells[$Row,($i+1)].Style.Font.Bold=$true}}}
+  $a.Cells[1,1].Value=('Patient rollup - '+$display);$a.Cells[1,1].Style.Font.Bold=$true;$a.Cells[1,1].Style.Font.Size=14
+  & $put 2 @(('NPI '+$Npi+$(if($pool){' | '+$pool}else{''})+' | Exported '+(Get-Date).ToString('M/d/yyyy h:mm tt')+' | Contains PHI: handle like the PDF reports.')) $false
+  $r=4;& $put $r @('Snapshot sheets') $true;$r++;& $put $r @('Sheet','Report generated','Report ID','Sent to provider','Compared with (in that report)','Patients') $true;$r++
+  foreach($s in $snaps){$cmpText='';$sc=Get-P $s.stored 'comparison' $null;if($sc -and (Get-Field $sc 'available' $false)){$cmpText=('Report of '+[string](Get-Field $sc 'baselineLabel' '')+' ('+([string](Get-Field $sc 'baselineJobId' '')).Substring(0,8)+')')}
+   & $put $r @($s.sheet,$s.when,$s.jobId,$(if($s.sent){(Get-ShortDate $s.sent.sentUtc)+', '+[string]$s.sent.label}else{'Not recorded as sent'}),$cmpText,@($s.facts.patients).Count) $false;$r++}
+  if($changesWs){$r++;& $put $r @(('Changes sheet: every difference between "'+$snaps[0].sheet+'" and "'+$snaps[1].sheet+'", one row per patient per field. "Closed" means the measure is compliant in the source data; it does not say who closed it.')) $false;$r++}
+  $r++;& $put $r @('Source files behind each snapshot') $true;$r++;& $put $r @('Sheet','Source','Export date','Rows in file','SHA-256') $true;$r++
+  foreach($s in $snaps){$srcs=@(Get-P $s.stored 'sources' @()|Where-Object{$null -ne $_});if($srcs.Count -eq 0){& $put $r @($s.sheet,'Not recorded (report predates source tracking)') $false;$r++;continue};foreach($x in $srcs){& $put $r @($s.sheet,[string](Get-Field $x 'displayName' ''),(ConvertTo-DateValue (Get-Field $x 'exportedUtc' '')),[int](Get-Field $x 'rowCount' 0),[string](Get-Field $x 'sha256' '')) $false;$r++}}
+  $r++;& $put $r @('Columns on the snapshot sheets') $true;$r++;& $put $r @('Column','Meaning') $true;$r++
+  foreach($col in $script:RollupColumns){& $put $r @($col[1],$col[2]) $false;$r++};foreach($col in $script:RollupComputed){& $put $r @($col[0],$col[1]) $false;$r++}
+  try{$a.Column(1).Width=34;$a.Column(2).Width=60;$a.Column(3).Width=36;$a.Column(4).Width=40;$a.Column(5).Width=44;$a.Column(6).Width=10}catch{}
+  return ,$pkg.GetAsByteArray()
+ }finally{$pkg.Dispose()}
+}
+function Send-RollupWorkbook($Context){
+ $q=$Context.Request.QueryString;$npi=[string]$q['npi'];$ids=@(([string]$q['jobs']) -split ','|ForEach-Object{$_.Trim()}|Where-Object{$_})
+ $bytes=New-RollupWorkbook $npi $ids ([string]$q['changes'] -eq '1')
+ $profile=Json (Join-Path $script:Paths.Profiles ($npi+'.json'));$name=Get-SafeFileName ([string](Get-P $profile 'displayName' $npi))
+ Log 'ROLLUP_EXPORTED' 'OK' ('NPI '+$npi+'; '+$ids.Count+' snapshot(s)')
+ Send-Bytes $Context 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' $bytes ('attachment; filename="Patient Rollup - '+$name+' - '+(Get-Date -Format 'yyyy-MM-dd')+'.xlsx"')
+}
+# "Mark as sent": records which report a provider received when it was not emailed through a campaign; it becomes the baseline for the next report.
+function Set-ReportSent([string]$JobId,[bool]$Sent){
+ if($JobId -notmatch '^[a-f0-9]{32}$'){throw 'Invalid report ID.'};$path=Join-Path $script:Paths.State ('job-'+$JobId+'.json');$job=Json $path;if(!$job){throw 'Report not found.'}
+ if([string](Get-P $job 'state' '') -ne 'Completed'){throw 'Only a completed report can be marked as sent.'}
+ Set-P $job 'sentUtc' $(if($Sent){[DateTime]::UtcNow.ToString('o')}else{''});Save-JsonAtomic $path $job
+ Log 'REPORT_SENT_MARK' 'OK' ($JobId+' sent='+$Sent) ;return [ordered]@{jobId=$JobId;sent=$Sent}
+}
+function Set-ReportsSentOnDate([string]$Date){
+ # For every provider, the latest completed report finished on or before that date is marked as sent on that date (reports already sent are left alone).
+ $d=[DateTime]::MinValue;if(![DateTime]::TryParseExact($Date,'yyyy-MM-dd',[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::None,[ref]$d)){throw 'Enter the date as yyyy-mm-dd.'}
+ $end=$d.Date.AddDays(1).ToUniversalTime();$mark=$d.Date.AddHours(12).ToUniversalTime().ToString('o');$sentMap=Get-SentReportMap;$marked=0;$already=0;$byNpi=@{}
+ foreach($j in @(Get-Jobs|Where-Object{[string](Get-P $_ 'state' '') -eq 'Completed'})){$w=ConvertTo-DateValue (Get-P $j 'completedUtc' '');if(!$w){continue};if($w.Kind -ne [DateTimeKind]::Utc){$w=$w.ToUniversalTime()};if($w -ge $end){continue};$npi=[string](Get-P $j 'providerKey' '');if(!$byNpi.ContainsKey($npi) -or $w -gt $byNpi[$npi].when){$byNpi[$npi]=@{job=$j;when=$w}}}
+ foreach($npi in @($byNpi.Keys)){$j=$byNpi[$npi].job;$jid=[string]$j.jobId;if($sentMap.ContainsKey($jid)){$already++;continue};$path=Join-Path $script:Paths.State ('job-'+$jid+'.json');Set-P $j 'sentUtc' $mark;Save-JsonAtomic $path $j;$marked++}
+ Log 'REPORT_SENT_BULK' 'OK' ($Date+': marked '+$marked+', already sent '+$already)
+ return [ordered]@{date=$Date;marked=$marked;alreadySent=$already;providers=$byNpi.Count}
+}
 function Get-FlagReportModel([string]$JobId){
  # Rebuilds the report for a finished job from its stored patient facts plus the provider's current flags (no Excel access needed).
  if($JobId -notmatch '^[a-f0-9]{32}$'){throw 'Invalid job ID.'}
@@ -1258,7 +1669,8 @@ function Get-FlagReportModel([string]$JobId){
  $facts=ConvertFrom-PatientFacts (Get-P $stored 'facts' $null)
  $sp=Get-P $stored 'provider' $null;$provider=[ordered]@{displayName=[string](Get-P $sp 'displayName' (Get-P $job 'displayName' ''));npi=[string](Get-P $sp 'npi' (Get-P $job 'providerKey' ''));riskPool=[string](Get-P $sp 'riskPool' '');location=[string](Get-P $sp 'location' '');aliases=(Get-P $sp 'aliases' $null)}
  $model=New-AnalysisModel $provider $facts @(Get-ProviderFlags ([string]$provider.npi))
- $model.generatedUtc=(ConvertTo-IsoText (Get-P $stored 'generatedUtc' $model.generatedUtc));$model.jobId=$JobId
+ $model.generatedUtc=(ConvertTo-IsoText (Get-P $stored 'generatedUtc' $model.generatedUtc));$model.jobId=$JobId;$model.sources=@(Get-P $stored 'sources' @())
+ try{Add-ReportComparison $model $JobId $stored}catch{$model.comparison=[ordered]@{available=$false;reason=('The comparison with the last report could not be rebuilt: '+$_.Exception.Message)}}
  return $model
 }
 function Save-FlagFromRequest($Body){
@@ -1560,11 +1972,12 @@ function ConvertTo-AnalysisHtml($Model,[switch]$Interactive){
  $k=$Model.kpi;$tiles=@();foreach($c in $script:KpiColumns){$tiles+=$c[1];$tiles+=(Get-Field $k $c[0] 0)};$tileHtml='';for($i=0;$i -lt $tiles.Count;$i+=2){$tileHtml+='<div class="tile"><span>'+ (ConvertTo-HtmlEncoded $tiles[$i]) +'</span><strong>'+ (ConvertTo-HtmlEncoded $tiles[$i+1]) +'</strong></div>'}
  $outreachList=@(@(Get-Field $Model 'outreach' @())|Where-Object{$null -ne $_});$outreachHtml='';foreach($t in $outreachList){$outreachHtml+=ConvertTo-TableHtml ([string]$t.key) ([string]$t.title) $t @($t.reason)};if(!$outreachHtml){$outreachHtml='<section><h2>Outreach lists</h2><p>'+(ConvertTo-HtmlEncoded $script:OutreachText.Empty)+'</p></section>'}
  $ref=$Model.tables
- $tables='<h2 class="group">Outreach lists (ranked by urgency)</h2>'+$outreachHtml+'<h2 class="group">Reference panels</h2>'+(ConvertTo-TableHtml 'openHedis' 'Open HEDIS List' (Get-Field $ref 'openHedis' $null) 'Patients with one or more open HEDIS metrics; review documentation and closure opportunities.')+(ConvertTo-TableHtml 'highRisk' 'High Risk / Tuck-In Patient Panel' (Get-Field $ref 'highRisk' $null) 'Entire high-risk panel, including visit and AWV follow-up context.')+(ConvertTo-TableHtml 'diabetes' 'Diabetes Care Gap Patient Panel' (Get-Field $ref 'diabetes' $null) 'Value-based diabetes patients with an open evidence-based metric and no appointment within three months.')+(ConvertTo-TableHtml 'nonRisk' 'Non-Risk Diabetes Scorecard Follow-Up Panel' (Get-Field $ref 'nonRiskDiabetes' $null) 'Non-risk patients with A1c at least 9.0 and at least one additional follow-up need.')+(ConvertTo-FlagSectionHtml (Get-Field $Model 'flags' $null))
+ $tables='<h2 class="group">Outreach lists (ranked by urgency)</h2>'+$outreachHtml+'<h2 class="group">Reference panels</h2>'+(ConvertTo-TableHtml 'openHedis' 'Open HEDIS List' (Get-Field $ref 'openHedis' $null) 'Patients with one or more open HEDIS metrics; review documentation and closure opportunities.')+(ConvertTo-TableHtml 'highRisk' 'High Risk / Tuck-In Patient Panel' (Get-Field $ref 'highRisk' $null) 'Entire high-risk panel, including visit and AWV follow-up context.')+(ConvertTo-TableHtml 'diabetes' 'Diabetes Care Gap Patient Panel' (Get-Field $ref 'diabetes' $null) 'Value-based diabetes patients with an open evidence-based metric and no appointment within three months.')+(ConvertTo-TableHtml 'nonRisk' 'Non-Risk Diabetes Scorecard Follow-Up Panel' (Get-Field $ref 'nonRiskDiabetes' $null) 'Non-risk patients with A1c at least 9.0 and at least one additional follow-up need.')+(ConvertTo-ChangesHtml $Model)+(ConvertTo-FlagSectionHtml (Get-Field $Model 'flags' $null))+(ConvertTo-SourceRecordHtml $Model)
  $generated=([DateTime]$Model.generatedUtc).ToLocalTime().ToString('g');$providerLocation=[string](Get-Field $Model.provider 'location' '')
  $style=@'
 body{font:14px Segoe UI,Arial;margin:0;background:#f4f7fb;color:#172033}header{background:#17365d;color:#fff;padding:28px}main{max-width:1500px;margin:auto;padding:24px}.meta{color:#d9e6f5}
 .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}.tile,section{background:#fff;border:1px solid #dce4ef;border-radius:8px;padding:16px}.tile span{display:block;color:#667085;font-size:12px;text-transform:uppercase}.tile strong{font-size:28px;color:#17365d}
+.tile small{display:block;color:#667085;font-size:11px;margin-top:2px}.tile.good{background:#ecf7f1;border-color:#b7dcc6}.tile.good strong{color:#1d7a55}.tile.warn{background:#fff7e8;border-color:#efd6a5}.tile.warn strong{color:#9a5b00}section.since{border-left:4px solid #1d7a55;margin:0 0 18px}section.since h2{margin-top:0}section.since .tiles{margin:10px 0}
 .story{font-size:17px}.section-head{display:flex;justify-content:space-between;align-items:center}button{background:#1769aa;color:#fff;border:0;border-radius:5px;padding:8px 12px;cursor:pointer}button.secondary{background:#e4e9f0;color:#172033}
 .table-wrap{overflow:auto}table{border-collapse:collapse;width:100%}th,td{padding:.55em .6em;border-bottom:1px solid #dde4ed;text-align:left;white-space:nowrap;vertical-align:top}th{background:#eaf1f8}section{margin-top:18px}
 .list{white-space:normal;max-width:36ch;line-height:1.35}.list span{white-space:nowrap}.reason{background:#f7f9fc;border-left:3px solid #1769aa;padding:6px 10px;margin:8px 0}.reason p{margin:3px 0}h2.group{margin:26px 0 4px;color:#17365d}.muted{color:#667085}
@@ -1573,7 +1986,7 @@ body{font:14px Segoe UI,Arial;margin:0;background:#f4f7fb;color:#172033}header{b
 tr[data-member]{cursor:pointer}tr[data-member]:hover td{background:#fffbe6}tr.editor td{background:#fffdf3;white-space:normal}.flag-form{padding:6px 2px}.flag-form .radios label{margin-right:16px}.flag-form textarea{display:block;width:100%;max-width:640px;height:64px;margin:8px 0;font:inherit;box-sizing:border-box}.error{color:#a61b1b}
 @page{size:letter landscape;margin:0.45in}
 @media print{button,.flagbar,tr.editor{display:none}body{background:#fff;font-size:11px}header{padding:12px 16px}header h1{font-size:18px;margin:0 0 4px}header h2{font-size:15px;margin:0 0 4px}main{max-width:none;padding:0}
-.tiles{gap:6px}.tile{padding:6px 8px;border-radius:4px}.tile span{font-size:9px}.tile strong{font-size:16px}
+.tiles{gap:6px}.tile{padding:6px 8px;border-radius:4px}.tile span{font-size:9px}.tile strong{font-size:16px}.tile small{font-size:8px}section.since{border:0;border-left:3px solid #1d7a55;padding:4px 0 4px 10px}
 section{break-inside:auto;margin-top:8px;padding:6px 0;border:0;border-radius:0}section h2{font-size:14px;margin:4px 0}section p{margin:2px 0 6px}.story{font-size:12px}.flagged{padding:4px 8px;border-radius:0}
 .table-wrap{overflow:visible}table{width:100%}thead{display:table-header-group}tr{break-inside:avoid}h2.group{font-size:15px;margin:12px 0 2px}.reason{font-size:10px;padding:4px 8px}}
 '@
@@ -1601,7 +2014,7 @@ var regen=document.getElementById('flagRegen');if(regen)regen.onclick=function()
   $barHtml='<div class="flagbar"><div><b>Flag mode</b> - click any patient row to mark the patient as <b>Data incorrect</b> or <b>Not a current patient</b>, or to clear a flag. Flags are saved to this provider profile and applied to every future report. This page mirrors the report with the current flags applied'+$(if($asOf){' (source data as of '+(ConvertTo-HtmlEncoded ($asOf.ToString('M/d/yyyy')))+')'}else{''})+'.</div><div class="flagbar-actions"><button type="button" id="flagRegen">Regenerate report now</button> <a class="btn" href="/provider-index">Provider Index</a>'+$(if($jobId){' <a class="btn" target="_blank" href="/html?jobId='+(ConvertTo-HtmlEncoded $jobId)+'">Published HTML</a>'}else{''})+'</div></div>'
   $interactiveScript=$flagScript.Replace('__FLAGS__',$flagsJson).Replace('__JOB__',$jobId).Replace('__NPI__',[string](Get-Field $Model.provider 'npi' ''))
  }
- return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+ (ConvertTo-HtmlEncoded $Model.provider.displayName) +' - Provider Analysis'+$(if($Interactive){' (flags)'}else{''})+'</title><style>'+$style+'</style></head><body>'+$barHtml+'<header><h1>Provider Patient Dashboard</h1><h2>'+ (ConvertTo-HtmlEncoded $Model.provider.displayName) +'</h2><div class="meta">NPI '+(ConvertTo-HtmlEncoded $Model.provider.npi)+$(if($providerLocation){' | '+(ConvertTo-HtmlEncoded $providerLocation)}else{''})+' | Generated '+(ConvertTo-HtmlEncoded $generated)+'</div></header><main><div class="tiles">'+$tileHtml+'</div><section><h2>Story in Brief</h2><p class="story">'+(ConvertTo-HtmlEncoded $Model.narrative)+'</p></section>'+$tables+'</main><script>function copyTable(id,btn){const t=document.getElementById(id),text=[...t.rows].map(r=>[...r.cells].map(c=>c.innerText).join("\t")).join("\n");let ok=false,box=null;try{box=document.createElement("div");box.contentEditable="true";box.style.position="fixed";box.style.left="-10000px";box.style.top="0";box.style.background="white";box.appendChild(t.cloneNode(true));document.body.appendChild(box);const range=document.createRange();range.selectNodeContents(box);const sel=window.getSelection();sel.removeAllRanges();sel.addRange(range);ok=document.execCommand("copy");sel.removeAllRanges()}catch(e){}finally{if(box)box.remove()}if(ok){btn.textContent="Copied";setTimeout(()=>btn.textContent="Copy table",1600);return}const fallback=()=>{const a=document.createElement("textarea");a.value=text;a.style.position="fixed";a.style.left="-10000px";document.body.appendChild(a);a.focus();a.select();let done=false;try{done=document.execCommand("copy")}catch(e){}a.remove();btn.textContent=done?"Copied as text":"Copy failed";setTimeout(()=>btn.textContent="Copy table",1600)};if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(()=>{btn.textContent="Copied as text";setTimeout(()=>btn.textContent="Copy table",1600)}).catch(fallback)}else{fallback()}}'+$fitScript+$interactiveScript+'</script></body></html>'
+ return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+ (ConvertTo-HtmlEncoded $Model.provider.displayName) +' - Provider Analysis'+$(if($Interactive){' (flags)'}else{''})+'</title><style>'+$style+'</style></head><body>'+$barHtml+'<header><h1>Provider Patient Dashboard</h1><h2>'+ (ConvertTo-HtmlEncoded $Model.provider.displayName) +'</h2><div class="meta">NPI '+(ConvertTo-HtmlEncoded $Model.provider.npi)+$(if($providerLocation){' | '+(ConvertTo-HtmlEncoded $providerLocation)}else{''})+' | Generated '+(ConvertTo-HtmlEncoded $generated)+'</div></header><main>'+(ConvertTo-ComparisonBandHtml $Model)+'<div class="tiles">'+$tileHtml+'</div><section><h2>Story in Brief</h2><p class="story">'+(ConvertTo-HtmlEncoded $Model.narrative)+'</p></section>'+$tables+'</main><script>function copyTable(id,btn){const t=document.getElementById(id),text=[...t.rows].map(r=>[...r.cells].map(c=>c.innerText).join("\t")).join("\n");let ok=false,box=null;try{box=document.createElement("div");box.contentEditable="true";box.style.position="fixed";box.style.left="-10000px";box.style.top="0";box.style.background="white";box.appendChild(t.cloneNode(true));document.body.appendChild(box);const range=document.createRange();range.selectNodeContents(box);const sel=window.getSelection();sel.removeAllRanges();sel.addRange(range);ok=document.execCommand("copy");sel.removeAllRanges()}catch(e){}finally{if(box)box.remove()}if(ok){btn.textContent="Copied";setTimeout(()=>btn.textContent="Copy table",1600);return}const fallback=()=>{const a=document.createElement("textarea");a.value=text;a.style.position="fixed";a.style.left="-10000px";document.body.appendChild(a);a.focus();a.select();let done=false;try{done=document.execCommand("copy")}catch(e){}a.remove();btn.textContent=done?"Copied as text":"Copy failed";setTimeout(()=>btn.textContent="Copy table",1600)};if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(()=>{btn.textContent="Copied as text";setTimeout(()=>btn.textContent="Copy table",1600)}).catch(fallback)}else{fallback()}}'+$fitScript+$interactiveScript+'</script></body></html>'
  }finally{$script:RenderInteractive=$prevInteractive}
 }
 function Get-PdfBrowserArguments([string]$PdfPath,[string]$Uri){
