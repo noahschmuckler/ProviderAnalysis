@@ -56,7 +56,7 @@ function Registry{
 }
 function Initialize-AppConfiguration{
  $existing=Json $script:ConfigPath;$created=$(if($existing -and $existing.createdUtc){[string]$existing.createdUtc}else{[DateTime]::UtcNow.ToString('o')})
- $c=[ordered]@{configVersion=2;createdUtc=$created;updatedUtc=[DateTime]::UtcNow.ToString('o');loopbackOnly=$true;preferredPort=$PreferredPort;sourceHeaderRule='Exact ordered nonblank headers after trimming outer whitespace';exportDateRule='Use each incoming XLSX Windows CreationTime as its source export date';sources=@(Registry)}
+ $c=[ordered]@{configVersion=2;createdUtc=$created;updatedUtc=[DateTime]::UtcNow.ToString('o');loopbackOnly=$true;preferredPort=$PreferredPort;sourceHeaderRule='Exact ordered nonblank headers after trimming outer whitespace; if no exact match, a row containing every canonical header once (extra columns allowed) is accepted';exportDateRule='Use each incoming XLSX Windows CreationTime as its source export date';sources=@(Registry)}
  $c|ConvertTo-Json -Depth 12|Set-Content -LiteralPath $script:ConfigPath -Encoding UTF8;if($existing){Log 'CONFIG_MIGRATED' 'OK' 'Draft 3.1 registry enforced; RPO uses Epic Pcp only'}else{Log 'CONFIG_CREATED'}
  if(!(Test-Path $script:ManifestPath)){[ordered]@{manifestVersion=1;updatedUtc=[DateTime]::UtcNow.ToString('o');sources=[ordered]@{}}|ConvertTo-Json -Depth 8|Set-Content $script:ManifestPath -Encoding UTF8;Log 'MANIFEST_CREATED'}
 }
@@ -153,11 +153,24 @@ function Save-JsonAtomic([string]$Path,[object]$Value){
 }
 function Get-FileHash256([string]$Path){return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()}
 function Test-HeaderEqual([object[]]$Actual,[object[]]$Expected){if($Actual.Count -ne $Expected.Count){return $false};for($i=0;$i -lt $Expected.Count;$i++){if(([string]$Actual[$i]).Trim() -cne ([string]$Expected[$i]).Trim()){return $false}};return $true}
+function Test-HeaderSuperset([object[]]$Actual,[object[]]$Expected){
+ # True when every canonical header appears exactly once in the row (case-sensitive, trimmed); extra columns and reordering are allowed.
+ $counts=@{};foreach($a in $Actual){$k=([string]$a).Trim();$counts[$k]=1+[int]$counts[$k]}
+ foreach($e in $Expected){if([int]$counts[([string]$e).Trim()] -ne 1){return $false}};return $true
+}
+function Get-MissingHeaders([object[]]$Actual,[object[]]$Expected){$set=@{};foreach($a in $Actual){$set[([string]$a).Trim()]=$true};return @($Expected|Where-Object{!$set.ContainsKey(([string]$_).Trim())})}
 function Test-WorkbookSchema([string]$Path){
- $config=Json $script:ConfigPath;$package=$null;$schemaMatches=@();$observed=@()
- try{$package=Open-ExcelPackage -Path $Path -ErrorAction Stop;foreach($ws in $package.Workbook.Worksheets){if($null -eq $ws.Dimension){continue};$maxCol=$ws.Dimension.End.Column;$limit=[Math]::Min(25,$ws.Dimension.End.Row);for($row=1;$row -le $limit;$row++){$headers=@();for($col=1;$col -le $maxCol;$col++){$text=([string]$ws.Cells[$row,$col].Text).Trim();if($text){$headers+=$text}};if($headers.Count -eq 0){continue};$dupes=@($headers|Group-Object -CaseSensitive|Where-Object{$_.Count -gt 1}|ForEach-Object{$_.Name});$observed+=[ordered]@{worksheet=$ws.Name;row=$row;headers=$headers;duplicates=$dupes};if($dupes.Count -gt 0){continue};foreach($source in $config.sources){if(Test-HeaderEqual $headers @($source.orderedHeaders)){$schemaMatches+=[ordered]@{sourceKey=$source.sourceKey;displayName=$source.displayName;canonicalFileName=$source.canonicalFileName;worksheet=$ws.Name;headerRow=$row;rowCount=[Math]::Max(0,$ws.Dimension.End.Row-$row)}}}}}}
+ # Exact ordered header matches win; if none exist, a header row that contains every canonical header (plus extra columns, any order) is accepted.
+ $config=Json $script:ConfigPath;$package=$null;$exact=@();$superset=@();$observed=@();$closest=@{}
+ try{$package=Open-ExcelPackage -Path $Path -ErrorAction Stop;foreach($ws in $package.Workbook.Worksheets){if($null -eq $ws.Dimension){continue};$maxCol=$ws.Dimension.End.Column;$limit=[Math]::Min(25,$ws.Dimension.End.Row);for($row=1;$row -le $limit;$row++){$headers=@();for($col=1;$col -le $maxCol;$col++){$text=([string]$ws.Cells[$row,$col].Text).Trim();if($text){$headers+=$text}};if($headers.Count -eq 0){continue};$dupes=@($headers|Group-Object -CaseSensitive|Where-Object{$_.Count -gt 1}|ForEach-Object{$_.Name});$observed+=[ordered]@{worksheet=$ws.Name;row=$row;headers=$headers;duplicates=$dupes};foreach($source in $config.sources){$expected=@($source.orderedHeaders);$hit=[ordered]@{sourceKey=$source.sourceKey;displayName=$source.displayName;canonicalFileName=$source.canonicalFileName;worksheet=$ws.Name;headerRow=$row;rowCount=[Math]::Max(0,$ws.Dimension.End.Row-$row);extraHeaders=@()};if($dupes.Count -eq 0 -and (Test-HeaderEqual $headers $expected)){$exact+=$hit;continue};if(Test-HeaderSuperset $headers $expected){$hit.extraHeaders=@($headers|Where-Object{$expected -cnotcontains $_});$superset+=$hit;continue};$missing=@(Get-MissingHeaders $headers $expected);$prev=$closest[[string]$source.sourceKey];if($missing.Count -lt $expected.Count -and ($null -eq $prev -or $missing.Count -lt $prev.missing.Count)){$closest[[string]$source.sourceKey]=[ordered]@{source=[string]$source.sourceKey;worksheet=$ws.Name;row=$row;headerCount=$headers.Count;expectedCount=$expected.Count;missing=@($missing|Select-Object -First 15)}}}}}}
  finally{if($package){Close-ExcelPackage $package -NoSave}}
- if($schemaMatches.Count -ne 1){$summary=@($observed|Where-Object{$_.headers.Count -gt 1}|Select-Object -First 8|ForEach-Object{[ordered]@{worksheet=$_.worksheet;row=$_.row;headerCount=$_.headers.Count;firstHeaders=@($_.headers|Select-Object -First 6);duplicates=$_.duplicates}});throw ('Schema recognition requires exactly one match; found '+$schemaMatches.Count+'. Observed: '+($summary|ConvertTo-Json -Compress -Depth 5))};return $schemaMatches[0]
+ if($exact.Count -eq 1){return $exact[0]}
+ if($exact.Count -eq 0 -and $superset.Count -eq 1){$m=$superset[0];Log 'SCHEMA_SUPERSET' 'OK' ('Accepted '+$m.sourceKey+' with '+$m.extraHeaders.Count+' extra column(s): '+(@($m.extraHeaders)-join ', ')) $m.sourceKey;return $m}
+ $schemaMatches=$(if($exact.Count -gt 0){$exact}else{$superset})
+ if($schemaMatches.Count -gt 1){throw ('Schema recognition is ambiguous; matched: '+(@($schemaMatches|ForEach-Object{$_.sourceKey+' ('+$_.worksheet+' row '+$_.headerRow+')'})-join ', '))}
+ $near=@($closest.Values|Sort-Object {$_.missing.Count}|Select-Object -First 3)
+ $summary=@($observed|Where-Object{$_.headers.Count -gt 1}|Select-Object -First 3|ForEach-Object{[ordered]@{worksheet=$_.worksheet;row=$_.row;headerCount=$_.headers.Count;firstHeaders=@($_.headers|Select-Object -First 6)}})
+ throw ('Schema recognition requires exactly one match; found 0. Closest sources (canonical headers missing from the file): '+($near|ConvertTo-Json -Compress -Depth 5)+' Observed: '+($summary|ConvertTo-Json -Compress -Depth 5))
 }
 function Receive-Upload($Context){
  $name=[Net.WebUtility]::UrlDecode([string]$Context.Request.Headers['X-File-Name']);if([string]::IsNullOrWhiteSpace($name)){throw 'Missing file name.'};if([IO.Path]::GetExtension($name) -ine '.xlsx'){throw 'Only XLSX files are accepted.'};$token=[Guid]::NewGuid().ToString('N');$path=Join-Path $script:Paths.Staging ($token+'.xlsx');$metaPath=Join-Path $script:Paths.Staging ($token+'.json')
