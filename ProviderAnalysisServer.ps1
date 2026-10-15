@@ -67,7 +67,26 @@ function Initialize-AppConfiguration{
  $c|ConvertTo-Json -Depth 12|Set-Content -LiteralPath $script:ConfigPath -Encoding UTF8;if($existing){Log 'CONFIG_MIGRATED' 'OK' 'Draft 3.1 registry enforced; RPO uses Epic Pcp only'}else{Log 'CONFIG_CREATED'}
  if(!(Test-Path $script:ManifestPath)){[ordered]@{manifestVersion=1;updatedUtc=[DateTime]::UtcNow.ToString('o');sources=[ordered]@{}}|ConvertTo-Json -Depth 8|Set-Content $script:ManifestPath -Encoding UTF8;Log 'MANIFEST_CREATED'}
 }
-function Json([string]$Path){if(Test-Path $Path){Get-Content $Path -Raw -Encoding UTF8|ConvertFrom-Json}else{$null}}
+function Json([string]$Path){
+ # Reads a JSON record that worker processes may be rewriting at the same moment. The file is opened letting others read, write and replace
+ # it, so a reader never blocks Save-JsonAtomic in another process. A moment when it is being swapped in, or held by antivirus or a sync
+ # client such as OneDrive ("being used by another process"), is retried for about six seconds instead of failing the request; a record
+ # whose temp file shows a save in progress is waited for rather than reported missing.
+ for($attempt=1;;$attempt++){
+  if(![IO.File]::Exists($Path)){
+   $saving=$false;try{$dir=[IO.Path]::GetDirectoryName($Path);if($dir -and [IO.Directory]::Exists($dir)){$saving=(@([IO.Directory]::GetFiles($dir,[IO.Path]::GetFileName($Path)+'.*.tmp')).Count -gt 0)}}catch{}
+   if($saving -and $attempt -lt 25){Start-Sleep -Milliseconds ([Math]::Min(400,20*$attempt));continue};return $null
+  }
+  try{
+   $fs=[IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+   try{$sr=New-Object IO.StreamReader($fs,[Text.Encoding]::UTF8,$true);$text=$sr.ReadToEnd()}finally{$fs.Dispose()}
+   if([string]::IsNullOrWhiteSpace($text)){if($attempt -lt 10){Start-Sleep -Milliseconds 100;continue};return $null}
+   try{return ($text|ConvertFrom-Json)}catch{if($attempt -lt 10){Start-Sleep -Milliseconds 100;continue};throw ('Could not read '+$Path+': '+$_.Exception.Message)}
+  }
+  catch [IO.FileNotFoundException],[IO.DirectoryNotFoundException]{return $null}
+  catch [IO.IOException],[UnauthorizedAccessException]{if($attempt -ge 25){throw};Start-Sleep -Milliseconds ([Math]::Min(400,20*$attempt))}
+ }
+}
 
 function Test-ImportExcelModule{
  $m=Get-Module -ListAvailable ImportExcel|Sort-Object Version -Descending|Select-Object -First 1
@@ -149,13 +168,17 @@ function Serve{
  while(-not $script:Stop -and $script:Listener.IsListening){$a=$script:Listener.BeginGetContext($null,$null);while(-not $a.AsyncWaitHandle.WaitOne(250)){if($script:Stop){break};if(([DateTime]::UtcNow-$script:LastHeartbeat).TotalSeconds -ge $script:HeartbeatSeconds){Invoke-Heartbeat}};if($script:Stop){break};try{Request ($script:Listener.EndGetContext($a))}catch{Log 'HTTP_LOOP' 'FAILED' $_.Exception.Message};if($script:RunNext){$script:RunNext=$false;try{Invoke-NextPendingJob}catch{Log 'JOB_LAUNCH' 'FAILED' $_.Exception.Message}}}
 }
 function Save-JsonAtomic([string]$Path,[object]$Value){
- # Writes a per-process temp file, then swaps it in with File.Replace so readers never see the file missing. On Windows the swap briefly
- # fails while another process (the server polling progress) has the file open ("Cannot create a file when that file already exists"),
- # so it is retried for up to about five seconds before giving up.
+ # Writes a per-process temp file, then swaps it in with File.Replace so readers never see the file missing. On Windows the swap fails while
+ # something else has the file open without sharing it ("Cannot create a file when that file already exists", "being used by another
+ # process": another process reading it, antivirus, or a sync client such as OneDrive), so it is retried for about fifteen seconds; from the
+ # tenth try an overwrite in place is tried as well, which works where only the replace is refused (Json waits out a half-written file).
  $tmp=$Path+'.'+$PID+'.tmp';$Value|ConvertTo-Json -Depth 15|Set-Content -LiteralPath $tmp -Encoding UTF8
  for($attempt=1;;$attempt++){
   try{if([IO.File]::Exists($Path)){[IO.File]::Replace($tmp,$Path,[NullString]::Value)}else{[IO.File]::Move($tmp,$Path)};return}
-  catch{if($attempt -ge 20){Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue;throw};Start-Sleep -Milliseconds (25*$attempt)}
+  catch{
+   if($attempt -ge 10 -and [IO.File]::Exists($Path)){try{[IO.File]::Copy($tmp,$Path,$true);Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue;return}catch{}}
+   if($attempt -ge 40){Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue;throw};Start-Sleep -Milliseconds ([Math]::Min(500,25*$attempt))
+  }
  }
 }
 function Get-FileHash256([string]$Path){return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()}
@@ -5578,7 +5601,8 @@ function Invoke-Heartbeat{
  try{Invoke-NextPendingJob}catch{Log 'JOB_LAUNCH' 'FAILED' $_.Exception.Message}
  $pending=$false;try{$pending=[bool](Invoke-PendingCampaignDrafts)}catch{Log 'CAMPAIGN_DRAFTS' 'FAILED' $_.Exception.Message}
  try{Invoke-ScheduledFeedSync}catch{Log 'FEED_SYNC' 'FAILED' $_.Exception.Message}
- if(!$pending){$pending=(@(Get-Jobs|Where-Object{[string](Get-P $_ 'state' '') -in @('Prepared','Queued','Starting','Running')}).Count -gt 0)}
+ # Like every step above, a failure here is logged; it must never stop the server (the heartbeat runs outside any request).
+ if(!$pending){try{$pending=(@(Get-Jobs|Where-Object{[string](Get-P $_ 'state' '') -in @('Prepared','Queued','Starting','Running')}).Count -gt 0)}catch{$pending=$true;Log 'JOB_QUEUE' 'FAILED' $_.Exception.Message}}
  Set-KeepAwake $pending
 }
 function Invoke-AnalysisJob([string]$JobId){$path=Join-Path $script:Paths.State ('job-'+$JobId+'.json');$job=Json $path;if(!$job){throw 'Analysis job was not found.'};try{Set-JobProgress $job 5 'Starting analysis worker';Set-P $job 'startedUtc' ([DateTime]::UtcNow.ToString('o'));Save-JsonAtomic $path $job;$model=New-ProviderAnalysis $job;Set-JobProgress $job 72 'Rendering HTML dashboard';$slug=ConvertTo-ProviderSlug ([string]$job.displayName);$stamp=Get-Date -Format 'yyyyMMdd-HHmmss';$prefix=$slug+'__'+[string]$job.providerKey+'__analysis__';$base=$prefix+$stamp+'__'+$JobId.Substring(0,8);$stageHtml=Join-Path $script:Paths.Staging ($JobId+'.html');$stagePdf=Join-Path $script:Paths.Staging ($JobId+'.pdf');$jsonPath=Join-Path $script:Paths.State ('analysis-'+$JobId+'.json');Save-JsonAtomic $jsonPath $model;[IO.File]::WriteAllText($stageHtml,(ConvertTo-AnalysisHtml $model),(New-Object Text.UTF8Encoding($false)));Set-JobProgress $job 82 'Rendering PDF';Convert-HtmlPdf $stageHtml $stagePdf;Set-JobProgress $job 92 'Publishing current outputs';$archiveDir=Join-Path $script:Paths.ProvidersArchive $slug;if(!(Test-Path $archiveDir)){New-Item -ItemType Directory -Path $archiveDir -Force|Out-Null};$currentHtml=Join-Path $script:Paths.ProvidersCurrent ($base+'.html');$currentPdf=Join-Path $script:Paths.ProvidersCurrent ($base+'.pdf');$warnings=@();foreach($old in @(Get-ChildItem -LiteralPath $script:Paths.ProvidersCurrent -File -Filter ($prefix+'*') -ErrorAction SilentlyContinue)){if($old.BaseName -eq $base){continue};$dest=Join-Path $archiveDir $old.Name;if(Test-Path -LiteralPath $dest){$dest=Join-Path $archiveDir ($old.BaseName+'__'+$stamp+$old.Extension)};try{Move-Item -LiteralPath $old.FullName -Destination $dest -Force}catch{$warnings+=('Previous output '+$old.Name+' was left in providers-current (it is probably open in another program): '+$_.Exception.Message);Log 'ANALYSIS_ARCHIVE' 'WARN' $_.Exception.Message}};Move-Item -LiteralPath $stageHtml -Destination $currentHtml -Force;Move-Item -LiteralPath $stagePdf -Destination $currentPdf -Force;if($warnings.Count -gt 0){Set-P $job 'warnings' $warnings};$job.state='Completed';$job.percent=100;$job.stage='Analysis complete';Set-P $job 'completedUtc' ([DateTime]::UtcNow.ToString('o'));Set-P $job 'htmlPath' $currentHtml;Set-P $job 'pdfPath' $currentPdf;Set-P $job 'htmlUrl' ('/html?jobId='+$JobId);Set-P $job 'pdfUrl' ('/pdf?jobId='+$JobId);Set-P $job 'flagUrl' ('/flag?jobId='+$JobId);Save-JsonAtomic $path $job;Log 'ANALYSIS_COMPLETED' 'OK' ('Job '+$JobId)}catch{$msg=$_.Exception.Message;if($msg -like 'Browser PDF rendering*' -and [int](Get-P $job 'attempts' 1) -lt $script:MaxJobAttempts){$job.state='Prepared';$job.percent=0;$job.stage=('Interrupted at 82% because '+$msg.TrimEnd('.')+'; queued to run again');Set-P $job 'errorSummary' '';Set-P $job 'workerPid' 0;Save-JsonAtomic $path $job;Log 'ANALYSIS_RETRY' 'WARN' ($JobId+' '+$msg)}else{$job.state='Failed';$job.stage='Analysis failed';Set-P $job 'errorSummary' $msg;Set-P $job 'completedUtc' ([DateTime]::UtcNow.ToString('o'));Save-JsonAtomic $path $job;Log 'ANALYSIS_FAILED' 'FAILED' ($JobId+' '+$msg)}}}
