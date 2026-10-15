@@ -826,12 +826,31 @@ function ConvertTo-SafeEmailHtml([string]$Html){
 }
 function Get-EmailPlainText([string]$Html){return (([Net.WebUtility]::HtmlDecode(($Html -replace '<[^>]+>',' '))) -replace '\s+',' ').Trim()}
 function New-EmailHtml([string]$Greeting,[string]$BodyHtml){return ('<div style="font-family:Calibri,Segoe UI,Arial,sans-serif;font-size:11pt"><p>Dear '+(ConvertTo-HtmlEncoded $Greeting)+',</p>'+$BodyHtml+'</div>')}
-$script:Outlook=$null
+$script:Outlook=$null;$script:OutlookKeep=$null
+function Test-OutlookAlive($Outlook){
+ # A method call through to the mail store fails once Outlook has exited; reading a property of the old connection can quietly return nothing instead.
+ try{$ns=$Outlook.GetNamespace('MAPI');if($null -eq $ns){return $false};return ($null -ne $ns.GetDefaultFolder(16))}catch{return $false}
+}
+function Reset-OutlookApplication{
+ foreach($o in @($script:OutlookKeep,$script:Outlook)){if($null -ne $o){try{[void][Runtime.InteropServices.Marshal]::ReleaseComObject($o)}catch{}}}
+ $script:OutlookKeep=$null;$script:Outlook=$null
+}
 function Get-OutlookApplication{
- if($script:Outlook){try{$null=$script:Outlook.Name;return $script:Outlook}catch{$script:Outlook=$null}}
- try{$script:Outlook=[Runtime.InteropServices.Marshal]::GetActiveObject('Outlook.Application')}catch{$script:Outlook=$null}
- if(!$script:Outlook){try{$script:Outlook=New-Object -ComObject Outlook.Application}catch{$script:Outlook=$null;throw ('Outlook could not be started for drafting: '+$_.Exception.Message)}}
- return $script:Outlook
+ # The connection is kept between drafts but checked each time: Outlook started in the background (no window open) can shut itself down after
+ # a draft is closed, and a stale connection then fails every later draft ("The RPC server is unavailable"). A dead one is replaced, waiting a
+ # moment for a closing Outlook to finish exiting. A hidden Drafts window object is held while connected, which keeps a background Outlook running.
+ if($script:Outlook -and (Test-OutlookAlive $script:Outlook)){return $script:Outlook}
+ Reset-OutlookApplication;$err=''
+ for($try=1;$try -le 3;$try++){
+  try{$script:Outlook=[Runtime.InteropServices.Marshal]::GetActiveObject('Outlook.Application')}catch{$script:Outlook=$null}
+  if(!$script:Outlook){try{$script:Outlook=New-Object -ComObject Outlook.Application}catch{$script:Outlook=$null;$err=$_.Exception.Message}}
+  if($script:Outlook -and (Test-OutlookAlive $script:Outlook)){
+   try{$script:OutlookKeep=$script:Outlook.GetNamespace('MAPI').GetDefaultFolder(16).GetExplorer()}catch{$script:OutlookKeep=$null}
+   return $script:Outlook
+  }
+  Reset-OutlookApplication;Start-Sleep -Seconds (2*$try)
+ }
+ throw ('Outlook could not be started for drafting'+$(if($err){': '+$err}else{'; open Outlook and try again.'}))
 }
 $script:DraftDateTags=@('0x00390040','0x0E060040')   # PR_CLIENT_SUBMIT_TIME (the Drafts folder's Sent/Date column) and PR_MESSAGE_DELIVERY_TIME
 function Set-OutlookItemDate($Mail){
@@ -848,7 +867,20 @@ function New-OutlookDraft($Spec){
  # Test hook: when PA_MAIL_SINK names a folder, each draft is written there as JSON (plus a copy of the attachment) instead of going to Outlook.
  $sink=[string]$env:PA_MAIL_SINK
  if($sink){if(!(Test-Path -LiteralPath $sink)){New-Item -ItemType Directory -Path $sink -Force|Out-Null};$id='SINK-'+[Guid]::NewGuid().ToString('N');$copy='';if($Spec.attachmentPath){Copy-Item -LiteralPath $Spec.attachmentPath -Destination (Join-Path $sink ([string]$Spec.attachmentName)) -Force;$copy=[string]$Spec.attachmentName};Save-JsonAtomic (Join-Path $sink ($id+'.json')) ([ordered]@{entryId=$id;to=[string]$Spec.to;subject=[string]$Spec.subject;html=[string]$Spec.html;attachment=$copy;includeSignature=[bool]$Spec.includeSignature;draftedUtc=[DateTime]::UtcNow.ToString('o')});return $id}
+ # A lost Outlook connection (Outlook closed or restarted between drafts) is reconnected and the draft tried again, up to three times.
+ for($attempt=1;;$attempt++){
+  try{return (New-OutlookDraftItem $Spec)}
+  catch{
+   $m=$_.Exception.Message;$lost=($m -match '0x800706BA|0x800706BE|0x80010108|0x80010114|0x800401FD|RPC server|disconnected|null-valued|did not create')
+   if(!$lost){throw};Reset-OutlookApplication
+   if($attempt -ge 3){throw ('Outlook closed or stopped responding while drafting ('+$m+'). Open Outlook, then select Retry failed items.')}
+   Log 'OUTLOOK_RECONNECT' 'WARN' ('Attempt '+$attempt+': '+$m);Start-Sleep -Seconds (2*$attempt)
+  }
+ }
+}
+function New-OutlookDraftItem($Spec){
  $ol=Get-OutlookApplication;$mail=$ol.CreateItem(0);$tempDir=''
+ if($null -eq $mail){throw 'Outlook did not create a mail item.'}
  try{
   $mail.Subject=[string]$Spec.subject;$mail.To=[string]$Spec.to;$mail.BodyFormat=2
   $signature='';if($Spec.includeSignature){try{$null=$mail.GetInspector;$signature=[string]$mail.HTMLBody}catch{$signature=''}}
