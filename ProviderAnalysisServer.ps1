@@ -4,12 +4,13 @@
 # source file record), reports can be marked as sent, and the Provider Index exports the patient rollup behind chosen reports to Excel.
 # Draft 5.9: the NP-AWV tab (/np-awv) lists, per site, the most urgent non-ACOR patients with an AWV due across every provider at the site,
 # as HTML, PDF and Excel; a flag saved there is saved to the patient's provider profile.
+# Draft 5.10: the PCP-AWV tab (/pcp-awv) is the same list for ACOR patients with an AWV due, for the PCPs to schedule; both tabs share one code path.
 # Adds provider indexes, guided cross-source mapping, fuzzy suggestions, NPI profiles, prepared job tracking, ranked outreach lists,
 # a flag mode (/flag?jobId=...) that excludes flagged patients from every list and panel on every later report for that provider,
 # and a Communication tab (/communication) that emails every provider in a risk pool a fresh report PDF via Outlook drafts.
 # The POC Coding tab (/poc-coding) analyzes point-of-care billing and coding for one department of a billing export and saves each run as an HTML report.
 [CmdletBinding()]
-param([int]$PreferredPort=8765,[switch]$NoBrowser,[switch]$SkipModuleInstallPrompt,[string]$RunJobId='',[string]$RunOverviewId='',[string]$RunNewListId='',[string]$RunPocId='',[string]$RunNpAwvId='')
+param([int]$PreferredPort=8765,[switch]$NoBrowser,[switch]$SkipModuleInstallPrompt,[string]$RunJobId='',[string]$RunOverviewId='',[string]$RunNewListId='',[string]$RunPocId='',[string]$RunNpAwvId='',[string]$RunPcpAwvId='')
 Set-StrictMode -Version 2.0
 $ErrorActionPreference='Stop'
 $script:Root=Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -262,10 +263,12 @@ function Request($Context){
   if($method -eq 'GET' -and $path -eq '/new-patients'){Send $Context 200 'text/html; charset=utf-8' (NewPatientsPage);return};if($method -eq 'GET' -and $path -eq '/api/new-patients'){Send $Context 200 'application/json' ((Get-NewListPageModel)|ConvertTo-Json -Depth 8);return}
   if($method -eq 'POST' -and $path -eq '/api/new-patients'){$result=New-NewListRun (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/new-patients-run'){Send $Context 200 'application/json' ((Get-NewListModel ([string]$Context.Request.QueryString['id']))|ConvertTo-Json -Depth 8);return}
   if($method -eq 'GET' -and $path -eq '/new-patients.file'){Send-NewListFile $Context ([string]$Context.Request.QueryString['id']) ([string]$Context.Request.QueryString['n']);return};
-  if($method -eq 'GET' -and $path -eq '/np-awv'){Send $Context 200 'text/html; charset=utf-8' (NpAwvPage);return};if($method -eq 'GET' -and $path -eq '/api/np-awv'){Send $Context 200 'application/json' ((Get-NpAwvPageModel)|ConvertTo-Json -Depth 8);return}
-  if($method -eq 'POST' -and $path -eq '/api/np-awv'){$result=New-NpAwvRun (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/np-awv-run'){Send $Context 200 'application/json' ((Get-NpAwvModel ([string]$Context.Request.QueryString['id']))|ConvertTo-Json -Depth 8);return}
-  if($method -eq 'GET' -and $path -eq '/np-awv/view'){$q=$Context.Request.QueryString;Send $Context 200 'text/html; charset=utf-8' (ConvertTo-NpAwvDocument (Get-CompletedNpAwv ([string]$q['id'])) ([string]$q['site']) -Interactive);return};if($method -eq 'GET' -and $path -eq '/np-awv.file'){$q=$Context.Request.QueryString;Send-NpAwvFile $Context ([string]$q['id']) ([string]$q['site']) ([string]$q['format']);return}
-  if($method -eq 'POST' -and $path -eq '/api/np-awv-flag'){$result=Save-NpAwvFlag (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return};
+  if($path -match '^(/api)?/(np|pcp)-awv(-run|-flag|/view|\.file)?$'){$awvK=$script:AwvKinds[[string]$Matches[2]];$awvApi=[bool]$Matches[1];$awvSub=[string]$Matches[3];$q=$Context.Request.QueryString
+   if($method -eq 'GET' -and !$awvApi -and !$awvSub){Send $Context 200 'text/html; charset=utf-8' (AwvPage $awvK);return};if($method -eq 'GET' -and $awvApi -and !$awvSub){Send $Context 200 'application/json' ((Get-AwvPageModel $awvK)|ConvertTo-Json -Depth 8);return}
+   if($method -eq 'POST' -and $awvApi -and !$awvSub){$result=New-AwvRun $awvK (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $awvApi -and $awvSub -eq '-run'){Send $Context 200 'application/json' ((Get-AwvModel $awvK ([string]$q['id']))|ConvertTo-Json -Depth 8);return}
+   if($method -eq 'GET' -and !$awvApi -and $awvSub -eq '/view'){Send $Context 200 'text/html; charset=utf-8' (ConvertTo-AwvDocument (Get-CompletedAwv $awvK ([string]$q['id'])) ([string]$q['site']) -Interactive);return};if($method -eq 'GET' -and !$awvApi -and $awvSub -eq '.file'){Send-AwvFile $Context $awvK ([string]$q['id']) ([string]$q['site']) ([string]$q['format']);return}
+   if($method -eq 'POST' -and $awvApi -and $awvSub -eq '-flag'){$result=Save-AwvFlag $awvK (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return}
+  }
   if($method -eq 'GET' -and $path -eq '/poc-coding'){Send $Context 200 'text/html; charset=utf-8' (PocCodingPage);return};if($method -eq 'GET' -and $path -eq '/api/poc-coding'){Send $Context 200 'application/json' ((Get-PocPageModel)|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/poc-coding-upload'){$result=Receive-PocUpload $Context;Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/poc-coding-file'){Send $Context 200 'application/json' ((Get-PocFileModel ([string]$Context.Request.QueryString['token']))|ConvertTo-Json -Depth 8);return}
   if($method -eq 'POST' -and $path -eq '/api/poc-coding'){$result=New-PocRun (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/poc-coding-run'){Send $Context 200 'application/json' ((Get-PocRunModel ([string]$Context.Request.QueryString['id']))|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/poc-coding.report'){Send-PocReport $Context ([string]$Context.Request.QueryString['id']) ([string]$Context.Request.QueryString['download'] -eq '1');return}
  if($method -eq 'GET' -and $path -eq '/api/sync'){Send $Context 200 'application/json' ((Get-SyncModel)|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/sync-feed'){$b=Read-BodyJson $Context;$result=Register-ReportFeed ([string](Get-P $b 'text' ''));Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/sync-feed-remove'){$result=Remove-ReportFeed ([string]$Context.Request.QueryString['sourceKey']);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/sync-now'){$result=Invoke-FeedSync @([string]$Context.Request.QueryString['sourceKey']);Send $Context 200 'application/json' (ConvertTo-Json -InputObject @($result) -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/sync-schedule'){$result=Set-SyncSchedule (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/flags'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-ProviderFlags ([string]$Context.Request.QueryString['npi'])) -Depth 6);return};if($method -eq 'GET' -and $path -eq '/rollup.xlsx'){Send-RollupWorkbook $Context;return};if($method -eq 'POST' -and $path -eq '/api/report-sent'){$b=Read-BodyJson $Context;if($null -eq $b){throw 'A JSON body is required.'};$result=Set-ReportSent ([string](Get-P $b 'jobId' '')) ([bool](Get-P $b 'sent' $false));Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 4);return};if($method -eq 'POST' -and $path -eq '/api/report-sent-bulk'){$b=Read-BodyJson $Context;if($null -eq $b){throw 'A JSON body is required.'};$result=Set-ReportsSentOnDate ([string](Get-P $b 'date' ''));Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 4);return};if($method -eq 'POST' -and $path -eq '/api/flag'){$result=Save-FlagFromRequest (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/run-next'){$script:RunNext=$true;Send $Context 202 'application/json' '{"status":"scheduled"}';return};if($method -eq 'GET' -and $path -eq '/api/jobs'){Send $Context 200 'application/json' (ConvertTo-Json -InputObject @(Get-Jobs) -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/job'){$result=New-PreparedJob (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/stage'){$result=Receive-Upload $Context;Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/confirm'){$result=Publish-StagedFile ([string]$Context.Request.QueryString['token']);$index=Update-ProviderIndexAfterImport ([string]$result.sourceKey) -Force;$result['providerCount']=$index.count;$result['indexSeconds']=$index.seconds;$result['indexError']=$index.error;Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return};if($method -eq 'POST' -and $path -eq '/api/stop'){$script:Stop=$true;Send $Context 202 'application/json' '{"status":"stopping"}';return};Send $Context 404 'application/json' '{"error":"not found"}'}catch{$msg=Safe $_.Exception.Message;Log 'HTTP_REQUEST' 'FAILED' $msg;try{Send $Context 400 'application/json' (([ordered]@{error=$msg}|ConvertTo-Json -Compress))}catch{}}
@@ -432,7 +435,7 @@ function New-PreparedJob($Body){if($null -eq $Body.aliases){throw 'Confirmed ali
 function Get-Jobs{return @(Get-ChildItem $script:Paths.State -Filter 'job-*.json' -File -ErrorAction SilentlyContinue|ForEach-Object{Json $_.FullName}|Sort-Object queuedUtc -Descending)}
 $script:TabCss='.tabs{display:flex;gap:4px;background:#17365d;padding:0 22px}.tabs a{color:#cfe0f5;text-decoration:none;padding:10px 18px;border-radius:8px 8px 0 0;font-weight:600}.tabs a:hover{background:#274b7a;color:#fff}.tabs a.active{background:#f4f7fb;color:#17365d}'
 function Get-NavHtml([string]$Active){
- $tabs=@(@('sources','/','Sources'),@('wizard','/providers','Provider Wizard'),@('index','/provider-index','Provider Index'),@('communication','/communication','Communication'),@('overview','/overview','Overview'),@('newpatients','/new-patients','New Patients'),@('npawv','/np-awv','NP-AWV'),@('poc','/poc-coding','POC Coding'))
+ $tabs=@(@('sources','/','Sources'),@('wizard','/providers','Provider Wizard'),@('index','/provider-index','Provider Index'),@('communication','/communication','Communication'),@('overview','/overview','Overview'),@('newpatients','/new-patients','New Patients'),@('npawv','/np-awv','NP-AWV'),@('pcpawv','/pcp-awv','PCP-AWV'),@('poc','/poc-coding','POC Coding'))
  $links=foreach($t in $tabs){'<a href="'+$t[1]+'"'+$(if($t[0] -eq $Active){' class="active"'}else{''})+'>'+$t[2]+'</a>'}
  return '<nav class="tabs">'+($links -join '')+'</nav>'
 }
@@ -2819,19 +2822,31 @@ el('build').onclick=async()=>{if(el('build').disabled||busy())return;el('build')
 # A generation reads the sources once for the chosen providers, scores every patient exactly as a provider report does, and keeps every non-ACOR AWV-due patient
 # per site in state\npawv-<id>.json. The HTML, PDF and Excel views show the NpAwvPerSite most urgent with the providers' current flags applied; a flag saved
 # on the NP-AWV page is saved to that patient's provider profile, so it also applies to the provider's own lists.
-$script:NpAwvPerSite=30;$script:NpAwvKeep=30;$script:NpAwvInline=$false;$script:NpAwvTitle='NP-AWV'
+# Draft 5.10: the same code serves PCP-AWV (ACOR patients, for the PCPs) through $script:AwvKinds; runs are state\<file>-<id>.json and keep the npAwvId field name.
+$script:NpAwvPerSite=30;$script:NpAwvKeep=30;$script:NpAwvInline=$false
+$script:AwvKinds=[ordered]@{
+ np=[ordered]@{kind='np';title='NP-AWV';route='/np-awv';api='/api/np-awv';file='npawv';log='NPAWV';tab='npawv';worker='RunNpAwvId';acor=$false;item='awv-np'
+  Subtitle='one list per site for the travelling NP: non-ACOR patients with an annual wellness visit due, ranked by urgency across every provider at the site'
+  Criteria='Non-ACOR patients with an annual wellness visit due (Export: last ACV before January 1 and no future ACV booked), from every selected provider at the site, most urgent first. Urgency is the score on each provider''s own list: 1 for the AWV, plus open measures, open ICDs, and the visit, appointment, A1c and risk factors shown under Why Ranked Here; ties go to the oldest last visit. Each site lists its {max} most urgent.'
+  None='No non-ACOR patient at this site has an annual wellness visit due.'
+  Matches='AWV Due - NP (non-ACOR)'}
+ pcp=[ordered]@{kind='pcp';title='PCP-AWV';route='/pcp-awv';api='/api/pcp-awv';file='pcpawv';log='PCPAWV';tab='pcpawv';worker='RunPcpAwvId';acor=$true;item='awv-pcp'
+  Subtitle='one list per site for the PCPs: ACOR patients with an annual wellness visit due, ranked by urgency across every provider at the site'
+  Criteria='ACOR patients with an annual wellness visit due (Export: last ACV more than 366 days ago and no future ACV booked), from every selected provider at the site, most urgent first. Urgency is the score on each provider''s own list: 1 for the AWV, plus open measures, open ICDs, and the visit, appointment, A1c and risk factors shown under Why Ranked Here; ties go to the oldest last visit. Each site lists its {max} most urgent.'
+  None='No ACOR patient at this site has an annual wellness visit due.'
+  Matches='AWV Due - PCP (ACOR)'}
+}
+function Get-AwvKind($Run){$k=[string](Get-P $Run 'awvKind' 'np');if(!$script:AwvKinds.Contains($k)){$k='np'};return $script:AwvKinds[$k]}
 $script:NpAwvColumns=@('#','First Name','Last Name','DOB','Urgency','Epic PCP','Payor PCP','Also Needs','Last Visit','Next Appt','Why Ranked Here')
 $script:NpAwvExtraColumns=@('MRN','Member ID','Phone','Payer')
 $script:NpAwvFormats=[ordered]@{html='HTML';pdf='PDF';xlsx='Excel'}
 $script:NpAwvText=[ordered]@{
- Criteria='Non-ACOR patients with an annual wellness visit due (Export: last ACV before January 1 and no future ACV booked), from every selected provider at the site, most urgent first. Urgency is the score on each provider''s own list: 1 for the AWV, plus open measures, open ICDs, and the visit, appointment, A1c and risk factors shown under Why Ranked Here; ties go to the oldest last visit. Each site lists its {max} most urgent.'
  Columns='Payor PCP is the provider whose Export panel the patient is on (the provider whose list and flags the patient belongs to). Epic PCP comes from Risk Population Outreach and is blank when the patient is not in that file.'
  Flags='Flagged patients are left out, exactly as on each provider''s dashboard. A flag saved here is saved to the patient''s provider profile and applies to that provider''s lists too; the next most urgent patient takes the place, marked "moved up".'
  Booked='{count} patient(s) were left out because Risk Population Outreach shows a future ACV already booked.'
- None='No non-ACOR patient at this site has an annual wellness visit due.'
 }
-function Get-NpAwvPath([string]$Id){if($Id -notmatch '^[a-f0-9]{32}$'){throw 'Invalid NP-AWV list ID.'};return (Join-Path $script:Paths.State ('npawv-'+$Id+'.json'))}
-function Get-NpAwvRuns{return @(Get-ChildItem $script:Paths.State -Filter 'npawv-*.json' -File -ErrorAction SilentlyContinue|ForEach-Object{Json $_.FullName}|Where-Object{$null -ne $_}|Sort-Object -Property @{Expression={ConvertTo-IsoText (Get-P $_ 'requestedUtc' '')}} -Descending)}
+function Get-AwvPath($K,[string]$Id){if($Id -notmatch '^[a-f0-9]{32}$'){throw ('Invalid '+$K.title+' list ID.')};return (Join-Path $script:Paths.State ($K.file+'-'+$Id+'.json'))}
+function Get-AwvRuns($K){return @(Get-ChildItem $script:Paths.State -Filter ($K.file+'-*.json') -File -ErrorAction SilentlyContinue|ForEach-Object{Json $_.FullName}|Where-Object{$null -ne $_}|Sort-Object -Property @{Expression={ConvertTo-IsoText (Get-P $_ 'requestedUtc' '')}} -Descending)}
 function Get-NpAwvRpoLookup([string[]]$MemberIds){
  # Epic PCP and Next ACV per member from the whole Risk Population Outreach source (a provider's own read only covers patients whose Epic PCP is that provider).
  $out=@{};$set=@{};foreach($id in @($MemberIds|Where-Object{$_})){$set[[string]$id]=$true};if($set.Count -eq 0){return $out}
@@ -2842,10 +2857,10 @@ function Get-NpAwvRpoLookup([string[]]$MemberIds){
  }
  return $out
 }
-function New-NpAwvCandidate($p,[string]$Npi,[string]$Display){
+function New-AwvCandidate($K,$p,[string]$Npi,[string]$Display){
  # One scored patient as stored in the run: identity for flags, sort keys, and the list cells computed exactly as on the provider's AWV list.
  $r=$script:OutreachRules;$score=[int]$p.Urgency;$tier=$(if($score -ge $r.UrgentScore){'Urgent'}elseif($score -ge $r.SoonScore){'Soon'}else{'Routine'})
- $row=@{p=$p;score=$score;tier=$tier;items=$p.Items;boost=@($p.Needs);k=@('awv-np')};$last=Get-PatientLastVisit $p
+ $row=@{p=$p;score=$score;tier=$tier;items=$p.Items;boost=@($p.Needs);k=@([string]$K.item)};$last=Get-PatientLastVisit $p
  $cells=[ordered]@{};foreach($h in @('Urgency','Also Needs','Last Visit','Next Appt','Why Ranked Here')){$cells[$h]=[string](Get-OutreachCell $h $row)}
  return [ordered]@{memberId=[string]$p.MemberID;first=[string]$p.First;last=[string]$p.Last;dob=[string]$p.DOB;mrn=[string](Get-P $p 'MRN' '');phone=[string](Get-P $p 'Phone' '');payer=[string](Get-P $p 'Payer' '');npis=@($Npi);payorPcp=$Display;epicPcp='';score=$score;lastVisitKey=$(if($last){([DateTime]$last).ToString('yyyy-MM-dd')}else{''});cells=$cells;snapshot=(New-FlagSnapshot $p)}
 }
@@ -2900,9 +2915,9 @@ function Get-NpAwvCell($Row,[string]$Col){
  }
 }
 function Get-NpAwvProvidersText($View){return ((@($View.providers|ForEach-Object{[string](Get-Field $_ 'displayName' '')+' ('+[int](Get-Field $_ 'due' 0)+')'})) -join ', ')}
-function Get-NpAwvSummaryText($View){
+function Get-NpAwvSummaryText($K,$View){
  $n=@($View.rows).Count;$e=[int]$View.eligible
- $s=$(if($e -eq 0){$script:NpAwvText.None}else{[string]$n+' of '+$e+' eligible patient'+$(if($e -eq 1){''}else{'s'})+' listed, across '+@($View.providers).Count+' provider'+$(if(@($View.providers).Count -eq 1){''}else{'s'})+'.'})
+ $s=$(if($e -eq 0){[string]$K.None}else{[string]$n+' of '+$e+' eligible patient'+$(if($e -eq 1){''}else{'s'})+' listed, across '+@($View.providers).Count+' provider'+$(if(@($View.providers).Count -eq 1){''}else{'s'})+'.'})
  if([int]$View.flaggedAll -gt 0){$s+=' '+[int]$View.flaggedAll+' flagged patient(s) left out.'}
  if([int]$View.booked -gt 0){$s+=' '+$script:NpAwvText.Booked.Replace('{count}',[string]$View.booked)}
  $m=@($View.rows|Where-Object{$_.movedUp}).Count;if($m -gt 0){$s+=' '+$m+' patient(s) moved up after flags were saved.'}
@@ -2926,14 +2941,14 @@ function Get-NpAwvFlaggedRows($View){
  return @(foreach($f in @($View.flagged)){$c=$f.c;$kind=[string](Get-P $f.flag 'kind' '');$def=$script:FlagKinds[$kind];$saved=ConvertTo-DateValue (Get-P $f.flag 'updatedUtc' $null);if($saved -and $saved.Kind -eq [DateTimeKind]::Utc){$saved=$saved.ToLocalTime()}
   @{c=$c;cells=@((Get-PatientDisplayName ([pscustomobject]@{Last=[string](Get-Field $c 'last' '');First=[string](Get-Field $c 'first' '')})),[string](Get-Field $c 'dob' ''),[string](Get-Field $c 'payorPcp' ''),$(if($def){[string]$def.label}else{$kind}),[string](Get-P $f.flag 'note' ''),$(if($saved){$saved.ToString('M/d/yyyy')}else{''}))}})
 }
-function ConvertTo-NpAwvDocument($Run,[string]$SiteName='',[switch]$Interactive){
- $views=@(Get-NpAwvViews $Run $SiteName);$asOf=ConvertTo-DateValue (Get-P $Run 'asOf' $null);$id=[string](Get-P $Run 'npAwvId' '')
- $title=$script:NpAwvTitle+' - '+$(if($SiteName){$SiteName}else{'All sites'})
+function ConvertTo-AwvDocument($Run,[string]$SiteName='',[switch]$Interactive){
+ $K=Get-AwvKind $Run;$views=@(Get-NpAwvViews $Run $SiteName);$asOf=ConvertTo-DateValue (Get-P $Run 'asOf' $null);$id=[string](Get-P $Run 'npAwvId' '')
+ $title=$K.title+' - '+$(if($SiteName){$SiteName}else{'All sites'})
  $body='<h1>'+(ConvertTo-HtmlEncoded $title)+'</h1><div class="muted">Generated '+(ConvertTo-HtmlEncoded $(if($asOf){$asOf.ToString('g')}else{''}))+' &middot; flags applied as of '+(ConvertTo-HtmlEncoded ((Get-Date).ToString('g')))+' &middot; '+(ConvertTo-HtmlEncoded (Get-NpAwvSourcesText $Run))+'</div>'
- $body+='<div class="notes"><p>'+(ConvertTo-HtmlEncoded ($script:NpAwvText.Criteria.Replace('{max}',[string]$script:NpAwvPerSite)))+'</p><p>'+(ConvertTo-HtmlEncoded $script:NpAwvText.Columns)+'</p><p>'+(ConvertTo-HtmlEncoded $script:NpAwvText.Flags)+'</p></div>'
+ $body+='<div class="notes"><p>'+(ConvertTo-HtmlEncoded (([string]$K.Criteria).Replace('{max}',[string]$script:NpAwvPerSite)))+'</p><p>'+(ConvertTo-HtmlEncoded $script:NpAwvText.Columns)+'</p><p>'+(ConvertTo-HtmlEncoded $script:NpAwvText.Flags)+'</p></div>'
  $flagMap=@{};$first=$true
  foreach($v in $views){
-  $body+='<section class="site'+$(if(!$first){' brk'}else{''})+'"><h2>'+(ConvertTo-HtmlEncoded $v.site)+'</h2><p class="sum">'+(ConvertTo-HtmlEncoded (Get-NpAwvSummaryText $v))+'</p><p class="muted">Providers (patients due): '+(ConvertTo-HtmlEncoded (Get-NpAwvProvidersText $v))+'</p>';$first=$false
+  $body+='<section class="site'+$(if(!$first){' brk'}else{''})+'"><h2>'+(ConvertTo-HtmlEncoded $v.site)+'</h2><p class="sum">'+(ConvertTo-HtmlEncoded (Get-NpAwvSummaryText $K $v))+'</p><p class="muted">Providers (patients due): '+(ConvertTo-HtmlEncoded (Get-NpAwvProvidersText $v))+'</p>';$first=$false
   if(@($v.rows).Count -gt 0){$body+=ConvertTo-NpAwvTableHtml $script:NpAwvColumns @($v.rows) ([bool]$Interactive)}
   $fr=@(Get-NpAwvFlaggedRows $v)
   if($fr.Count -gt 0){
@@ -2947,9 +2962,9 @@ function ConvertTo-NpAwvDocument($Run,[string]$SiteName='',[switch]$Interactive)
  $bar='';$js=''
  if($Interactive){
   $q='id='+$id+$(if($SiteName){'&site='+[Uri]::EscapeDataString($SiteName)}else{''})
-  $bar='<div class="flagbar"><div><b>Flag mode</b> - click a patient to mark them <b>Data incorrect</b> or <b>Not a current patient</b>, or to clear a flag. The flag is saved to the patient''s provider profile, so it applies to that provider''s lists and every future report too.</div><div><a class="btn" href="/np-awv">NP-AWV</a> <a class="btn" target="_blank" href="/np-awv.file?'+(ConvertTo-HtmlEncoded $q)+'&amp;format=pdf">PDF</a> <a class="btn" href="/np-awv.file?'+(ConvertTo-HtmlEncoded $q)+'&amp;format=xlsx">Excel</a></div></div>'
+  $bar='<div class="flagbar"><div><b>Flag mode</b> - click a patient to mark them <b>Data incorrect</b> or <b>Not a current patient</b>, or to clear a flag. The flag is saved to the patient''s provider profile, so it applies to that provider''s lists and every future report too.</div><div><a class="btn" href="'+$K.route+'">'+$K.title+'</a> <a class="btn" target="_blank" href="'+$K.route+'.file?'+(ConvertTo-HtmlEncoded $q)+'&amp;format=pdf">PDF</a> <a class="btn" href="'+$K.route+'.file?'+(ConvertTo-HtmlEncoded $q)+'&amp;format=xlsx">Excel</a></div></div>'
   $flagsJson=$(if($flagMap.Count -gt 0){ConvertTo-Json -InputObject $flagMap -Compress -Depth 4}else{'{}'}).Replace('</','<\/')
-  $js='<script>'+$script:NpAwvFlagJs.Replace('__FLAGS__',$flagsJson).Replace('__RUN__',$id)+'</script>'
+  $js='<script>'+$script:NpAwvFlagJs.Replace('__FLAGS__',$flagsJson).Replace('__RUN__',$id).Replace('__FLAGAPI__',$K.api+'-flag')+'</script>'
  }
  return ('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+(ConvertTo-HtmlEncoded $title)+'</title><style>'+$script:NpAwvCss+'</style></head><body>'+$bar+$body+$js+'</body></html>')
 }
@@ -2959,19 +2974,19 @@ function closeEditor(){var e=document.getElementById('flagEditor');if(e)e.parent
 function openEditor(tr){closeEditor();var id=tr.getAttribute('data-member'),name=tr.getAttribute('data-name');var cur=FLAGS[id]||{kind:'cleared',note:'',flagMemberId:id};var kinds=[['cleared','No exception'],['data-incorrect','Data incorrect'],['not-current','Not a current patient']];var row=document.createElement('tr');row.id='flagEditor';row.className='editor';row.innerHTML='<td colspan="'+tr.cells.length+'"><div class="flag-form"><b>'+esc(name)+'</b> <span class="muted">Member ID '+esc(id)+'</span><div class="radios">'+kinds.map(function(k){return '<label><input type="radio" name="flagKind" value="'+k[0]+'"'+(cur.kind===k[0]?' checked':'')+'> '+k[1]+'</label>'}).join('')+'</div><textarea id="flagNote" placeholder="Reason (free text, optional)">'+esc(cur.note)+'</textarea><div><button type="button" id="flagSave">Save flag</button> <button type="button" class="secondary" id="flagCancel">Cancel</button> <span id="flagMsg" class="muted"></span></div></div></td>';tr.parentNode.insertBefore(row,tr.nextSibling);
  document.getElementById('flagCancel').onclick=closeEditor;
  document.getElementById('flagSave').onclick=function(){var checked=row.querySelector('input[name=flagKind]:checked');var kind=checked?checked.value:'cleared';var note=document.getElementById('flagNote').value;var msg=document.getElementById('flagMsg');msg.textContent='Saving...';msg.className='muted';
-  fetch('/api/np-awv-flag',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:RUN,memberId:id,kind:kind,note:note,previousMemberId:cur.flagMemberId||id})}).then(function(r){return r.text().then(function(t){var j=null;try{j=t?JSON.parse(t):null}catch(e){}if(!r.ok)throw Error((j&&j.error)||('Request failed ('+r.status+')'));return j})}).then(function(){try{sessionStorage.setItem('flagScroll',String(window.scrollY))}catch(e){}location.reload()}).catch(function(e){msg.textContent='Could not save: '+e.message;msg.className='error'})};
+  fetch('__FLAGAPI__',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:RUN,memberId:id,kind:kind,note:note,previousMemberId:cur.flagMemberId||id})}).then(function(r){return r.text().then(function(t){var j=null;try{j=t?JSON.parse(t):null}catch(e){}if(!r.ok)throw Error((j&&j.error)||('Request failed ('+r.status+')'));return j})}).then(function(){try{sessionStorage.setItem('flagScroll',String(window.scrollY))}catch(e){}location.reload()}).catch(function(e){msg.textContent='Could not save: '+e.message;msg.className='error'})};
  var ta=document.getElementById('flagNote');if(ta)ta.focus()}
 document.addEventListener('click',function(ev){var t=ev.target;if(!t.closest)return;if(t.closest('#flagEditor')||t.closest('button')||t.closest('a'))return;var tr=t.closest('tr[data-member]');if(tr)openEditor(tr)});
 try{var y=sessionStorage.getItem('flagScroll');if(y){sessionStorage.removeItem('flagScroll');window.scrollTo(0,parseInt(y,10)||0)}}catch(e){}
 })();
 '@
-function New-NpAwvWorkbook($Run,[string]$SiteName=''){
+function New-AwvWorkbook($Run,[string]$SiteName=''){
  # About (criteria, sources, one line per site), one sheet per site (the list plus MRN, member ID, phone and payer for booking), and Flagged.
  try{Add-Type -AssemblyName System.Drawing -ErrorAction Stop}catch{}
- $views=@(Get-NpAwvViews $Run $SiteName);$asOf=ConvertTo-DateValue (Get-P $Run 'asOf' $null);$pkg=New-Object OfficeOpenXml.ExcelPackage;$used=@{}
+ $K=Get-AwvKind $Run;$views=@(Get-NpAwvViews $Run $SiteName);$asOf=ConvertTo-DateValue (Get-P $Run 'asOf' $null);$pkg=New-Object OfficeOpenXml.ExcelPackage;$used=@{}
  try{
   $ws=$pkg.Workbook.Worksheets.Add((Get-RollupSheetName 'About' $used))
-  $lines=@(($script:NpAwvTitle+' - '+$(if($SiteName){$SiteName}else{'All sites'})),('Generated '+$(if($asOf){$asOf.ToString('g')}else{''})+'; flags applied as of '+(Get-Date).ToString('g')+'.'),(Get-NpAwvSourcesText $Run),$script:NpAwvText.Criteria.Replace('{max}',[string]$script:NpAwvPerSite),$script:NpAwvText.Columns,$script:NpAwvText.Flags)
+  $lines=@(($K.title+' - '+$(if($SiteName){$SiteName}else{'All sites'})),('Generated '+$(if($asOf){$asOf.ToString('g')}else{''})+'; flags applied as of '+(Get-Date).ToString('g')+'.'),(Get-NpAwvSourcesText $Run),([string]$K.Criteria).Replace('{max}',[string]$script:NpAwvPerSite),$script:NpAwvText.Columns,$script:NpAwvText.Flags)
   for($i=0;$i -lt $lines.Count;$i++){$ws.Cells[($i+1),1].Value=$lines[$i]};$ws.Cells[1,1].Style.Font.Bold=$true;$ws.Cells[1,1].Style.Font.Size=14
   $r=$lines.Count+2;$heads=@('Site','Listed','Eligible','Flagged','Already booked','Providers (patients due)');for($c=0;$c -lt $heads.Count;$c++){$ws.Cells[$r,($c+1)].Value=$heads[$c]};$hr=$r
   foreach($v in $views){$r++;Set-RollupCell $ws $r 1 $v.site;Set-RollupCell $ws $r 2 ([int]@($v.rows).Count);Set-RollupCell $ws $r 3 ([int]$v.eligible);Set-RollupCell $ws $r 4 ([int]$v.flaggedAll);Set-RollupCell $ws $r 5 ([int]$v.booked);Set-RollupCell $ws $r 6 (Get-NpAwvProvidersText $v)}
@@ -2981,7 +2996,7 @@ function New-NpAwvWorkbook($Run,[string]$SiteName=''){
   foreach($v in $views){
    $ws=$pkg.Workbook.Worksheets.Add((Get-RollupSheetName $v.site $used))
    for($c=0;$c -lt $cols.Count;$c++){$ws.Cells[1,($c+1)].Value=$cols[$c]};$r=1
-   foreach($row in @($v.rows)){$r++;for($c=0;$c -lt $cols.Count;$c++){if($cols[$c] -eq '#'){Set-RollupCell $ws $r 1 ([int]$row.rank);if($row.movedUp){$ws.Cells[$r,1].AddComment('Moved up after a flag was saved','NP-AWV')|Out-Null};continue};Set-RollupCell $ws $r ($c+1) (Get-NpAwvCell $row $cols[$c])}}
+   foreach($row in @($v.rows)){$r++;for($c=0;$c -lt $cols.Count;$c++){if($cols[$c] -eq '#'){Set-RollupCell $ws $r 1 ([int]$row.rank);if($row.movedUp){$ws.Cells[$r,1].AddComment('Moved up after a flag was saved',[string]$K.title)|Out-Null};continue};Set-RollupCell $ws $r ($c+1) (Get-NpAwvCell $row $cols[$c])}}
    Set-RollupSheetStyle $ws $r $cols.Count 1
    foreach($x in @(Get-NpAwvFlaggedRows $v)){$flagRows+=,(@($v.site)+@($x.cells)+@([string](Get-Field $x.c 'mrn' ''),[string](Get-Field $x.c 'memberId' '')))}
   }
@@ -2992,37 +3007,37 @@ function New-NpAwvWorkbook($Run,[string]$SiteName=''){
   return ,$pkg.GetAsByteArray()
  }finally{$pkg.Dispose()}
 }
-function Get-CompletedNpAwv([string]$Id){$run=Json (Get-NpAwvPath $Id);if(!$run -or [string](Get-P $run 'state' '') -ne 'Completed'){throw 'That NP-AWV list is not complete.'};return $run}
-function Send-NpAwvFile($Context,[string]$Id,[string]$Site,[string]$Format){
+function Get-CompletedAwv($K,[string]$Id){$run=Json (Get-AwvPath $K $Id);if(!$run -or [string](Get-P $run 'state' '') -ne 'Completed'){throw ('That '+$K.title+' list is not complete.')};return $run}
+function Send-AwvFile($Context,$K,[string]$Id,[string]$Site,[string]$Format){
  # Built on request from the saved generation with the providers' current flags, so a flag saved a minute ago is already reflected.
- $run=Get-CompletedNpAwv $Id;$asOf=ConvertTo-DateValue (Get-P $run 'asOf' $null)
- $name=Get-SafeFileName ($script:NpAwvTitle+' - '+$(if($Site){$Site}else{'All sites'})+' - '+$(if($asOf){$asOf.ToString('yyyy-MM-dd')}else{''}))
+ $run=Get-CompletedAwv $K $Id;$asOf=ConvertTo-DateValue (Get-P $run 'asOf' $null)
+ $name=Get-SafeFileName ($K.title+' - '+$(if($Site){$Site}else{'All sites'})+' - '+$(if($asOf){$asOf.ToString('yyyy-MM-dd')}else{''}))
  switch($Format){
-  'html'{Send-Bytes $Context 'text/html; charset=utf-8' ([Text.Encoding]::UTF8.GetBytes((ConvertTo-NpAwvDocument $run $Site))) ('inline; filename="'+$name+'.html"')}
-  'xlsx'{Send-Bytes $Context 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' (New-NpAwvWorkbook $run $Site) ('attachment; filename="'+$name+'.xlsx"')}
+  'html'{Send-Bytes $Context 'text/html; charset=utf-8' ([Text.Encoding]::UTF8.GetBytes((ConvertTo-AwvDocument $run $Site))) ('inline; filename="'+$name+'.html"')}
+  'xlsx'{Send-Bytes $Context 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' (New-AwvWorkbook $run $Site) ('attachment; filename="'+$name+'.xlsx"')}
   'pdf'{
    # Rendered under a space-free staging name (the browser command line is not quoted).
-   $stem=Join-Path $script:Paths.Staging ('npawv-'+$Id+'-'+[Guid]::NewGuid().ToString('N').Substring(0,8));$h=$stem+'.html';$pp=$stem+'.pdf'
-   try{[IO.File]::WriteAllText($h,(ConvertTo-NpAwvDocument $run $Site),(New-Object Text.UTF8Encoding($false)));Convert-HtmlPdf $h $pp;Send-Bytes $Context 'application/pdf' ([IO.File]::ReadAllBytes($pp)) ('inline; filename="'+$name+'.pdf"')}finally{Remove-Item -LiteralPath $h,$pp -Force -ErrorAction SilentlyContinue}
+   $stem=Join-Path $script:Paths.Staging ($K.file+'-'+$Id+'-'+[Guid]::NewGuid().ToString('N').Substring(0,8));$h=$stem+'.html';$pp=$stem+'.pdf'
+   try{[IO.File]::WriteAllText($h,(ConvertTo-AwvDocument $run $Site),(New-Object Text.UTF8Encoding($false)));Convert-HtmlPdf $h $pp;Send-Bytes $Context 'application/pdf' ([IO.File]::ReadAllBytes($pp)) ('inline; filename="'+$name+'.pdf"')}finally{Remove-Item -LiteralPath $h,$pp -Force -ErrorAction SilentlyContinue}
   }
   default{throw 'Invalid format.'}
  }
- Log 'NPAWV_FILE' 'OK' ($Id+' '+$(if($Site){$Site}else{'all sites'})+' '+$Format)
+ Log ($K.log+'_FILE') 'OK' ($Id+' '+$(if($Site){$Site}else{'all sites'})+' '+$Format)
 }
-function Save-NpAwvFlag($Body){
+function Save-AwvFlag($K,$Body){
  # Saves the flag to every provider profile the patient is listed under on this generation, so the provider's own lists exclude them too.
  if($null -eq $Body){throw 'A JSON body is required.'}
- $run=Get-CompletedNpAwv ([string](Get-P $Body 'id' ''));$memberId=([string](Get-P $Body 'memberId' '')).Trim();$kind=[string](Get-P $Body 'kind' '');$note=[string](Get-P $Body 'note' '')
+ $run=Get-CompletedAwv $K ([string](Get-P $Body 'id' ''));$memberId=([string](Get-P $Body 'memberId' '')).Trim();$kind=[string](Get-P $Body 'kind' '');$note=[string](Get-P $Body 'note' '')
  $cand=$null;foreach($s in @(Get-P $run 'sites' @())){foreach($c in @(Get-Field $s 'candidates' @())){if($null -ne $c -and [string](Get-Field $c 'memberId' '') -eq $memberId){$cand=$c;break}};if($cand){break}}
- if(!$cand){throw 'That patient is not on this NP-AWV list.'}
+ if(!$cand){throw ('That patient is not on this '+$K.title+' list.')}
  $identity=@{first=[string](Get-Field $cand 'first' '');last=[string](Get-Field $cand 'last' '');dob=[string](Get-Field $cand 'dob' '');mrn=[string](Get-Field $cand 'mrn' '');snapshot=(Get-Field $cand 'snapshot' $null)}
  $saved=@();foreach($n in @(Get-Field $cand 'npis' @()|ForEach-Object{[string]$_}|Select-Object -Unique)){$null=Set-ProviderFlag $n $memberId $kind $note $identity ([string](Get-P $Body 'previousMemberId' ''));$saved+=$n}
- Log 'NPAWV_FLAG' 'OK' ('member '+$memberId+' '+$kind+' on NPI '+($saved -join ', '))
+ Log ($K.log+'_FLAG') 'OK' ('member '+$memberId+' '+$kind+' on NPI '+($saved -join ', '))
  return [ordered]@{memberId=$memberId;kind=$kind;npis=@($saved)}
 }
-function Invoke-NpAwvRun([string]$Id){
- # Runs in its own worker process: reads each source once for every chosen provider, scores every patient as a report would, and keeps the non-ACOR AWV-due patients per site.
- $path=Get-NpAwvPath $Id;$run=Json $path;if(!$run){throw 'NP-AWV run was not found.'}
+function Invoke-AwvRun($K,[string]$Id){
+ # Runs in its own worker process: reads each source once for every chosen provider, scores every patient as a report would, and keeps the AWV-due patients of the list's payer group (ACOR or non-ACOR) per site.
+ $path=Get-AwvPath $K $Id;$run=Json $path;if(!$run){throw ($K.title+' run was not found.')}
  $sw=[Diagnostics.Stopwatch]::StartNew()
  try{
   Set-P $run 'workerPid' $PID;Set-P $run 'startedUtc' ([DateTime]::UtcNow.ToString('o'));Set-RunProgress $run $path 3 'Reading provider profiles'
@@ -3038,45 +3053,45 @@ function Invoke-NpAwvRun([string]$Id){
     $pf=Get-ProviderFactsFromGroups $groups $p;$prow.note=$pf.note
     $prev=$script:AsOf;$script:AsOf=ConvertTo-DateValue (Get-Field $pf.facts 'asOf' $null)
     try{
-     foreach($pt in @(Get-Field $pf.facts 'patients' @()|Where-Object{$null -ne $_ -and $_.ACOR -eq $false -and $_.ACVDue})){
+     foreach($pt in @(Get-Field $pf.facts 'patients' @()|Where-Object{$null -ne $_ -and $_.ACOR -eq $K.acor -and $_.ACVDue})){
       Set-P $pt 'Items' (Get-PatientItems $pt);Set-P $pt 'Needs' @(Get-PatientNeeds $pt);Set-P $pt 'Urgency' (Get-PatientUrgency $pt);$prow.due++
-      $c=New-NpAwvCandidate $pt $npi $display;$by=$sites[$site].byId
+      $c=New-AwvCandidate $K $pt $npi $display;$by=$sites[$site].byId
       # The same member under two providers at one site is listed once, under both payor PCPs, so a flag reaches both lists.
       if($by.ContainsKey($c.memberId)){$o=$by[$c.memberId];$npis=@($o.npis)+@($npi);$pcps=([string]$o.payorPcp)+'; '+$display;if($c.score -gt $o.score){$by[$c.memberId]=$c;$o=$c};$o.npis=$npis;$o.payorPcp=$pcps}else{$by[$c.memberId]=$c}
      }
     }finally{$script:AsOf=$prev}
-   }catch{$prow.error=$_.Exception.Message;Log 'NPAWV_PROVIDER' 'FAILED' ($npi+' '+$_.Exception.Message)}
+   }catch{$prow.error=$_.Exception.Message;Log ($K.log+'_PROVIDER') 'FAILED' ($npi+' '+$_.Exception.Message)}
    $sites[$site].providers.Add($prow)
   }
   Set-RunProgress $run $path 87 'Looking up Epic PCP and booked ACVs in Risk Population Outreach'
-  $ids=@();foreach($k in @($sites.Keys)){$ids+=@($sites[$k].byId.Keys)};$rpo=@{};$epicError=''
-  try{$rpo=Get-NpAwvRpoLookup $ids}catch{$epicError=$_.Exception.Message;Log 'NPAWV_RPO' 'WARN' $epicError}
+  $ids=@();foreach($sk in @($sites.Keys)){$ids+=@($sites[$sk].byId.Keys)};$rpo=@{};$epicError=''
+  try{$rpo=Get-NpAwvRpoLookup $ids}catch{$epicError=$_.Exception.Message;Log ($K.log+'_RPO') 'WARN' $epicError}
   $out=@();$index=Get-NpAwvFlagIndex @($chosen|ForEach-Object{[string](Get-P $_ 'npi' '')})
-  foreach($k in @($sites.Keys|Sort-Object -Property $script:GroupSort)){
+  foreach($sk in @($sites.Keys|Sort-Object -Property $script:GroupSort)){
    $booked=0;$list=@()
-   foreach($c in @($sites[$k].byId.Values)){$x=$(if($rpo.ContainsKey($c.memberId)){$rpo[$c.memberId]}else{$null});if($x){$c.epicPcp=[string]$x.epic;if($x.nextAcv -and $x.nextAcv.Date -ge $asOf.Date){$booked++;continue}};$list+=$c}
+   foreach($c in @($sites[$sk].byId.Values)){$x=$(if($rpo.ContainsKey($c.memberId)){$rpo[$c.memberId]}else{$null});if($x){$c.epicPcp=[string]$x.epic;if($x.nextAcv -and $x.nextAcv.Date -ge $asOf.Date){$booked++;continue}};$list+=$c}
    $list=@($list|Sort-Object -Property @{Expression={-[int]$_.score}},@{Expression={[string]$_.lastVisitKey}},@{Expression={[string]$_.last}},@{Expression={[string]$_.first}})
-   $s=[ordered]@{site=$k;providers=@($sites[$k].providers.ToArray()|Sort-Object -Property @{Expression={[string]$_.displayName}});candidates=$list;booked=$booked;listed=@()}
+   $s=[ordered]@{site=$sk;providers=@($sites[$sk].providers.ToArray()|Sort-Object -Property @{Expression={[string]$_.displayName}});candidates=$list;booked=$booked;listed=@()}
    $s.listed=@((Get-NpAwvSiteView $s $index).rows|ForEach-Object{[string]$_.c.memberId})
    $out+=$s
   }
   Set-P $run 'sites' $out;Set-P $run 'sources' @($src.sources);Set-P $run 'asOf' ($asOf.ToString('o'));Set-P $run 'epicError' $epicError;Set-P $run 'failedProviders' @($out|ForEach-Object{@($_.providers|Where-Object{$_.error})}).Count
   $run.state='Completed';$run.percent=100;$run.stage='Lists complete';Set-P $run 'completedUtc' ([DateTime]::UtcNow.ToString('o'));Set-P $run 'seconds' ([Math]::Round($sw.Elapsed.TotalSeconds,1));Save-JsonAtomic $path $run
-  Log 'NPAWV_COMPLETED' 'OK' ($chosen.Count.ToString()+' providers, '+$out.Count+' sites in '+[Math]::Round($sw.Elapsed.TotalSeconds,1)+'s')
- }catch{$msg=$_.Exception.Message;$cur=Json $path;if(!$cur){$cur=$run};$cur.state='Failed';$cur.stage='Lists failed';Set-P $cur 'errorSummary' $msg;Set-P $cur 'completedUtc' ([DateTime]::UtcNow.ToString('o'));Save-JsonAtomic $path $cur;Log 'NPAWV_FAILED' 'FAILED' $msg}
+  Log ($K.log+'_COMPLETED') 'OK' ($chosen.Count.ToString()+' providers, '+$out.Count+' sites in '+[Math]::Round($sw.Elapsed.TotalSeconds,1)+'s')
+ }catch{$msg=$_.Exception.Message;$cur=Json $path;if(!$cur){$cur=$run};$cur.state='Failed';$cur.stage='Lists failed';Set-P $cur 'errorSummary' $msg;Set-P $cur 'completedUtc' ([DateTime]::UtcNow.ToString('o'));Save-JsonAtomic $path $cur;Log ($K.log+'_FAILED') 'FAILED' $msg}
 }
-function Start-NpAwvWorker([string]$Id){return (Start-RunWorker 'RunNpAwvId' $Id ('npawv-'+$Id))}
-function Update-NpAwvLiveness($Run){
- $id=[string]$Run.npAwvId;$reason=Get-RunStallReason $Run $id 'NP-AWV' 'Generate the lists again.' ('npawv-'+$id)
+function Start-AwvWorker($K,[string]$Id){return (Start-RunWorker ([string]$K.worker) $Id ($K.file+'-'+$Id))}
+function Update-AwvLiveness($Run){
+ $K=Get-AwvKind $Run;$id=[string]$Run.npAwvId;$reason=Get-RunStallReason $Run $id ([string]$K.title) 'Generate the lists again.' ($K.file+'-'+$id)
  if(!$reason){return $false}
- $Run.state='Failed';$Run.stage='Lists failed';Set-P $Run 'errorSummary' $reason;Save-JsonAtomic (Get-NpAwvPath $id) $Run;Log 'NPAWV_INTERRUPTED' 'WARN' $id;return $true
+ $Run.state='Failed';$Run.stage='Lists failed';Set-P $Run 'errorSummary' $reason;Save-JsonAtomic (Get-AwvPath $K $id) $Run;Log ($K.log+'_INTERRUPTED') 'WARN' $id;return $true
 }
-function Get-NpAwvModel([string]$Id,[switch]$Summary){
- $run=Json (Get-NpAwvPath $Id);if(!$run){throw 'NP-AWV list was not found.'}
- $null=Update-NpAwvLiveness $run
+function Get-AwvModel($K,[string]$Id,[switch]$Summary){
+ $run=Json (Get-AwvPath $K $Id);if(!$run){throw ($K.title+' list was not found.')}
+ $null=Update-AwvLiveness $run
  $m=[ordered]@{npAwvId=[string]$run.npAwvId;state=[string]$run.state;percent=[int](Get-P $run 'percent' 0);stage=[string](Get-P $run 'stage' '');requestedUtc=(ConvertTo-IsoText (Get-P $run 'requestedUtc' ''));completedUtc=(ConvertTo-IsoText (Get-P $run 'completedUtc' ''));seconds=(Get-P $run 'seconds' $null);npis=@(Get-P $run 'npis' @());providerCount=@(Get-P $run 'npis' @()).Count;selection=(Get-OverviewSelectionText $run);errorSummary=[string](Get-P $run 'errorSummary' '');failedProviders=[int](Get-P $run 'failedProviders' 0);epicError=[string](Get-P $run 'epicError' '');siteCount=0;listed=0;sites=@();all=$null;sourcesText='';perSite=$script:NpAwvPerSite}
  if($m.state -eq 'Completed'){
-  $file={param([string]$Site)$q='id='+$m.npAwvId+$(if($Site){'&site='+[Uri]::EscapeDataString($Site)}else{''});[ordered]@{view='/np-awv/view?'+$q;html='/np-awv.file?'+$q+'&format=html';pdf='/np-awv.file?'+$q+'&format=pdf';xlsx='/np-awv.file?'+$q+'&format=xlsx'}}
+  $file={param([string]$Site)$q='id='+$m.npAwvId+$(if($Site){'&site='+[Uri]::EscapeDataString($Site)}else{''});[ordered]@{view=$K.route+'/view?'+$q;html=$K.route+'.file?'+$q+'&format=html';pdf=$K.route+'.file?'+$q+'&format=pdf';xlsx=$K.route+'.file?'+$q+'&format=xlsx'}}
   $m.all=& $file ''
   # History rows show the count as generated; the open list applies the current flags (one flag file read per provider).
   if($Summary){foreach($s in @(Get-P $run 'sites' @())){if($null -ne $s){$m.siteCount++;$m.listed+=@(Get-Field $s 'listed' @()).Count}}}
@@ -3088,24 +3103,24 @@ function Get-NpAwvModel([string]$Id,[switch]$Summary){
  }
  return $m
 }
-function Get-NpAwvPageModel{
- $all=@(Get-NpAwvRuns);$history=@(foreach($o in $all){if([string](Get-P $o 'state' '') -in @('Completed','Failed')){Get-NpAwvModel ([string]$o.npAwvId) -Summary}})
- return [ordered]@{providers=@(Get-OverviewProviders);perSite=$script:NpAwvPerSite;latest=$(if($all.Count){Get-NpAwvModel ([string]$all[0].npAwvId)}else{$null});history=$history}
+function Get-AwvPageModel($K){
+ $all=@(Get-AwvRuns $K);$history=@(foreach($o in $all){if([string](Get-P $o 'state' '') -in @('Completed','Failed')){Get-AwvModel $K ([string]$o.npAwvId) -Summary}})
+ return [ordered]@{providers=@(Get-OverviewProviders);perSite=$script:NpAwvPerSite;latest=$(if($all.Count){Get-AwvModel $K ([string]$all[0].npAwvId)}else{$null});history=$history}
 }
-function New-NpAwvRun($Body){
+function New-AwvRun($K,$Body){
  $req=Get-RequestedProviders $Body
- foreach($o in @(Get-NpAwvRuns)){if([string](Get-P $o 'state' '') -in @('Starting','Running') -and !(Update-NpAwvLiveness $o)){throw 'NP-AWV lists are already being generated; wait for them to finish.'}}
- $id=[Guid]::NewGuid().ToString('N');$path=Get-NpAwvPath $id
- $run=[ordered]@{npAwvVersion=1;npAwvId=$id;state='Starting';percent=1;stage='Launching NP-AWV worker';requestedUtc=[DateTime]::UtcNow.ToString('o');npis=@($req.npis);selection=$req.selection;workerPid=0}
- Save-JsonAtomic $path $run;Log 'NPAWV_REQUESTED' 'OK' (@($req.npis).Count.ToString()+' providers')
- if($script:NpAwvInline){Invoke-NpAwvRun $id}
- else{try{$null=Start-NpAwvWorker $id}catch{$run.state='Failed';$run.stage='Worker launch failed';$run['errorSummary']=$_.Exception.Message;Save-JsonAtomic $path $run;Log 'NPAWV_FAILED' 'FAILED' $_.Exception.Message}}
- foreach($old in @(Get-NpAwvRuns|Select-Object -Skip $script:NpAwvKeep)){$oid=[string](Get-P $old 'npAwvId' '');if($oid -match '^[a-f0-9]{32}$'){Remove-Item -LiteralPath (Get-NpAwvPath $oid) -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath (Join-Path $script:Paths.Logs ('npawv-'+$oid+'.out.log')),(Join-Path $script:Paths.Logs ('npawv-'+$oid+'.err.log')) -Force -ErrorAction SilentlyContinue}}
- return (Get-NpAwvModel $id)
+ foreach($o in @(Get-AwvRuns $K)){if([string](Get-P $o 'state' '') -in @('Starting','Running') -and !(Update-AwvLiveness $o)){throw ($K.title+' lists are already being generated; wait for them to finish.')}}
+ $id=[Guid]::NewGuid().ToString('N');$path=Get-AwvPath $K $id
+ $run=[ordered]@{npAwvVersion=1;awvKind=[string]$K.kind;npAwvId=$id;state='Starting';percent=1;stage=('Launching '+$K.title+' worker');requestedUtc=[DateTime]::UtcNow.ToString('o');npis=@($req.npis);selection=$req.selection;workerPid=0}
+ Save-JsonAtomic $path $run;Log ($K.log+'_REQUESTED') 'OK' (@($req.npis).Count.ToString()+' providers')
+ if($script:NpAwvInline){Invoke-AwvRun $K $id}
+ else{try{$null=Start-AwvWorker $K $id}catch{$run.state='Failed';$run.stage='Worker launch failed';$run['errorSummary']=$_.Exception.Message;Save-JsonAtomic $path $run;Log ($K.log+'_FAILED') 'FAILED' $_.Exception.Message}}
+ foreach($old in @(Get-AwvRuns $K|Select-Object -Skip $script:NpAwvKeep)){$oid=[string](Get-P $old 'npAwvId' '');if($oid -match '^[a-f0-9]{32}$'){Remove-Item -LiteralPath (Get-AwvPath $K $oid) -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath (Join-Path $script:Paths.Logs ($K.file+'-'+$oid+'.out.log')),(Join-Path $script:Paths.Logs ($K.file+'-'+$oid+'.err.log')) -Force -ErrorAction SilentlyContinue}}
+ return (Get-AwvModel $K $id)
 }
-function NpAwvPage{
+function AwvPage($K){
  $html=@'
-<!doctype html><html><head><meta charset="utf-8"><title>NP-AWV</title>
+<!doctype html><html><head><meta charset="utf-8"><title>__TITLE__</title>
 <style>
 body{font:14px Segoe UI,Arial;margin:0;background:#f4f7fb;color:#172033}header{background:#17365d;color:white;padding:22px 22px 12px}main{padding:22px;max-width:1500px}
 __TABCSS__
@@ -3115,13 +3130,13 @@ button,a.btn{padding:7px 12px;cursor:pointer;background:#1769aa;color:#fff;borde
 __RUNCSS__
 table.sites{border-collapse:collapse;width:100%;margin-top:6px}table.sites th,table.sites td{padding:6px 8px;border-bottom:1px solid #dce4ef;text-align:left;vertical-align:top}table.sites th{background:#eaf1f8}table.sites .n{text-align:right;white-space:nowrap}table.sites tr.all td{background:#f4f7fb;font-weight:600}table.sites .links{white-space:nowrap}table.sites .links a{margin-right:8px}.provlist{font-size:12px;color:#667085;margin-top:2px}
 </style></head><body>
-<header><h1>NP-AWV</h1><p>Draft 5.9 - one list per site for the travelling NP: non-ACOR patients with an annual wellness visit due, ranked by urgency across every provider at the site</p></header>__NAV__
+<header><h1>__TITLE__</h1><p>Draft 5.10 - __SUBTITLE__</p></header>__NAV__
 <main>
 <section class="card"><h2>Choose sites</h2>
 <p class="muted">Tick a location to include all of its providers (or tick providers individually). Each site gets one list of its __MAX__ most urgent patients, whichever provider they belong to.</p>
 <div id="picker"><span class="muted">Loading profiles...</span></div>
 <div class="row"><button class="alt" id="all">Select all</button><button class="alt" id="none">Clear</button><button class="go" id="build" disabled>Generate lists</button><span id="count" class="muted"></span></div>
-<p class="muted">Columns match the AWV Due - NP (non-ACOR) list on each provider's dashboard, plus Epic PCP and Payor PCP. Flagged patients are left out; flag a patient from View &amp; flag and the flag is saved to that patient's provider, so it applies to the provider's lists too. HTML, PDF and Excel are built when you open them, with the current flags.</p>
+<p class="muted">Columns match the __MATCHES__ list on each provider's dashboard, plus Epic PCP and Payor PCP. Flagged patients are left out; flag a patient from View &amp; flag and the flag is saved to that patient's provider, so it applies to the provider's lists too. HTML, PDF and Excel are built when you open them, with the current flags.</p>
 </section>
 <section class="card"><h2>Lists</h2><div id="result"><span class="muted">Loading...</span></div></section>
 <section class="card"><h2>Previous lists</h2><p class="muted">The last 30 generations, newest first.</p><div id="history"><span class="muted">Loading...</span></div></section>
@@ -3153,16 +3168,16 @@ function historyHtml(list){
  return '<table class="hist"><thead><tr><th>Generated</th><th>Providers</th><th>Locations</th><th class="n">Listed</th><th></th></tr></thead><tbody>'+list.map(h=>{const showing=current&&current.npAwvId===h.npAwvId;const s=h.selection||{};return '<tr'+(showing?' class="showing"':'')+'><td>'+esc(when(h.completedUtc||h.requestedUtc))+(showing?' <span class="muted">(shown above)</span>':'')+'</td><td>'+h.providerCount+'</td><td>'+esc(s.locations||'')+'</td><td class="n">'+(h.state==='Completed'?h.listed:'')+'</td><td>'+(h.state==='Completed'?'<a href="#" data-view="'+esc(h.npAwvId)+'">Show</a>':'<span class="error">Failed: '+esc(h.errorSummary)+'</span>')+'</td></tr>'}).join('')+'</tbody></table>';
 }
 function renderHistory(){el('history').innerHTML=historyHtml(history)}
-async function loadHistory(){try{const m=await api('/api/np-awv');history=m.history;renderHistory()}catch(e){el('history').innerHTML='<p class="error">'+esc(e.message)+'</p>'}}
+async function loadHistory(){try{const m=await api('__API__');history=m.history;renderHistory()}catch(e){el('history').innerHTML='<p class="error">'+esc(e.message)+'</p>'}}
 function restore(o){sel.clear();o.npis.forEach(n=>{if(providers.some(p=>p.npi===n))sel.add(n)})}
-el('history').addEventListener('click',async e=>{const a=e.target.closest('a[data-view]');if(!a)return;e.preventDefault();if(busy())return;try{const o=await api('/api/np-awv-run?id='+encodeURIComponent(a.dataset.view));restore(o);showResult(o);renderHistory();el('result').scrollIntoView({behavior:'smooth'})}catch(err){el('result').innerHTML='<p class="error">'+esc(err.message)+'</p>'}});
+el('history').addEventListener('click',async e=>{const a=e.target.closest('a[data-view]');if(!a)return;e.preventDefault();if(busy())return;try{const o=await api('__API__-run?id='+encodeURIComponent(a.dataset.view));restore(o);showResult(o);renderHistory();el('result').scrollIntoView({behavior:'smooth'})}catch(err){el('result').innerHTML='<p class="error">'+esc(err.message)+'</p>'}});
 let pollErrors=0;
-function startPoll(id){if(timer)clearInterval(timer);pollErrors=0;timer=setInterval(async()=>{try{const o=await api('/api/np-awv-run?id='+encodeURIComponent(id));pollErrors=0;showResult(o);if(!busy()){clearInterval(timer);timer=null;loadHistory()}}catch(e){if(++pollErrors<5)return;clearInterval(timer);timer=null;el('result').innerHTML='<p class="error">'+esc(e.message)+'</p>'}},1500)}
-el('build').onclick=async()=>{if(el('build').disabled||busy())return;el('build').disabled=true;try{const o=await api('/api/np-awv',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({npis:[...sel]})});showResult(o);if(busy())startPoll(o.npAwvId)}catch(e){el('result').innerHTML='<p class="error">'+esc(e.message)+'</p>';syncChecks()}};
-(async()=>{try{const m=await api('/api/np-awv');providers=m.providers;const last=m.latest;if(last)restore(last);presetLocation();renderPicker();showResult(last);history=m.history;renderHistory();if(busy())startPoll(last.npAwvId)}catch(e){el('picker').innerHTML='<p class="error">'+esc(e.message)+'</p>'}})();
+function startPoll(id){if(timer)clearInterval(timer);pollErrors=0;timer=setInterval(async()=>{try{const o=await api('__API__-run?id='+encodeURIComponent(id));pollErrors=0;showResult(o);if(!busy()){clearInterval(timer);timer=null;loadHistory()}}catch(e){if(++pollErrors<5)return;clearInterval(timer);timer=null;el('result').innerHTML='<p class="error">'+esc(e.message)+'</p>'}},1500)}
+el('build').onclick=async()=>{if(el('build').disabled||busy())return;el('build').disabled=true;try{const o=await api('__API__',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({npis:[...sel]})});showResult(o);if(busy())startPoll(o.npAwvId)}catch(e){el('result').innerHTML='<p class="error">'+esc(e.message)+'</p>';syncChecks()}};
+(async()=>{try{const m=await api('__API__');providers=m.providers;const last=m.latest;if(last)restore(last);presetLocation();renderPicker();showResult(last);history=m.history;renderHistory();if(busy())startPoll(last.npAwvId)}catch(e){el('picker').innerHTML='<p class="error">'+esc(e.message)+'</p>'}})();
 </script></body></html>
 '@
- return $html.Replace('__NAV__',(Get-NavHtml 'npawv')).Replace('__TABCSS__',$script:TabCss).Replace('__RUNCSS__',$script:RunPageCss).Replace('__PICKERJS__',$script:PickerJs).Replace('__MAX__',[string]$script:NpAwvPerSite)
+ return $html.Replace('__NAV__',(Get-NavHtml ([string]$K.tab))).Replace('__TITLE__',[string]$K.title).Replace('__SUBTITLE__',[string]$K.Subtitle).Replace('__MATCHES__',[string]$K.Matches).Replace('__API__',[string]$K.api).Replace('__TABCSS__',$script:TabCss).Replace('__RUNCSS__',$script:RunPageCss).Replace('__PICKERJS__',$script:PickerJs).Replace('__MAX__',[string]$script:NpAwvPerSite)
 }
 # --- Draft 5.7: POC Coding tab - point-of-care billing and coding behavior for one department of a billing export, each run saved as an HTML report ---
 # The billing export is chosen in the browser and kept under poc-coding\source-files (the newest few), its Department column fills the target
@@ -3696,4 +3711,4 @@ function Invoke-AnalysisJob([string]$JobId){$path=Join-Path $script:Paths.State 
 function Invoke-NextPendingJob{$jobs=@(Get-Jobs);if(@($jobs|Where-Object{$_.state -in @('Starting','Running')}).Count -gt 0){return};$j=@($jobs|Where-Object{$_.state -eq 'Prepared' -or $_.state -eq 'Queued'}|Sort-Object queuedUtc|Select-Object -First 1);if($j.Count -ne 1){return};$job=$j[0];$job.state='Starting';$job.percent=1;$attempt=1+[int](Get-P $job 'attempts' 0);Set-P $job 'attempts' $attempt;$job.stage=$(if($attempt -gt 1){'Launching background analysis worker (attempt '+$attempt+' of '+$script:MaxJobAttempts+')'}else{'Launching background analysis worker'});$jobPath=Join-Path $script:Paths.State ('job-'+$job.jobId+'.json');Save-JsonAtomic $jobPath $job;$exe=(Get-Process -Id $PID).Path;$out=Join-Path $script:Paths.Logs ('worker-'+$job.jobId+'.out.log');$err=Join-Path $script:Paths.Logs ('worker-'+$job.jobId+'.err.log');try{$quotedScript='"'+$PSCommandPath+'"';$p=Start-Process -FilePath $exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$quotedScript,'-RunJobId',$job.jobId,'-NoBrowser') -RedirectStandardOutput $out -RedirectStandardError $err -WindowStyle Hidden -PassThru;Set-P $job 'workerPid' $p.Id;Save-JsonAtomic $jobPath $job}catch{$job.state='Failed';$job.stage='Worker launch failed';Set-P $job 'errorSummary' $_.Exception.Message;Save-JsonAtomic $jobPath $job}};function Invoke-PendingJobs{while(@(Get-Jobs|Where-Object{$_.state -eq 'Prepared' -or $_.state -eq 'Queued'}).Count -gt 0){Invoke-NextPendingJob;Start-Sleep -Milliseconds 500}}
 function Send-JobOutput($Context,[string]$JobId,[string]$Type){if($JobId -notmatch '^[a-f0-9]{32}$'){throw 'Invalid job ID.'};$job=Json (Join-Path $script:Paths.State ('job-'+$JobId+'.json'));if(!$job){throw 'Job not found.'};$path=Resolve-JobOutputPath $job $Type;if(!$path){throw 'Output is not available; the file may have been moved or deleted.'};$bytes=[IO.File]::ReadAllBytes($path);$Context.Response.StatusCode=200;$Context.Response.ContentType=$(if($Type -eq 'pdf'){'application/pdf'}else{'text/html; charset=utf-8'});$Context.Response.Headers['Content-Disposition']='inline; filename="'+[IO.Path]::GetFileName($path)+'"';$Context.Response.ContentLength64=$bytes.Length;$Context.Response.Headers['Cache-Control']='no-store';$Context.Response.OutputStream.Write($bytes,0,$bytes.Length);$Context.Response.Close()}
 function Initialize-AnalysisJobRecovery{$script:RunNext=$false;foreach($f in Get-ChildItem $script:Paths.State -Filter 'job-*.json' -File -ErrorAction SilentlyContinue){$j=Json $f.FullName;if(!$j){continue};$state=[string](Get-P $j 'state' '');$err=[string](Get-P $j 'errorSummary' '');if($state -in @('Starting','Running')){if(Test-WorkerAlive $j){$age=([DateTime]::UtcNow-(Get-Item -LiteralPath $f.FullName).LastWriteTimeUtc).TotalMinutes;if($age -lt $script:StartupStaleMinutes){continue};Stop-WorkerProcess ([int](Get-P $j 'workerPid' 0));Reset-InterruptedJob $j $f.FullName ('it had made no progress for '+[int]$age+' minutes when the server restarted')}else{Reset-InterruptedJob $j $f.FullName 'the server was restarted while the report was running'}}elseif($state -eq 'Failed' -and $err -like '*ConvertTo-NumberValue*'){$j.state='Prepared';$j.percent=0;$j.stage='Recovered after Draft 4.2 helper/queue repair';Set-P $j 'errorSummary' '';Save-JsonAtomic $f.FullName $j}}}
-if($RunJobId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-AnalysisJob $RunJobId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};if($RunOverviewId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-OverviewRun $RunOverviewId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};if($RunNewListId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-NewListRun $RunNewListId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};if($RunPocId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-PocRun $RunPocId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};if($RunNpAwvId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-NpAwvRun $RunNpAwvId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};try{Initialize-AppFolders;Lock;Initialize-AppConfiguration;Test-ImportExcelModule;Initialize-AnalysisJobRecovery;Initialize-ProviderIndexes;Serve}catch{$detail=$_.Exception.Message+' | '+$_.ScriptStackTrace;try{Log 'APPLICATION' 'FAILED' $detail}catch{};Write-Error $detail;exit 1}finally{if($script:Listener){try{$script:Listener.Stop();$script:Listener.Close()}catch{}};if($script:Mutex){try{$script:Mutex.ReleaseMutex()}catch{};$script:Mutex.Dispose()};try{Log 'SERVER_STOP'}catch{}}
+if($RunJobId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-AnalysisJob $RunJobId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};if($RunOverviewId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-OverviewRun $RunOverviewId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};if($RunNewListId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-NewListRun $RunNewListId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};if($RunPocId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-PocRun $RunPocId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};if($RunNpAwvId -or $RunPcpAwvId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;if($RunNpAwvId){Invoke-AwvRun $script:AwvKinds['np'] $RunNpAwvId}else{Invoke-AwvRun $script:AwvKinds['pcp'] $RunPcpAwvId};exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};try{Initialize-AppFolders;Lock;Initialize-AppConfiguration;Test-ImportExcelModule;Initialize-AnalysisJobRecovery;Initialize-ProviderIndexes;Serve}catch{$detail=$_.Exception.Message+' | '+$_.ScriptStackTrace;try{Log 'APPLICATION' 'FAILED' $detail}catch{};Write-Error $detail;exit 1}finally{if($script:Listener){try{$script:Listener.Stop();$script:Listener.Close()}catch{}};if($script:Mutex){try{$script:Mutex.ReleaseMutex()}catch{};$script:Mutex.Dispose()};try{Log 'SERVER_STOP'}catch{}}
