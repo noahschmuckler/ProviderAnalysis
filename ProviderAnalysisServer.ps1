@@ -5,6 +5,7 @@
 # Draft 5.9: the NP-AWV tab (/np-awv) lists, per site, the most urgent non-ACOR patients with an AWV due across every provider at the site,
 # as HTML, PDF and Excel; a flag saved there is saved to the patient's provider profile.
 # Draft 5.10: the PCP-AWV tab (/pcp-awv) is the same list for ACOR patients with an AWV due, for the PCPs to schedule; both tabs share one code path.
+# Draft 5.11: PCP-AWV also offers an Outreach List per site: every eligible patient (not only the top 30), led by MRN, name, DOB, phone and last ACV.
 # Adds provider indexes, guided cross-source mapping, fuzzy suggestions, NPI profiles, prepared job tracking, ranked outreach lists,
 # a flag mode (/flag?jobId=...) that excludes flagged patients from every list and panel on every later report for that provider,
 # and a Communication tab (/communication) that emails every provider in a risk pool a fresh report PDF via Outlook drafts.
@@ -266,7 +267,7 @@ function Request($Context){
   if($path -match '^(/api)?/(np|pcp)-awv(-run|-flag|/view|\.file)?$'){$awvK=$script:AwvKinds[[string]$Matches[2]];$awvApi=[bool]$Matches[1];$awvSub=[string]$Matches[3];$q=$Context.Request.QueryString
    if($method -eq 'GET' -and !$awvApi -and !$awvSub){Send $Context 200 'text/html; charset=utf-8' (AwvPage $awvK);return};if($method -eq 'GET' -and $awvApi -and !$awvSub){Send $Context 200 'application/json' ((Get-AwvPageModel $awvK)|ConvertTo-Json -Depth 8);return}
    if($method -eq 'POST' -and $awvApi -and !$awvSub){$result=New-AwvRun $awvK (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $awvApi -and $awvSub -eq '-run'){Send $Context 200 'application/json' ((Get-AwvModel $awvK ([string]$q['id']))|ConvertTo-Json -Depth 8);return}
-   if($method -eq 'GET' -and !$awvApi -and $awvSub -eq '/view'){Send $Context 200 'text/html; charset=utf-8' (ConvertTo-AwvDocument (Get-CompletedAwv $awvK ([string]$q['id'])) ([string]$q['site']) -Interactive);return};if($method -eq 'GET' -and !$awvApi -and $awvSub -eq '.file'){Send-AwvFile $Context $awvK ([string]$q['id']) ([string]$q['site']) ([string]$q['format']);return}
+   if($method -eq 'GET' -and !$awvApi -and $awvSub -eq '/view'){Send $Context 200 'text/html; charset=utf-8' (ConvertTo-AwvDocument (Get-CompletedAwv $awvK ([string]$q['id'])) ([string]$q['site']) -Interactive -Layout ([string]$q['layout']));return};if($method -eq 'GET' -and !$awvApi -and $awvSub -eq '.file'){Send-AwvFile $Context $awvK ([string]$q['id']) ([string]$q['site']) ([string]$q['format']) ([string]$q['layout']);return}
    if($method -eq 'POST' -and $awvApi -and $awvSub -eq '-flag'){$result=Save-AwvFlag $awvK (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 6);return}
   }
   if($method -eq 'GET' -and $path -eq '/poc-coding'){Send $Context 200 'text/html; charset=utf-8' (PocCodingPage);return};if($method -eq 'GET' -and $path -eq '/api/poc-coding'){Send $Context 200 'application/json' ((Get-PocPageModel)|ConvertTo-Json -Depth 8);return};if($method -eq 'POST' -and $path -eq '/api/poc-coding-upload'){$result=Receive-PocUpload $Context;Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/poc-coding-file'){Send $Context 200 'application/json' ((Get-PocFileModel ([string]$Context.Request.QueryString['token']))|ConvertTo-Json -Depth 8);return}
@@ -1146,7 +1147,9 @@ function Get-SourceRows([string]$Key,[string[]]$Wanted,[string]$FilterHeader,[st
     $r=$first+$i;$o=[ordered]@{}
     foreach($name in $Wanted){
      if($bulk.ContainsKey($name)){$o[$name]=$bulk[$name][$i];continue}
-     $v='';if($map.ContainsKey($name)){$cell=$sheet.Cells[$r,$map[$name]];$v=$(if($cell.Value -is [DateTime]){([DateTime]$cell.Value).ToString('o')}else{[string]$cell.Text})}
+     $v='';if($map.ContainsKey($name)){$cell=$sheet.Cells[$r,$map[$name]];$v=$(if($cell.Value -is [DateTime]){([DateTime]$cell.Value).ToString('o')}else{[string]$cell.Text})
+      # A cell whose number format EPPlus cannot render (some custom phone formats) has blank display text; use the stored value instead.
+      if(!$v -and $null -ne $cell.Value){$raw=$cell.Value;$v=$(if($raw -is [double]){$raw.ToString('0.###############',[Globalization.CultureInfo]::InvariantCulture)}else{([string]$raw).Trim()})}}
      $o[$name]=$v
     }
     $rows.Add([pscustomobject]$o)
@@ -2825,25 +2828,36 @@ el('build').onclick=async()=>{if(el('build').disabled||busy())return;el('build')
 # Draft 5.10: the same code serves PCP-AWV (ACOR patients, for the PCPs) through $script:AwvKinds; runs are state\<file>-<id>.json and keep the npAwvId field name.
 $script:NpAwvPerSite=30;$script:NpAwvKeep=30;$script:NpAwvInline=$false
 $script:AwvKinds=[ordered]@{
- np=[ordered]@{kind='np';title='NP-AWV';route='/np-awv';api='/api/np-awv';file='npawv';log='NPAWV';tab='npawv';worker='RunNpAwvId';acor=$false;item='awv-np'
+ np=[ordered]@{kind='np';title='NP-AWV';route='/np-awv';api='/api/np-awv';file='npawv';log='NPAWV';tab='npawv';worker='RunNpAwvId';acor=$false;item='awv-np';outreach=$false
   Subtitle='one list per site for the travelling NP: non-ACOR patients with an annual wellness visit due, ranked by urgency across every provider at the site'
   Criteria='Non-ACOR patients with an annual wellness visit due (Export: last ACV before January 1 and no future ACV booked), from every selected provider at the site, most urgent first. Urgency is the score on each provider''s own list: 1 for the AWV, plus open measures, open ICDs, and the visit, appointment, A1c and risk factors shown under Why Ranked Here; ties go to the oldest last visit. Each site lists its {max} most urgent.'
   None='No non-ACOR patient at this site has an annual wellness visit due.'
   Matches='AWV Due - NP (non-ACOR)'}
- pcp=[ordered]@{kind='pcp';title='PCP-AWV';route='/pcp-awv';api='/api/pcp-awv';file='pcpawv';log='PCPAWV';tab='pcpawv';worker='RunPcpAwvId';acor=$true;item='awv-pcp'
+ pcp=[ordered]@{kind='pcp';title='PCP-AWV';route='/pcp-awv';api='/api/pcp-awv';file='pcpawv';log='PCPAWV';tab='pcpawv';worker='RunPcpAwvId';acor=$true;item='awv-pcp';outreach=$true
   Subtitle='one list per site for the PCPs: ACOR patients with an annual wellness visit due, ranked by urgency across every provider at the site'
   Criteria='ACOR patients with an annual wellness visit due (Export: last ACV more than 366 days ago and no future ACV booked), from every selected provider at the site, most urgent first. Urgency is the score on each provider''s own list: 1 for the AWV, plus open measures, open ICDs, and the visit, appointment, A1c and risk factors shown under Why Ranked Here; ties go to the oldest last visit. Each site lists its {max} most urgent.'
   None='No ACOR patient at this site has an annual wellness visit due.'
+  OutreachCriteria='Outreach list: every ACOR patient at the site with an annual wellness visit due (Export: last ACV more than 366 days ago and no future ACV booked), from every selected provider, most urgent first, ranked exactly as on the PCP-AWV list but not limited to the top {max}. Phone Number is the Export phone number and is blank when the Export has none for the patient. Last ACV is the most recent of the Export Last ACV Date and the Risk Population Outreach Last Acv.'
   Matches='AWV Due - PCP (ACOR)'}
 }
 function Get-AwvKind($Run){$k=[string](Get-P $Run 'awvKind' 'np');if(!$script:AwvKinds.Contains($k)){$k='np'};return $script:AwvKinds[$k]}
 $script:NpAwvColumns=@('#','First Name','Last Name','DOB','Urgency','Epic PCP','Payor PCP','Also Needs','Last Visit','Next Appt','Why Ranked Here')
 $script:NpAwvExtraColumns=@('MRN','Member ID','Phone','Payer')
+$script:AwvOutreachColumns=@('MRN','First Name','Last Name','DOB','Phone Number','Last ACV','Urgency','Epic PCP','Payor PCP','Also Needs','Last Visit','Next Appt','Why Ranked Here')
+$script:AwvOutreachExtraColumns=@('Member ID','Payer')
+function Get-AwvLayout($K,[string]$Layout){if($Layout -eq 'outreach'){if(!$K.outreach){throw ($K.title+' has no outreach list.')};return 'outreach'};return 'list'}
+function Get-AwvLabel($K,[string]$Layout){return ([string]$K.title+$(if($Layout -eq 'outreach'){' Outreach List'}else{''}))}
+function Format-PhoneText([string]$Text){
+ # 10 digits (or 11 starting with 1) read as (845) 555-1234; anything else (an extension, letters, a short number) is shown as the Export has it.
+ $t=([string]$Text).Trim();$d=$t -replace '[^0-9]','';if($d.Length -eq 11 -and $d.StartsWith('1')){$d=$d.Substring(1)}
+ if($d.Length -eq 10 -and $t -notmatch '[A-Za-z]'){return ('('+$d.Substring(0,3)+') '+$d.Substring(3,3)+'-'+$d.Substring(6))};return $t
+}
 $script:NpAwvFormats=[ordered]@{html='HTML';pdf='PDF';xlsx='Excel'}
 $script:NpAwvText=[ordered]@{
  Columns='Payor PCP is the provider whose Export panel the patient is on (the provider whose list and flags the patient belongs to). Epic PCP comes from Risk Population Outreach and is blank when the patient is not in that file.'
  Flags='Flagged patients are left out, exactly as on each provider''s dashboard. A flag saved here is saved to the patient''s provider profile and applies to that provider''s lists too; the next most urgent patient takes the place, marked "moved up".'
  Booked='{count} patient(s) were left out because Risk Population Outreach shows a future ACV already booked.'
+ OldRun='These lists were generated before the Outreach List was added, so Last ACV is blank. Select Generate lists to fill it in.'
 }
 function Get-AwvPath($K,[string]$Id){if($Id -notmatch '^[a-f0-9]{32}$'){throw ('Invalid '+$K.title+' list ID.')};return (Join-Path $script:Paths.State ($K.file+'-'+$Id+'.json'))}
 function Get-AwvRuns($K){return @(Get-ChildItem $script:Paths.State -Filter ($K.file+'-*.json') -File -ErrorAction SilentlyContinue|ForEach-Object{Json $_.FullName}|Where-Object{$null -ne $_}|Sort-Object -Property @{Expression={ConvertTo-IsoText (Get-P $_ 'requestedUtc' '')}} -Descending)}
@@ -2851,9 +2865,9 @@ function Get-NpAwvRpoLookup([string[]]$MemberIds){
  # Epic PCP and Next ACV per member from the whole Risk Population Outreach source (a provider's own read only covers patients whose Epic PCP is that provider).
  $out=@{};$set=@{};foreach($id in @($MemberIds|Where-Object{$_})){$set[[string]$id]=$true};if($set.Count -eq 0){return $out}
  $names=@{};foreach($pr in @(Get-ProviderProfiles)){$alias=([string](Get-Alias (Get-P $pr 'aliases' $null) 'RiskPopulationOutreach')).Trim();if($alias -and !$names.ContainsKey($alias)){$names[$alias]=[string](Get-P $pr 'displayName' $alias)}}
- foreach($r in @(Get-SourceRows 'RiskPopulationOutreach' @('Member ID','Epic Pcp','Next Acv') 'Member ID' '' $set)){
+ foreach($r in @(Get-SourceRows 'RiskPopulationOutreach' @('Member ID','Epic Pcp','Next Acv','Last Acv') 'Member ID' '' $set)){
   $id=([string]$r.'Member ID').Trim();if(!$id -or $out.ContainsKey($id)){continue};$epic=([string]$r.'Epic Pcp').Trim()
-  $out[$id]=@{epic=$(if($names.ContainsKey($epic)){$names[$epic]}else{$epic});nextAcv=(ConvertTo-DateValue $r.'Next Acv')}
+  $out[$id]=@{epic=$(if($names.ContainsKey($epic)){$names[$epic]}else{$epic});nextAcv=(ConvertTo-DateValue $r.'Next Acv');lastAcv=(ConvertTo-DateValue $r.'Last Acv')}
  }
  return $out
 }
@@ -2862,7 +2876,7 @@ function New-AwvCandidate($K,$p,[string]$Npi,[string]$Display){
  $r=$script:OutreachRules;$score=[int]$p.Urgency;$tier=$(if($score -ge $r.UrgentScore){'Urgent'}elseif($score -ge $r.SoonScore){'Soon'}else{'Routine'})
  $row=@{p=$p;score=$score;tier=$tier;items=$p.Items;boost=@($p.Needs);k=@([string]$K.item)};$last=Get-PatientLastVisit $p
  $cells=[ordered]@{};foreach($h in @('Urgency','Also Needs','Last Visit','Next Appt','Why Ranked Here')){$cells[$h]=[string](Get-OutreachCell $h $row)}
- return [ordered]@{memberId=[string]$p.MemberID;first=[string]$p.First;last=[string]$p.Last;dob=[string]$p.DOB;mrn=[string](Get-P $p 'MRN' '');phone=[string](Get-P $p 'Phone' '');payer=[string](Get-P $p 'Payer' '');npis=@($Npi);payorPcp=$Display;epicPcp='';score=$score;lastVisitKey=$(if($last){([DateTime]$last).ToString('yyyy-MM-dd')}else{''});cells=$cells;snapshot=(New-FlagSnapshot $p)}
+ return [ordered]@{memberId=[string]$p.MemberID;first=[string]$p.First;last=[string]$p.Last;dob=[string]$p.DOB;mrn=[string](Get-P $p 'MRN' '');phone=(Format-PhoneText ([string](Get-P $p 'Phone' '')));lastAcv='';payer=[string](Get-P $p 'Payer' '');npis=@($Npi);payorPcp=$Display;epicPcp='';score=$score;lastVisitKey=$(if($last){([DateTime]$last).ToString('yyyy-MM-dd')}else{''});cells=$cells;snapshot=(New-FlagSnapshot $p)}
 }
 function Get-NpAwvFlagIndex([object[]]$Npis){
  # Every active flag on the providers behind a list, by member ID and by last name + first name + DOB.
@@ -2881,22 +2895,24 @@ function Find-NpAwvFlag($Cand,[hashtable]$Index){
  if($nk){foreach($n in $npis){if($Index.ContainsKey($n) -and $Index[$n].byName.ContainsKey($nk)){return @{npi=$n;flag=$Index[$n].byName[$nk]}}}}
  return $null
 }
-function Get-NpAwvSiteView($Site,[hashtable]$Index){
+function Get-NpAwvSiteView($Site,[hashtable]$Index,[string]$Layout='list'){
  # The site's list with current flags applied: the NpAwvPerSite most urgent unflagged patients, and the flagged patients who would have been among them.
+ # The outreach layout keeps every unflagged patient (and every flagged one), so nothing on it has "moved up".
+ $all=($Layout -eq 'outreach');$limit=$(if($all){[int]::MaxValue}else{$script:NpAwvPerSite})
  $cands=@(Get-Field $Site 'candidates' @()|Where-Object{$null -ne $_});$listed=@{};foreach($m in @(Get-Field $Site 'listed' @())){if($m){$listed[[string]$m]=$true}}
  $rows=@();$flagged=@();$flaggedAll=0
  foreach($c in $cands){
   $hit=Find-NpAwvFlag $c $Index
-  if($hit){$flaggedAll++;if($rows.Count -lt $script:NpAwvPerSite){$flagged+=@{c=$c;flag=$hit.flag;npi=$hit.npi}};continue}
-  if($rows.Count -lt $script:NpAwvPerSite){$rows+=@{c=$c;rank=($rows.Count+1);movedUp=($listed.Count -gt 0 -and !$listed.ContainsKey([string](Get-Field $c 'memberId' '')))}}
+  if($hit){$flaggedAll++;if($rows.Count -lt $limit){$flagged+=@{c=$c;flag=$hit.flag;npi=$hit.npi}};continue}
+  if($rows.Count -lt $limit){$rows+=@{c=$c;rank=($rows.Count+1);movedUp=(!$all -and $listed.Count -gt 0 -and !$listed.ContainsKey([string](Get-Field $c 'memberId' '')))}}
  }
  return @{site=[string](Get-Field $Site 'site' '');providers=@(Get-Field $Site 'providers' @()|Where-Object{$null -ne $_});rows=$rows;flagged=$flagged;candidates=$cands.Count;flaggedAll=$flaggedAll;eligible=($cands.Count-$flaggedAll);booked=[int](Get-Field $Site 'booked' 0)}
 }
-function Get-NpAwvViews($Run,[string]$SiteName=''){
+function Get-NpAwvViews($Run,[string]$SiteName='',[string]$Layout='list'){
  $sites=@(Get-P $Run 'sites' @()|Where-Object{$null -ne $_});if($SiteName){$sites=@($sites|Where-Object{[string](Get-Field $_ 'site' '') -eq $SiteName});if($sites.Count -eq 0){throw ('Site "'+$SiteName+'" is not on this list.')}}
  $npis=@();foreach($s in $sites){foreach($c in @(Get-Field $s 'candidates' @())){if($null -ne $c){$npis+=@(Get-Field $c 'npis' @())}}}
  $index=Get-NpAwvFlagIndex $npis
- return @(foreach($s in $sites){Get-NpAwvSiteView $s $index})
+ return @(foreach($s in $sites){Get-NpAwvSiteView $s $index $Layout})
 }
 function Get-NpAwvCell($Row,[string]$Col){
  $c=$Row.c
@@ -2911,22 +2927,27 @@ function Get-NpAwvCell($Row,[string]$Col){
   'Member ID'{return [string](Get-Field $c 'memberId' '')}
   'Phone'{return [string](Get-Field $c 'phone' '')}
   'Payer'{return [string](Get-Field $c 'payer' '')}
+  'Phone Number'{return [string](Get-Field $c 'phone' '')}
+  'Last ACV'{return [string](Get-Field $c 'lastAcv' '')}
   default{return [string](Get-Field (Get-Field $c 'cells' $null) $Col '')}
  }
 }
 function Get-NpAwvProvidersText($View){return ((@($View.providers|ForEach-Object{[string](Get-Field $_ 'displayName' '')+' ('+[int](Get-Field $_ 'due' 0)+')'})) -join ', ')}
-function Get-NpAwvSummaryText($K,$View){
+function Get-NpAwvSummaryText($K,$View,[string]$Layout='list'){
  $n=@($View.rows).Count;$e=[int]$View.eligible
  $s=$(if($e -eq 0){[string]$K.None}else{[string]$n+' of '+$e+' eligible patient'+$(if($e -eq 1){''}else{'s'})+' listed, across '+@($View.providers).Count+' provider'+$(if(@($View.providers).Count -eq 1){''}else{'s'})+'.'})
  if([int]$View.flaggedAll -gt 0){$s+=' '+[int]$View.flaggedAll+' flagged patient(s) left out.'}
  if([int]$View.booked -gt 0){$s+=' '+$script:NpAwvText.Booked.Replace('{count}',[string]$View.booked)}
  $m=@($View.rows|Where-Object{$_.movedUp}).Count;if($m -gt 0){$s+=' '+$m+' patient(s) moved up after flags were saved.'}
+ if($Layout -eq 'outreach' -and $n -gt 0){$s+=' Phone number on file for '+(Get-AwvPhoneCount $View)+' of '+$n+'.'}
  return $s
 }
+function Get-AwvPhoneCount($View){return @($View.rows|Where-Object{[string](Get-Field $_.c 'phone' '')}).Count}
 function Get-NpAwvSourcesText($Run){$t=Get-OverviewSourcesText $Run;$e=[string](Get-P $Run 'epicError' '');if($e){$t+='. Epic PCP could not be read: '+$e};return $t}
 $script:NpAwvCss='body{font:12px Segoe UI,Arial;color:#172033;margin:16px;background:#fff;-webkit-print-color-adjust:exact;print-color-adjust:exact}h1{font-size:19px;color:#17365d;margin:0 0 3px}h2{font-size:16px;color:#17365d;margin:20px 0 2px}h3{font-size:13px;color:#8a1c1c;margin:4px 0}.muted{color:#667085}p{margin:4px 0}p.sum{font-weight:600;margin:4px 0 2px}table.pl{border-collapse:collapse;width:100%;margin-top:6px}table.pl th,table.pl td{padding:4px 6px;border-bottom:1px solid #dce4ef;text-align:left;vertical-align:top}table.pl thead th{background:#17365d;color:#fff;font-weight:600;vertical-align:bottom}table.pl td{white-space:nowrap}table.pl td.wrap{white-space:normal;min-width:16ch;max-width:40ch}table.pl td.i{color:#667085;white-space:nowrap}table.pl tbody tr:nth-child(even) td{background:#f8fafc}tr.moved td.i{color:#9a5b00;font-weight:600}.flagged{margin:10px 0 0;padding:6px 10px;background:#fff6f6;border:1px solid #f1c9c9;border-radius:6px}.flagged table.pl thead th{background:#8a1c1c}.notes{background:#f7f9fc;border-left:3px solid #1769aa;padding:6px 10px;margin:8px 0}'+
  '.flagbar{position:sticky;top:0;z-index:5;display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap;background:#fff7e6;border-bottom:2px solid #e0a800;padding:10px 16px;margin:-16px -16px 14px}.flagbar a.btn{background:#e4e9f0;color:#172033;text-decoration:none;padding:7px 12px;border-radius:5px}button{background:#1769aa;color:#fff;border:0;border-radius:5px;padding:7px 12px;cursor:pointer;font:inherit}button.secondary{background:#e4e9f0;color:#172033}tr[data-member]{cursor:pointer}tr[data-member]:hover td{background:#fffbe6}tr.editor td{background:#fffdf3}.flag-form .radios label{margin-right:16px}.flag-form textarea{display:block;width:100%;max-width:640px;height:60px;margin:8px 0;font:inherit;box-sizing:border-box}.error{color:#a61b1b}'+
  '@page{size:letter landscape;margin:.4in}@media print{body{margin:0;font-size:9px}.flagbar,tr.editor,button{display:none}section.brk{page-break-before:always}table.pl tr{page-break-inside:avoid}table.pl thead{display:table-header-group}h1{font-size:15px}h2{font-size:13px;margin-top:0}}'
+function Get-AwvCriteria($K,[string]$Layout){if($Layout -eq 'outreach'){return [string]$K.OutreachCriteria};return [string]$K.Criteria}
 function ConvertTo-NpAwvTableHtml([string[]]$Columns,[object[]]$Rows,[bool]$Interactive){
  $h='<table class="pl"><thead><tr>'+(($Columns|ForEach-Object{'<th>'+(ConvertTo-HtmlEncoded $_)+'</th>'}) -join '')+'</tr></thead><tbody>'
  foreach($r in @($Rows)){
@@ -2941,15 +2962,15 @@ function Get-NpAwvFlaggedRows($View){
  return @(foreach($f in @($View.flagged)){$c=$f.c;$kind=[string](Get-P $f.flag 'kind' '');$def=$script:FlagKinds[$kind];$saved=ConvertTo-DateValue (Get-P $f.flag 'updatedUtc' $null);if($saved -and $saved.Kind -eq [DateTimeKind]::Utc){$saved=$saved.ToLocalTime()}
   @{c=$c;cells=@((Get-PatientDisplayName ([pscustomobject]@{Last=[string](Get-Field $c 'last' '');First=[string](Get-Field $c 'first' '')})),[string](Get-Field $c 'dob' ''),[string](Get-Field $c 'payorPcp' ''),$(if($def){[string]$def.label}else{$kind}),[string](Get-P $f.flag 'note' ''),$(if($saved){$saved.ToString('M/d/yyyy')}else{''}))}})
 }
-function ConvertTo-AwvDocument($Run,[string]$SiteName='',[switch]$Interactive){
- $K=Get-AwvKind $Run;$views=@(Get-NpAwvViews $Run $SiteName);$asOf=ConvertTo-DateValue (Get-P $Run 'asOf' $null);$id=[string](Get-P $Run 'npAwvId' '')
- $title=$K.title+' - '+$(if($SiteName){$SiteName}else{'All sites'})
+function ConvertTo-AwvDocument($Run,[string]$SiteName='',[switch]$Interactive,[string]$Layout='list'){
+ $K=Get-AwvKind $Run;$Layout=Get-AwvLayout $K $Layout;$views=@(Get-NpAwvViews $Run $SiteName $Layout);$asOf=ConvertTo-DateValue (Get-P $Run 'asOf' $null);$id=[string](Get-P $Run 'npAwvId' '')
+ $title=(Get-AwvLabel $K $Layout)+' - '+$(if($SiteName){$SiteName}else{'All sites'})
  $body='<h1>'+(ConvertTo-HtmlEncoded $title)+'</h1><div class="muted">Generated '+(ConvertTo-HtmlEncoded $(if($asOf){$asOf.ToString('g')}else{''}))+' &middot; flags applied as of '+(ConvertTo-HtmlEncoded ((Get-Date).ToString('g')))+' &middot; '+(ConvertTo-HtmlEncoded (Get-NpAwvSourcesText $Run))+'</div>'
- $body+='<div class="notes"><p>'+(ConvertTo-HtmlEncoded (([string]$K.Criteria).Replace('{max}',[string]$script:NpAwvPerSite)))+'</p><p>'+(ConvertTo-HtmlEncoded $script:NpAwvText.Columns)+'</p><p>'+(ConvertTo-HtmlEncoded $script:NpAwvText.Flags)+'</p></div>'
+ $body+='<div class="notes"><p>'+(ConvertTo-HtmlEncoded ((Get-AwvCriteria $K $Layout).Replace('{max}',[string]$script:NpAwvPerSite)))+'</p>'+$(if($Layout -eq 'outreach' -and !(Get-P $Run 'lastAcvRead' $false)){'<p class="error">'+(ConvertTo-HtmlEncoded $script:NpAwvText.OldRun)+'</p>'}else{''})+'<p>'+(ConvertTo-HtmlEncoded $script:NpAwvText.Columns)+'</p><p>'+(ConvertTo-HtmlEncoded $script:NpAwvText.Flags)+'</p></div>'
  $flagMap=@{};$first=$true
  foreach($v in $views){
-  $body+='<section class="site'+$(if(!$first){' brk'}else{''})+'"><h2>'+(ConvertTo-HtmlEncoded $v.site)+'</h2><p class="sum">'+(ConvertTo-HtmlEncoded (Get-NpAwvSummaryText $K $v))+'</p><p class="muted">Providers (patients due): '+(ConvertTo-HtmlEncoded (Get-NpAwvProvidersText $v))+'</p>';$first=$false
-  if(@($v.rows).Count -gt 0){$body+=ConvertTo-NpAwvTableHtml $script:NpAwvColumns @($v.rows) ([bool]$Interactive)}
+  $body+='<section class="site'+$(if(!$first){' brk'}else{''})+'"><h2>'+(ConvertTo-HtmlEncoded $v.site)+'</h2><p class="sum">'+(ConvertTo-HtmlEncoded (Get-NpAwvSummaryText $K $v $Layout))+'</p><p class="muted">Providers (patients due): '+(ConvertTo-HtmlEncoded (Get-NpAwvProvidersText $v))+'</p>';$first=$false
+  if(@($v.rows).Count -gt 0){$body+=ConvertTo-NpAwvTableHtml $(if($Layout -eq 'outreach'){$script:AwvOutreachColumns}else{$script:NpAwvColumns}) @($v.rows) ([bool]$Interactive)}
   $fr=@(Get-NpAwvFlaggedRows $v)
   if($fr.Count -gt 0){
    $body+='<div class="flagged"><h3>Flagged exceptions ('+$fr.Count+')</h3><p class="muted">Would have been on this list; left out by a flag saved on the provider profile.</p><table class="pl"><thead><tr><th>Patient</th><th>DOB</th><th>Payor PCP</th><th>Flag</th><th>Note</th><th>Saved</th></tr></thead><tbody>'
@@ -2961,7 +2982,7 @@ function ConvertTo-AwvDocument($Run,[string]$SiteName='',[switch]$Interactive){
  }
  $bar='';$js=''
  if($Interactive){
-  $q='id='+$id+$(if($SiteName){'&site='+[Uri]::EscapeDataString($SiteName)}else{''})
+  $q='id='+$id+$(if($SiteName){'&site='+[Uri]::EscapeDataString($SiteName)}else{''})+$(if($Layout -eq 'outreach'){'&layout=outreach'}else{''})
   $bar='<div class="flagbar"><div><b>Flag mode</b> - click a patient to mark them <b>Data incorrect</b> or <b>Not a current patient</b>, or to clear a flag. The flag is saved to the patient''s provider profile, so it applies to that provider''s lists and every future report too.</div><div><a class="btn" href="'+$K.route+'">'+$K.title+'</a> <a class="btn" target="_blank" href="'+$K.route+'.file?'+(ConvertTo-HtmlEncoded $q)+'&amp;format=pdf">PDF</a> <a class="btn" href="'+$K.route+'.file?'+(ConvertTo-HtmlEncoded $q)+'&amp;format=xlsx">Excel</a></div></div>'
   $flagsJson=$(if($flagMap.Count -gt 0){ConvertTo-Json -InputObject $flagMap -Compress -Depth 4}else{'{}'}).Replace('</','<\/')
   $js='<script>'+$script:NpAwvFlagJs.Replace('__FLAGS__',$flagsJson).Replace('__RUN__',$id).Replace('__FLAGAPI__',$K.api+'-flag')+'</script>'
@@ -2980,19 +3001,20 @@ document.addEventListener('click',function(ev){var t=ev.target;if(!t.closest)ret
 try{var y=sessionStorage.getItem('flagScroll');if(y){sessionStorage.removeItem('flagScroll');window.scrollTo(0,parseInt(y,10)||0)}}catch(e){}
 })();
 '@
-function New-AwvWorkbook($Run,[string]$SiteName=''){
+function New-AwvWorkbook($Run,[string]$SiteName='',[string]$Layout='list'){
  # About (criteria, sources, one line per site), one sheet per site (the list plus MRN, member ID, phone and payer for booking), and Flagged.
  try{Add-Type -AssemblyName System.Drawing -ErrorAction Stop}catch{}
- $K=Get-AwvKind $Run;$views=@(Get-NpAwvViews $Run $SiteName);$asOf=ConvertTo-DateValue (Get-P $Run 'asOf' $null);$pkg=New-Object OfficeOpenXml.ExcelPackage;$used=@{}
+ $K=Get-AwvKind $Run;$Layout=Get-AwvLayout $K $Layout;$views=@(Get-NpAwvViews $Run $SiteName $Layout);$asOf=ConvertTo-DateValue (Get-P $Run 'asOf' $null);$pkg=New-Object OfficeOpenXml.ExcelPackage;$used=@{}
  try{
   $ws=$pkg.Workbook.Worksheets.Add((Get-RollupSheetName 'About' $used))
-  $lines=@(($K.title+' - '+$(if($SiteName){$SiteName}else{'All sites'})),('Generated '+$(if($asOf){$asOf.ToString('g')}else{''})+'; flags applied as of '+(Get-Date).ToString('g')+'.'),(Get-NpAwvSourcesText $Run),([string]$K.Criteria).Replace('{max}',[string]$script:NpAwvPerSite),$script:NpAwvText.Columns,$script:NpAwvText.Flags)
+  $lines=@(((Get-AwvLabel $K $Layout)+' - '+$(if($SiteName){$SiteName}else{'All sites'})),('Generated '+$(if($asOf){$asOf.ToString('g')}else{''})+'; flags applied as of '+(Get-Date).ToString('g')+'.'),(Get-NpAwvSourcesText $Run),(Get-AwvCriteria $K $Layout).Replace('{max}',[string]$script:NpAwvPerSite),$script:NpAwvText.Columns,$script:NpAwvText.Flags)
+  if($Layout -eq 'outreach' -and !(Get-P $Run 'lastAcvRead' $false)){$lines+=$script:NpAwvText.OldRun}
   for($i=0;$i -lt $lines.Count;$i++){$ws.Cells[($i+1),1].Value=$lines[$i]};$ws.Cells[1,1].Style.Font.Bold=$true;$ws.Cells[1,1].Style.Font.Size=14
-  $r=$lines.Count+2;$heads=@('Site','Listed','Eligible','Flagged','Already booked','Providers (patients due)');for($c=0;$c -lt $heads.Count;$c++){$ws.Cells[$r,($c+1)].Value=$heads[$c]};$hr=$r
-  foreach($v in $views){$r++;Set-RollupCell $ws $r 1 $v.site;Set-RollupCell $ws $r 2 ([int]@($v.rows).Count);Set-RollupCell $ws $r 3 ([int]$v.eligible);Set-RollupCell $ws $r 4 ([int]$v.flaggedAll);Set-RollupCell $ws $r 5 ([int]$v.booked);Set-RollupCell $ws $r 6 (Get-NpAwvProvidersText $v)}
+  $r=$lines.Count+2;$heads=@('Site','Listed','Eligible','Flagged','Already booked','Providers (patients due)');if($Layout -eq 'outreach'){$heads+='Phone on file'};for($c=0;$c -lt $heads.Count;$c++){$ws.Cells[$r,($c+1)].Value=$heads[$c]};$hr=$r
+  foreach($v in $views){$r++;Set-RollupCell $ws $r 1 $v.site;Set-RollupCell $ws $r 2 ([int]@($v.rows).Count);Set-RollupCell $ws $r 3 ([int]$v.eligible);Set-RollupCell $ws $r 4 ([int]$v.flaggedAll);Set-RollupCell $ws $r 5 ([int]$v.booked);Set-RollupCell $ws $r 6 (Get-NpAwvProvidersText $v);if($Layout -eq 'outreach'){Set-RollupCell $ws $r 7 ([int](Get-AwvPhoneCount $v))}}
   $h=$ws.Cells[$hr,1,$hr,$heads.Count];$h.Style.Font.Bold=$true;$h.Style.Fill.PatternType=[OfficeOpenXml.Style.ExcelFillStyle]::Solid;$h.Style.Fill.BackgroundColor.SetColor([Drawing.Color]::FromArgb(234,241,248))
-  $ws.Column(1).Width=28;for($c=2;$c -le 5;$c++){$ws.Column($c).Width=12};$ws.Column(6).Width=90
-  $cols=@($script:NpAwvColumns+$script:NpAwvExtraColumns);$flagRows=@()
+  $ws.Column(1).Width=28;for($c=2;$c -le 5;$c++){$ws.Column($c).Width=12};$ws.Column(6).Width=90;if($Layout -eq 'outreach'){$ws.Column(7).Width=14}
+  $cols=$(if($Layout -eq 'outreach'){@($script:AwvOutreachColumns+$script:AwvOutreachExtraColumns)}else{@($script:NpAwvColumns+$script:NpAwvExtraColumns)});$flagRows=@()
   foreach($v in $views){
    $ws=$pkg.Workbook.Worksheets.Add((Get-RollupSheetName $v.site $used))
    for($c=0;$c -lt $cols.Count;$c++){$ws.Cells[1,($c+1)].Value=$cols[$c]};$r=1
@@ -3008,21 +3030,21 @@ function New-AwvWorkbook($Run,[string]$SiteName=''){
  }finally{$pkg.Dispose()}
 }
 function Get-CompletedAwv($K,[string]$Id){$run=Json (Get-AwvPath $K $Id);if(!$run -or [string](Get-P $run 'state' '') -ne 'Completed'){throw ('That '+$K.title+' list is not complete.')};return $run}
-function Send-AwvFile($Context,$K,[string]$Id,[string]$Site,[string]$Format){
+function Send-AwvFile($Context,$K,[string]$Id,[string]$Site,[string]$Format,[string]$Layout='list'){
  # Built on request from the saved generation with the providers' current flags, so a flag saved a minute ago is already reflected.
- $run=Get-CompletedAwv $K $Id;$asOf=ConvertTo-DateValue (Get-P $run 'asOf' $null)
- $name=Get-SafeFileName ($K.title+' - '+$(if($Site){$Site}else{'All sites'})+' - '+$(if($asOf){$asOf.ToString('yyyy-MM-dd')}else{''}))
+ $Layout=Get-AwvLayout $K $Layout;$run=Get-CompletedAwv $K $Id;$asOf=ConvertTo-DateValue (Get-P $run 'asOf' $null)
+ $name=Get-SafeFileName ((Get-AwvLabel $K $Layout)+' - '+$(if($Site){$Site}else{'All sites'})+' - '+$(if($asOf){$asOf.ToString('yyyy-MM-dd')}else{''}))
  switch($Format){
-  'html'{Send-Bytes $Context 'text/html; charset=utf-8' ([Text.Encoding]::UTF8.GetBytes((ConvertTo-AwvDocument $run $Site))) ('inline; filename="'+$name+'.html"')}
-  'xlsx'{Send-Bytes $Context 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' (New-AwvWorkbook $run $Site) ('attachment; filename="'+$name+'.xlsx"')}
+  'html'{Send-Bytes $Context 'text/html; charset=utf-8' ([Text.Encoding]::UTF8.GetBytes((ConvertTo-AwvDocument $run $Site -Layout $Layout))) ('inline; filename="'+$name+'.html"')}
+  'xlsx'{Send-Bytes $Context 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' (New-AwvWorkbook $run $Site $Layout) ('attachment; filename="'+$name+'.xlsx"')}
   'pdf'{
    # Rendered under a space-free staging name (the browser command line is not quoted).
    $stem=Join-Path $script:Paths.Staging ($K.file+'-'+$Id+'-'+[Guid]::NewGuid().ToString('N').Substring(0,8));$h=$stem+'.html';$pp=$stem+'.pdf'
-   try{[IO.File]::WriteAllText($h,(ConvertTo-AwvDocument $run $Site),(New-Object Text.UTF8Encoding($false)));Convert-HtmlPdf $h $pp;Send-Bytes $Context 'application/pdf' ([IO.File]::ReadAllBytes($pp)) ('inline; filename="'+$name+'.pdf"')}finally{Remove-Item -LiteralPath $h,$pp -Force -ErrorAction SilentlyContinue}
+   try{[IO.File]::WriteAllText($h,(ConvertTo-AwvDocument $run $Site -Layout $Layout),(New-Object Text.UTF8Encoding($false)));Convert-HtmlPdf $h $pp;Send-Bytes $Context 'application/pdf' ([IO.File]::ReadAllBytes($pp)) ('inline; filename="'+$name+'.pdf"')}finally{Remove-Item -LiteralPath $h,$pp -Force -ErrorAction SilentlyContinue}
   }
   default{throw 'Invalid format.'}
  }
- Log ($K.log+'_FILE') 'OK' ($Id+' '+$(if($Site){$Site}else{'all sites'})+' '+$Format)
+ Log ($K.log+'_FILE') 'OK' ($Id+' '+$(if($Site){$Site}else{'all sites'})+' '+$Layout+' '+$Format)
 }
 function Save-AwvFlag($K,$Body){
  # Saves the flag to every provider profile the patient is listed under on this generation, so the provider's own lists exclude them too.
@@ -3043,6 +3065,8 @@ function Invoke-AwvRun($K,[string]$Id){
   Set-P $run 'workerPid' $PID;Set-P $run 'startedUtc' ([DateTime]::UtcNow.ToString('o'));Set-RunProgress $run $path 3 'Reading provider profiles'
   $chosen=@(Get-ChosenProfiles @($run.npis))
   $src=Read-GroupSources $chosen $run $path 5 60;$groups=$src.groups
+  # Export Last ACV Date per member (column AD), for the outreach list's Last ACV with Risk Population Outreach Last Acv.
+  $exportAcv=@{};if($groups.ContainsKey('Export')){foreach($lst in @($groups['Export'].Values)){foreach($er in $lst){$mid=([string]$er.MemberID).Trim();$ad=ConvertTo-DateValue $er.'Last ACV Date';if($mid -and $ad -and (!$exportAcv.ContainsKey($mid) -or $ad -gt $exportAcv[$mid])){$exportAcv[$mid]=$ad}}}}
   $asOf=Get-Date;$sites=[ordered]@{};$i=0
   foreach($p in $chosen){
    $i++;$npi=[string](Get-P $p 'npi' '');$display=[string](Get-P $p 'displayName' $npi);$loc=([string](Get-P $p 'location' '')).Trim();$site=$(if($loc){$loc}else{'(No location)'})
@@ -3069,15 +3093,18 @@ function Invoke-AwvRun($K,[string]$Id){
   $out=@();$index=Get-NpAwvFlagIndex @($chosen|ForEach-Object{[string](Get-P $_ 'npi' '')})
   foreach($sk in @($sites.Keys|Sort-Object -Property $script:GroupSort)){
    $booked=0;$list=@()
-   foreach($c in @($sites[$sk].byId.Values)){$x=$(if($rpo.ContainsKey($c.memberId)){$rpo[$c.memberId]}else{$null});if($x){$c.epicPcp=[string]$x.epic;if($x.nextAcv -and $x.nextAcv.Date -ge $asOf.Date){$booked++;continue}};$list+=$c}
+   foreach($c in @($sites[$sk].byId.Values)){$x=$(if($rpo.ContainsKey($c.memberId)){$rpo[$c.memberId]}else{$null})
+    $acvs=@();if($exportAcv.ContainsKey($c.memberId)){$acvs+=$exportAcv[$c.memberId]};if($x -and $x.lastAcv){$acvs+=$x.lastAcv};if($acvs.Count -gt 0){$c.lastAcv=ConvertTo-DateText ($acvs|Sort-Object -Descending|Select-Object -First 1)}
+    if($x){$c.epicPcp=[string]$x.epic;if($x.nextAcv -and $x.nextAcv.Date -ge $asOf.Date){$booked++;continue}};$list+=$c}
    $list=@($list|Sort-Object -Property @{Expression={-[int]$_.score}},@{Expression={[string]$_.lastVisitKey}},@{Expression={[string]$_.last}},@{Expression={[string]$_.first}})
    $s=[ordered]@{site=$sk;providers=@($sites[$sk].providers.ToArray()|Sort-Object -Property @{Expression={[string]$_.displayName}});candidates=$list;booked=$booked;listed=@()}
    $s.listed=@((Get-NpAwvSiteView $s $index).rows|ForEach-Object{[string]$_.c.memberId})
    $out+=$s
   }
-  Set-P $run 'sites' $out;Set-P $run 'sources' @($src.sources);Set-P $run 'asOf' ($asOf.ToString('o'));Set-P $run 'epicError' $epicError;Set-P $run 'failedProviders' @($out|ForEach-Object{@($_.providers|Where-Object{$_.error})}).Count
+  Set-P $run 'sites' $out;Set-P $run 'sources' @($src.sources);Set-P $run 'asOf' ($asOf.ToString('o'));Set-P $run 'epicError' $epicError;Set-P $run 'lastAcvRead' $true;Set-P $run 'failedProviders' @($out|ForEach-Object{@($_.providers|Where-Object{$_.error})}).Count
   $run.state='Completed';$run.percent=100;$run.stage='Lists complete';Set-P $run 'completedUtc' ([DateTime]::UtcNow.ToString('o'));Set-P $run 'seconds' ([Math]::Round($sw.Elapsed.TotalSeconds,1));Save-JsonAtomic $path $run
-  Log ($K.log+'_COMPLETED') 'OK' ($chosen.Count.ToString()+' providers, '+$out.Count+' sites in '+[Math]::Round($sw.Elapsed.TotalSeconds,1)+'s')
+  $cn=0;$ph=0;foreach($s in $out){foreach($c in @($s.candidates)){$cn++;if($c.phone){$ph++}}}
+  Log ($K.log+'_COMPLETED') 'OK' ($chosen.Count.ToString()+' providers, '+$out.Count+' sites, '+$cn+' patients ('+$ph+' with an Export phone number) in '+[Math]::Round($sw.Elapsed.TotalSeconds,1)+'s')
  }catch{$msg=$_.Exception.Message;$cur=Json $path;if(!$cur){$cur=$run};$cur.state='Failed';$cur.stage='Lists failed';Set-P $cur 'errorSummary' $msg;Set-P $cur 'completedUtc' ([DateTime]::UtcNow.ToString('o'));Save-JsonAtomic $path $cur;Log ($K.log+'_FAILED') 'FAILED' $msg}
 }
 function Start-AwvWorker($K,[string]$Id){return (Start-RunWorker ([string]$K.worker) $Id ($K.file+'-'+$Id))}
@@ -3089,15 +3116,16 @@ function Update-AwvLiveness($Run){
 function Get-AwvModel($K,[string]$Id,[switch]$Summary){
  $run=Json (Get-AwvPath $K $Id);if(!$run){throw ($K.title+' list was not found.')}
  $null=Update-AwvLiveness $run
- $m=[ordered]@{npAwvId=[string]$run.npAwvId;state=[string]$run.state;percent=[int](Get-P $run 'percent' 0);stage=[string](Get-P $run 'stage' '');requestedUtc=(ConvertTo-IsoText (Get-P $run 'requestedUtc' ''));completedUtc=(ConvertTo-IsoText (Get-P $run 'completedUtc' ''));seconds=(Get-P $run 'seconds' $null);npis=@(Get-P $run 'npis' @());providerCount=@(Get-P $run 'npis' @()).Count;selection=(Get-OverviewSelectionText $run);errorSummary=[string](Get-P $run 'errorSummary' '');failedProviders=[int](Get-P $run 'failedProviders' 0);epicError=[string](Get-P $run 'epicError' '');siteCount=0;listed=0;sites=@();all=$null;sourcesText='';perSite=$script:NpAwvPerSite}
+ $m=[ordered]@{npAwvId=[string]$run.npAwvId;state=[string]$run.state;percent=[int](Get-P $run 'percent' 0);stage=[string](Get-P $run 'stage' '');requestedUtc=(ConvertTo-IsoText (Get-P $run 'requestedUtc' ''));completedUtc=(ConvertTo-IsoText (Get-P $run 'completedUtc' ''));seconds=(Get-P $run 'seconds' $null);npis=@(Get-P $run 'npis' @());providerCount=@(Get-P $run 'npis' @()).Count;selection=(Get-OverviewSelectionText $run);errorSummary=[string](Get-P $run 'errorSummary' '');failedProviders=[int](Get-P $run 'failedProviders' 0);epicError=[string](Get-P $run 'epicError' '');siteCount=0;listed=0;sites=@();all=$null;sourcesText='';perSite=$script:NpAwvPerSite;outreach=[bool]$K.outreach}
  if($m.state -eq 'Completed'){
-  $file={param([string]$Site)$q='id='+$m.npAwvId+$(if($Site){'&site='+[Uri]::EscapeDataString($Site)}else{''});[ordered]@{view=$K.route+'/view?'+$q;html=$K.route+'.file?'+$q+'&format=html';pdf=$K.route+'.file?'+$q+'&format=pdf';xlsx=$K.route+'.file?'+$q+'&format=xlsx'}}
-  $m.all=& $file ''
+  $file={param([string]$Site,[string]$Layout)$q='id='+$m.npAwvId+$(if($Site){'&site='+[Uri]::EscapeDataString($Site)}else{''})+$(if($Layout){'&layout='+$Layout}else{''});[ordered]@{view=$K.route+'/view?'+$q;html=$K.route+'.file?'+$q+'&format=html';pdf=$K.route+'.file?'+$q+'&format=pdf';xlsx=$K.route+'.file?'+$q+'&format=xlsx'}}
+  $links={param([string]$Site)$l=& $file $Site '';if($K.outreach){$l['outreach']=(& $file $Site 'outreach')};$l}
+  $m.all=& $links ''
   # History rows show the count as generated; the open list applies the current flags (one flag file read per provider).
   if($Summary){foreach($s in @(Get-P $run 'sites' @())){if($null -ne $s){$m.siteCount++;$m.listed+=@(Get-Field $s 'listed' @()).Count}}}
   else{
    $views=@(Get-NpAwvViews $run);$m.siteCount=$views.Count;foreach($v in $views){$m.listed+=@($v.rows).Count}
-   $m.sites=@(foreach($v in $views){[ordered]@{site=$v.site;listed=@($v.rows).Count;eligible=[int]$v.eligible;flagged=[int]$v.flaggedAll;booked=[int]$v.booked;movedUp=@($v.rows|Where-Object{$_.movedUp}).Count;providers=@($v.providers|ForEach-Object{[ordered]@{displayName=[string](Get-Field $_ 'displayName' '');due=[int](Get-Field $_ 'due' 0);note=[string](Get-Field $_ 'note' '');error=[string](Get-Field $_ 'error' '')}});links=(& $file $v.site)}})
+   $m.sites=@(foreach($v in $views){[ordered]@{site=$v.site;listed=@($v.rows).Count;eligible=[int]$v.eligible;flagged=[int]$v.flaggedAll;booked=[int]$v.booked;movedUp=@($v.rows|Where-Object{$_.movedUp}).Count;providers=@($v.providers|ForEach-Object{[ordered]@{displayName=[string](Get-Field $_ 'displayName' '');due=[int](Get-Field $_ 'due' 0);note=[string](Get-Field $_ 'note' '');error=[string](Get-Field $_ 'error' '')}});links=(& $links $v.site)}})
    $m.sourcesText=Get-NpAwvSourcesText $run
   }
  }
@@ -3137,6 +3165,7 @@ table.sites{border-collapse:collapse;width:100%;margin-top:6px}table.sites th,ta
 <div id="picker"><span class="muted">Loading profiles...</span></div>
 <div class="row"><button class="alt" id="all">Select all</button><button class="alt" id="none">Clear</button><button class="go" id="build" disabled>Generate lists</button><span id="count" class="muted"></span></div>
 <p class="muted">Columns match the __MATCHES__ list on each provider's dashboard, plus Epic PCP and Payor PCP. Flagged patients are left out; flag a patient from View &amp; flag and the flag is saved to that patient's provider, so it applies to the provider's lists too. HTML, PDF and Excel are built when you open them, with the current flags.</p>
+__OUTREACHNOTE__
 </section>
 <section class="card"><h2>Lists</h2><div id="result"><span class="muted">Loading...</span></div></section>
 <section class="card"><h2>Previous lists</h2><p class="muted">The last 30 generations, newest first.</p><div id="history"><span class="muted">Loading...</span></div></section>
@@ -3155,9 +3184,9 @@ function showResult(o){
  if(o.state==='Starting'||o.state==='Running'){el('result').innerHTML='<p>Generating lists for '+plural(o.providerCount,'provider')+'... '+o.percent+'%</p><div class="progress"><span style="width:'+Math.max(0,Math.min(100,o.percent))+'%"></span></div><span class="muted">'+esc(o.stage)+'</span>';syncChecks();return}
  if(o.state==='Failed'){el('result').innerHTML='<p class="error">The lists could not be generated: '+esc(o.errorSummary)+'</p><span class="muted">Requested '+esc(when(o.requestedUtc))+'</span>';syncChecks();return}
  let h='<div class="row"><b>'+plural(o.listed,'patient')+' listed across '+plural(o.siteCount,'site')+'</b><span class="muted">generated '+esc(when(o.completedUtc))+(o.seconds!=null?' in '+o.seconds+' s':'')+' from '+plural(o.providerCount,'provider')+'</span></div>';
- h+='<table class="sites"><thead><tr><th>Site</th><th class="n">Listed</th><th class="n">Eligible</th><th class="n">Flagged</th><th class="n">Already booked</th><th>Open</th></tr></thead><tbody>';
- h+=o.sites.map(s=>'<tr><td><b>'+esc(s.site)+'</b><div class="provlist">'+s.providers.map(p=>esc(p.displayName)+' ('+p.due+')'+(p.error?' <span class="error">not read: '+esc(p.error)+'</span>':p.note?' <span class="warn">'+esc(p.note)+'</span>':'')).join(', ')+'</div>'+(s.movedUp?'<div class="warn">'+plural(s.movedUp,'patient')+' moved up after flags were saved</div>':'')+'</td><td class="n">'+s.listed+' of '+o.perSite+'</td><td class="n">'+s.eligible+'</td><td class="n">'+s.flagged+'</td><td class="n">'+s.booked+'</td><td class="links">'+links(s.links)+'</td></tr>').join('');
- if(o.sites.length>1)h+='<tr class="all"><td>All sites (one file, each site on its own page or sheet)</td><td class="n">'+o.listed+'</td><td></td><td></td><td></td><td class="links">'+links(o.all)+'</td></tr>';
+ h+='<table class="sites"><thead><tr><th>Site</th><th class="n">Listed</th><th class="n">Eligible</th><th class="n">Flagged</th><th class="n">Already booked</th>'+(o.outreach?'<th>List (top '+o.perSite+')</th><th>Outreach list (all patients)</th>':'<th>Open</th>')+'</tr></thead><tbody>';
+ h+=o.sites.map(s=>'<tr><td><b>'+esc(s.site)+'</b><div class="provlist">'+s.providers.map(p=>esc(p.displayName)+' ('+p.due+')'+(p.error?' <span class="error">not read: '+esc(p.error)+'</span>':p.note?' <span class="warn">'+esc(p.note)+'</span>':'')).join(', ')+'</div>'+(s.movedUp?'<div class="warn">'+plural(s.movedUp,'patient')+' moved up after flags were saved</div>':'')+'</td><td class="n">'+s.listed+' of '+o.perSite+'</td><td class="n">'+s.eligible+'</td><td class="n">'+s.flagged+'</td><td class="n">'+s.booked+'</td><td class="links">'+links(s.links)+'</td>'+(o.outreach?'<td class="links">'+links(s.links.outreach)+'</td>':'')+'</tr>').join('');
+ if(o.sites.length>1)h+='<tr class="all"><td>All sites (one file, each site on its own page or sheet)</td><td class="n">'+o.listed+'</td><td></td><td></td><td></td><td class="links">'+links(o.all)+'</td>'+(o.outreach?'<td class="links">'+links(o.all.outreach)+'</td>':'')+'</tr>';
  h+='</tbody></table>';
  if(o.epicError)h+='<p class="warn">Epic PCP could not be read from Risk Population Outreach: '+esc(o.epicError)+'</p>';
  h+='<p class="muted">'+esc(o.sourcesText)+'.'+(o.failedProviders?' <span class="error">'+plural(o.failedProviders,'provider')+' could not be read; see the red notes above.</span>':'')+'</p><p class="warn" id="selNote" style="display:none">Your selection has changed since these lists were generated; select Generate lists to update them.</p>';
@@ -3177,7 +3206,8 @@ el('build').onclick=async()=>{if(el('build').disabled||busy())return;el('build')
 (async()=>{try{const m=await api('__API__');providers=m.providers;const last=m.latest;if(last)restore(last);presetLocation();renderPicker();showResult(last);history=m.history;renderHistory();if(busy())startPoll(last.npAwvId)}catch(e){el('picker').innerHTML='<p class="error">'+esc(e.message)+'</p>'}})();
 </script></body></html>
 '@
- return $html.Replace('__NAV__',(Get-NavHtml ([string]$K.tab))).Replace('__TITLE__',[string]$K.title).Replace('__SUBTITLE__',[string]$K.Subtitle).Replace('__MATCHES__',[string]$K.Matches).Replace('__API__',[string]$K.api).Replace('__TABCSS__',$script:TabCss).Replace('__RUNCSS__',$script:RunPageCss).Replace('__PICKERJS__',$script:PickerJs).Replace('__MAX__',[string]$script:NpAwvPerSite)
+ $note=$(if($K.outreach){'<p class="muted"><b>Outreach list</b> - the same generation also gives an outreach list per site: every eligible patient (not only the top __MAX__), most urgent first, with MRN, First Name, Last Name, DOB, Phone Number and Last ACV first. Open it from the Outreach list column, as View &amp; flag, HTML, PDF or Excel.</p>'}else{''})
+ return $html.Replace('__OUTREACHNOTE__',$note).Replace('__NAV__',(Get-NavHtml ([string]$K.tab))).Replace('__TITLE__',[string]$K.title).Replace('__SUBTITLE__',[string]$K.Subtitle).Replace('__MATCHES__',[string]$K.Matches).Replace('__API__',[string]$K.api).Replace('__TABCSS__',$script:TabCss).Replace('__RUNCSS__',$script:RunPageCss).Replace('__PICKERJS__',$script:PickerJs).Replace('__MAX__',[string]$script:NpAwvPerSite)
 }
 # --- Draft 5.7: POC Coding tab - point-of-care billing and coding behavior for one department of a billing export, each run saved as an HTML report ---
 # The billing export is chosen in the browser and kept under poc-coding\source-files (the newest few), its Department column fills the target
