@@ -7,6 +7,8 @@
 # Draft 5.10: the PCP-AWV tab (/pcp-awv) is the same list for ACOR patients with an AWV due, for the PCPs to schedule; both tabs share one code path.
 # Draft 5.11: PCP-AWV also offers an Outreach List per site: every eligible patient (not only the top 30), led by MRN, name, DOB, phone and last ACV.
 # Draft 5.12: NP-AWV and PCP-AWV check AWV eligibility against the most recent ACV in the Export or Risk Population Outreach, as of generation.
+# Draft 5.13: one AWV rule everywhere (reports, dashboards, Overview, New Patients, NP-AWV, PCP-AWV): Test-AcvDue on the most recent ACV in the Export or
+# Risk Population Outreach (read by member ID, whatever the Epic PCP), with no future ACV booked. NP-AWV gets the Outreach List too.
 # Adds provider indexes, guided cross-source mapping, fuzzy suggestions, NPI profiles, prepared job tracking, ranked outreach lists,
 # a flag mode (/flag?jobId=...) that excludes flagged patients from every list and panel on every later report for that provider,
 # and a Communication tab (/communication) that emails every provider in a risk pool a fresh report PDF via Outlook drafts.
@@ -1171,32 +1173,56 @@ $script:FactFields=[ordered]@{
  DiabetesScorecard=@('Provider','Cdo','Patient','Member ID','Mrn','KED','EED','Eye Exam Gap Status','Eye Exam Date','Next Appt Date','Next Appt Specialty','Next Appt Location','Risk','GSD','Med Adherence DM','MAD Days Supply','Dx Date','Avg Last A1c','% eGFR last 12 mo.','% uACR last 12 mo.')
  SerialScheduling=@('Provider Name','Risk Pool','Member ID','MRN','Future PCP Visits 2026','PCP Visit Dates','A1c Date')
  HR=@('PCP Name','Patient First Name','Patient Last Name','DOB','Patient Insurance ID')
- RiskPopulationOutreach=@('Epic Pcp','Cdo','Member ID','Mrn','Next Acv')
+ RiskPopulationOutreach=@('Epic Pcp','Cdo','Member ID','Mrn','Next Acv','Last Acv')
 }
 $script:FactFilters=[ordered]@{Export='Provider Name';PtListQuality='Provider Name';DiabetesScorecard='Provider';SerialScheduling='Provider Name';RiskPopulationOutreach='Epic Pcp';HR='PCP Name'}
 function Get-ProviderPatientFacts($Job){
  # Reads the seven sources for one provider and returns plain patient facts (no scoring, no tables) so a report can be rebuilt later without Excel.
  $a=$Job.aliases;$exportAlias=Get-Alias $a 'Export';$qualityAlias=Get-Alias $a 'PtListQuality';$serialAlias=Get-Alias $a 'SerialScheduling';$dscAlias=Get-Alias $a 'DiabetesScorecard';$rpoAlias=Get-Alias $a 'RiskPopulationOutreach';$hrKey=$(if(Get-Alias $a 'HR-CRH'){'HR-CRH'}elseif(Get-Alias $a 'HR-RIVPHNYCMM'){'HR-RIVPHNYCMM'}else{''});$hrAlias=$(if($hrKey){Get-Alias $a $hrKey}else{''})
- $exports=@(Get-SourceRows 'Export' $script:FactFields.Export 'Provider Name' $exportAlias);Set-JobProgress $Job 15 'Loaded Export source';$quality=@(Get-SourceRows 'PtListQuality' $script:FactFields.PtListQuality 'Provider Name' $qualityAlias);Set-JobProgress $Job 28 'Loaded PtListQuality source';$dsc=@();if($dscAlias){$dsc=@(Get-SourceRows 'DiabetesScorecard' $script:FactFields.DiabetesScorecard 'Provider' $dscAlias)};Set-JobProgress $Job 40 'Loaded Diabetes Scorecard source';$serial=@();if($serialAlias){$serial=@(Get-SourceRows 'SerialScheduling' $script:FactFields.SerialScheduling 'Provider Name' $serialAlias)};Set-JobProgress $Job 50 'Loaded Serial Scheduling source';$rpo=@();if($rpoAlias){$rpo=@(Get-SourceRows 'RiskPopulationOutreach' $script:FactFields.RiskPopulationOutreach 'Epic Pcp' $rpoAlias)};Set-JobProgress $Job 54 'Loaded Risk Population Outreach source';$hr=@();if($hrKey -and $hrAlias){$hr=@(Get-SourceRows $hrKey $script:FactFields.HR 'PCP Name' $hrAlias)};Set-JobProgress $Job 58 'Loaded HR source'
+ $exports=@(Get-SourceRows 'Export' $script:FactFields.Export 'Provider Name' $exportAlias);Set-JobProgress $Job 15 'Loaded Export source';$quality=@(Get-SourceRows 'PtListQuality' $script:FactFields.PtListQuality 'Provider Name' $qualityAlias);Set-JobProgress $Job 28 'Loaded PtListQuality source';$dsc=@();if($dscAlias){$dsc=@(Get-SourceRows 'DiabetesScorecard' $script:FactFields.DiabetesScorecard 'Provider' $dscAlias)};Set-JobProgress $Job 40 'Loaded Diabetes Scorecard source';$serial=@();if($serialAlias){$serial=@(Get-SourceRows 'SerialScheduling' $script:FactFields.SerialScheduling 'Provider Name' $serialAlias)};Set-JobProgress $Job 50 'Loaded Serial Scheduling source';$rpo=@(Get-RpoForExports $exports $rpoAlias);Set-JobProgress $Job 54 'Loaded Risk Population Outreach source';$hr=@();if($hrKey -and $hrAlias){$hr=@(Get-SourceRows $hrKey $script:FactFields.HR 'PCP Name' $hrAlias)};Set-JobProgress $Job 58 'Loaded HR source'
  return (New-PatientFacts $exports $quality $dsc $serial $rpo $hr)
+}
+function Test-AcvDue([bool]$Acor,$LastAcv,[DateTime]$AsOf){
+ # The one AWV/ACV rule used by every report, dashboard and list: the most recent ACV on file is more than 365 days before AsOf (ACOR), or in
+ # an earlier calendar year than AsOf (non-ACOR: last ACV in the prior calendar year or before). No ACV on file in any source is not due.
+ if($null -eq $LastAcv){return $false};$d=([DateTime]$LastAcv).Date
+ if($Acor){return (($AsOf.Date-$d).TotalDays -gt 365)};return ($d -lt (New-Object DateTime($AsOf.Year,1,1)))
+}
+function Get-RpoMemberMap([object[]]$Rows){
+ # Risk Population Outreach by member ID. A member on several rows keeps the most recent Last Acv and Next Acv and the first MRN and Epic PCP.
+ $out=@{}
+ foreach($r in @($Rows|Where-Object{$null -ne $_})){
+  $id=([string](Get-Field $r 'Member ID' '')).Trim();if(!$id){continue}
+  $la=ConvertTo-DateValue (Get-Field $r 'Last Acv' $null);$na=ConvertTo-DateValue (Get-Field $r 'Next Acv' $null);$mrn=([string](Get-Field $r 'Mrn' '')).Trim();$epic=([string](Get-Field $r 'Epic Pcp' '')).Trim()
+  if(!$out.ContainsKey($id)){$out[$id]=@{lastAcv=$la;nextAcv=$na;mrn=$mrn;epic=$epic};continue}
+  $o=$out[$id];if($la -and (!$o.lastAcv -or $la -gt $o.lastAcv)){$o.lastAcv=$la};if($na -and (!$o.nextAcv -or $na -gt $o.nextAcv)){$o.nextAcv=$na};if(!$o.mrn -or $o.mrn -eq '0'){$o.mrn=$mrn};if(!$o.epic){$o.epic=$epic}
+ }
+ return $out
+}
+function Get-RpoForExports([object[]]$Exports,[string]$RpoAlias){
+ # Every Risk Population Outreach row for these Export patients, whoever their Epic PCP is (the AWV lists and every report read it the same way).
+ $ids=@{};foreach($x in @($Exports|Where-Object{$null -ne $_})){$mid=([string]$x.MemberID).Trim();if($mid){$ids[$mid]=$true}};if($ids.Count -eq 0){return @()}
+ try{return @(Get-SourceRows 'RiskPopulationOutreach' $script:FactFields.RiskPopulationOutreach 'Member ID' '' -FilterSet $ids)}catch{if($RpoAlias){throw};Log 'RPO_READ' 'WARN' $_.Exception.Message;return @()}
 }
 function New-PatientFacts([object[]]$exports,[object[]]$quality,[object[]]$dsc,[object[]]$serial,[object[]]$rpo,[object[]]$hr){
  # Joins one provider's rows from the seven sources into plain patient facts; used by a single report and by the group overview.
  $exports=@($exports|Where-Object{$null -ne $_});$quality=@($quality|Where-Object{$null -ne $_});$dsc=@($dsc|Where-Object{$null -ne $_});$serial=@($serial|Where-Object{$null -ne $_});$rpo=@($rpo|Where-Object{$null -ne $_});$hr=@($hr|Where-Object{$null -ne $_})
- $qIndex=New-UniqueIndex $quality 'MemberID';$dIndex=New-UniqueIndex $dsc 'Member ID';$sIndex=New-UniqueIndex $serial 'Member ID';$rpoIndex=New-UniqueIndex $rpo 'Member ID';$hrIds=@{};foreach($x in $hr){$id=([string]$x.'Patient Insurance ID').Trim();if($id){$hrIds[$id]=$x}};$exportIds=New-Object Collections.Generic.List[string];foreach($x in $exports){$exportIds.Add(([string]$x.MemberID).Trim())};$highIds=@{};$unmatchedHr=@{};foreach($hid in $hrIds.Keys){$matchCount=0;$matchId='';foreach($eid in $exportIds){if($eid -eq $hid -or $eid.StartsWith($hid)){$matchCount++;if($matchCount -eq 1){$matchId=$eid}}};if($matchCount -eq 1){$highIds[$matchId]=$true}elseif($matchCount -eq 0){$unmatchedHr[$hid]=$hrIds[$hid]}}
+ $qIndex=New-UniqueIndex $quality 'MemberID';$dIndex=New-UniqueIndex $dsc 'Member ID';$sIndex=New-UniqueIndex $serial 'Member ID';$rpoMap=Get-RpoMemberMap $rpo;$hrIds=@{};foreach($x in $hr){$id=([string]$x.'Patient Insurance ID').Trim();if($id){$hrIds[$id]=$x}};$exportIds=New-Object Collections.Generic.List[string];foreach($x in $exports){$exportIds.Add(([string]$x.MemberID).Trim())};$highIds=@{};$unmatchedHr=@{};foreach($hid in $hrIds.Keys){$matchCount=0;$matchId='';foreach($eid in $exportIds){if($eid -eq $hid -or $eid.StartsWith($hid)){$matchCount++;if($matchCount -eq 1){$matchId=$eid}}};if($matchCount -eq 1){$highIds[$matchId]=$true}elseif($matchCount -eq 0){$unmatchedHr[$hid]=$hrIds[$hid]}}
  $hedis=@('BCS','COLO','EED','GSD','CBP','OMW','KED','SPC','MAD','MAC','MAH','SUPD','COB','POLY');$patients=@();$seen=@{}
- foreach($e in $exports){$id=([string]$e.MemberID).Trim();if(!$id){continue};$seen[$id]=$true;$q=$(if($qIndex.ContainsKey($id)){$qIndex[$id]}else{$null});$d=$(if($dIndex.ContainsKey($id)){$dIndex[$id]}else{$null});$s=$(if($sIndex.ContainsKey($id)){$sIndex[$id]}else{$null});$rp=$(if($rpoIndex.ContainsKey($id)){$rpoIndex[$id]}else{$null})
+ foreach($e in $exports){$id=([string]$e.MemberID).Trim();if(!$id){continue};$seen[$id]=$true;$q=$(if($qIndex.ContainsKey($id)){$qIndex[$id]}else{$null});$d=$(if($dIndex.ContainsKey($id)){$dIndex[$id]}else{$null});$s=$(if($sIndex.ContainsKey($id)){$sIndex[$id]}else{$null});$rp=$(if($rpoMap.ContainsKey($id)){$rpoMap[$id]}else{$null})
   $open=@();$closed=@();if($q){foreach($m in $hedis){$v=([string]$q.$m).Trim();if($v -in @('Needed','Non-compliant')){$open+=$m}elseif($v -in @('Completed','Compliant')){$closed+=$m}}}
   if($d){$overrides=@{'KED'=[string]($d.KED);'EED'=[string]($d.EED);'GSD'=[string]($d.GSD);'MAD'=[string]($d.'Med Adherence DM')};foreach($m in $overrides.Keys){$v=$overrides[$m];if($v -in @('Needed','Non-compliant')){if($open -notcontains $m){$open+=$m};$closed=@($closed|Where-Object{$_ -ne $m})}elseif($v -in @('Completed','Compliant')){$open=@($open|Where-Object{$_ -ne $m});if($closed -notcontains $m){$closed+=$m}}};$egfrComplete=(ConvertTo-NumberValue $d.'% eGFR last 12 mo.') -ge 100;$uacrComplete=(ConvertTo-NumberValue $d.'% uACR last 12 mo.') -ge 100;if($egfrComplete -and $uacrComplete){$open=@($open|Where-Object{$_ -ne 'KED'});if($closed -notcontains 'KED'){$closed+='KED'}}}
-  $high=$highIds.ContainsKey($id);$lastAcv=(ConvertTo-DateValue $e.'Last ACV Date');$acor=([string]$e.Payer).Trim() -eq 'ACOR';$due=$false;if($lastAcv){$due=$(if($acor){$lastAcv -le (Get-Date).AddDays(-366)}else{$lastAcv -lt (Get-Date -Day 1 -Month 1)})};$nextAcv=$null;if($rp){$nextAcv=ConvertTo-DateValue $rp.'Next Acv'};if($nextAcv -and $nextAcv.Date -ge (Get-Date).Date){$due=$false}
+  $high=$highIds.ContainsKey($id);$acor=([string]$e.Payer).Trim() -eq 'ACOR';$acvNow=Get-Date;$exportAcv=ConvertTo-DateValue $e.'Last ACV Date';$lastAcv=$exportAcv;if($rp -and $rp.lastAcv -and (!$lastAcv -or $rp.lastAcv -gt $lastAcv)){$lastAcv=$rp.lastAcv};$nextAcv=$(if($rp){$rp.nextAcv}else{$null})
+  # AcvHold says why a patient the Export alone would call due is not: a future ACV is booked, or Risk Population Outreach shows a more recent ACV.
+  $due=Test-AcvDue $acor $lastAcv $acvNow;$acvHold='';if($due -and $nextAcv -and $nextAcv.Date -ge $acvNow.Date){$due=$false;$acvHold='booked'}elseif(!$due -and (Test-AcvDue $acor $exportAcv $acvNow)){$acvHold='recent'}
   $vis=@((ConvertTo-DateValue $e.'Last QEM date with non-PCP'),(ConvertTo-DateValue $e.'Last ACV Date'),(ConvertTo-DateValue $e.'Last QEM Visit Date with any PCP in assigned TIN'))|Where-Object{$_};$last=$(if($vis){$vis|Sort-Object -Descending|Select-Object -First 1}else{$null});$serialLast=$(if($s){Get-LatestDateFromText ([string]$s.'PCP Visit Dates')}else{$null})
   $mrn='';foreach($cand in @($(if($d){$d.Mrn}else{''}),$(if($s){$s.MRN}else{''}),$(if($rp){$rp.Mrn}else{''}))){$c=([string]$cand).Trim();if($c -and $c -ne '0'){$mrn=$c;break}}
-  $patients+=[pscustomobject][ordered]@{MemberID=$id;MRN=$mrn;First=[string]$e.'First Name';Last=[string]$e.'Last Name';DOB=$(ConvertTo-DateText $e.'Date of Birth');ACOR=$acor;ACVDue=$due;Attest=((ConvertTo-NumberValue $e.'Completed Attestations')+(ConvertTo-NumberValue $e.'Incompleted Attestations')) -gt 0;OpenICD=[string]$e.'Open ICDs';NewPatient=(Test-TrueValue $e.'New Patient');OpenHedis=($open -join ', ');ClosedHedis=($closed -join ', ');HighRisk=$high;LastVisit=$last;SerialLast=$serialLast;A1cDate=$(if($s){ConvertTo-DateValue $s.'A1c Date'}else{$null});FutureVisits=$(if($s){[string]$s.'Future PCP Visits 2026'}else{''});NextAppt=$(if($d){ConvertTo-DateValue $d.'Next Appt Date'}else{$null});NextApptSpecialty=$(if($d){([string]$d.'Next Appt Specialty').Trim()}else{''});A1c=$(if($d){ConvertTo-NumberOrNull $d.'Avg Last A1c'}else{$null});A1cText=$(if($d){([string]$d.'Avg Last A1c').Trim()}else{''});Diabetic=($null -ne $d);EyeOpen=[bool]($d -and (([string]$d.'Eye Exam Gap Status').Trim() -eq 'Open'));EyeDate=$(if($d){ConvertTo-DateValue $d.'Eye Exam Date'}else{$null});EgfrNeeded=[bool]($d -and ((ConvertTo-NumberValue $d.'% eGFR last 12 mo.') -lt 100));UacrNeeded=[bool]($d -and ((ConvertTo-NumberValue $d.'% uACR last 12 mo.') -lt 100));MedAdhDM=$(if($d){([string]$d.'Med Adherence DM').Trim()}else{''});OmwDue=$(if($q){ConvertTo-DateText $q.'OMW Critical Due Date'}else{''});TotalGaps=(ConvertTo-NumberValue $e.'Total Care Gaps');IncompleteAttest=(ConvertTo-NumberValue $e.'Incompleted Attestations');OpenIcdCount=@(([string]$e.'Open ICDs') -split ','|Where-Object{$_.Trim() -and $_.Trim() -ne '0'}).Count;Tcm=[bool]((Test-TrueValue $e.TCM) -or ((ConvertTo-NumberValue $e.TCM) -gt 0));RiskContract=$true;DSC=$d;Payer=([string]$e.Payer).Trim();Phone=([string](Get-Field $e 'Phone Number' '')).Trim();ActiveDate=(ConvertTo-DateText (Get-Field $e 'Active Date' ''));PcpVisit=(ConvertTo-DateValue $e.'Last QEM Visit Date with any PCP in assigned TIN');NextAcv=$nextAcv}
+  $patients+=[pscustomobject][ordered]@{MemberID=$id;MRN=$mrn;First=[string]$e.'First Name';Last=[string]$e.'Last Name';DOB=$(ConvertTo-DateText $e.'Date of Birth');ACOR=$acor;ACVDue=$due;Attest=((ConvertTo-NumberValue $e.'Completed Attestations')+(ConvertTo-NumberValue $e.'Incompleted Attestations')) -gt 0;OpenICD=[string]$e.'Open ICDs';NewPatient=(Test-TrueValue $e.'New Patient');OpenHedis=($open -join ', ');ClosedHedis=($closed -join ', ');HighRisk=$high;LastVisit=$last;SerialLast=$serialLast;A1cDate=$(if($s){ConvertTo-DateValue $s.'A1c Date'}else{$null});FutureVisits=$(if($s){[string]$s.'Future PCP Visits 2026'}else{''});NextAppt=$(if($d){ConvertTo-DateValue $d.'Next Appt Date'}else{$null});NextApptSpecialty=$(if($d){([string]$d.'Next Appt Specialty').Trim()}else{''});A1c=$(if($d){ConvertTo-NumberOrNull $d.'Avg Last A1c'}else{$null});A1cText=$(if($d){([string]$d.'Avg Last A1c').Trim()}else{''});Diabetic=($null -ne $d);EyeOpen=[bool]($d -and (([string]$d.'Eye Exam Gap Status').Trim() -eq 'Open'));EyeDate=$(if($d){ConvertTo-DateValue $d.'Eye Exam Date'}else{$null});EgfrNeeded=[bool]($d -and ((ConvertTo-NumberValue $d.'% eGFR last 12 mo.') -lt 100));UacrNeeded=[bool]($d -and ((ConvertTo-NumberValue $d.'% uACR last 12 mo.') -lt 100));MedAdhDM=$(if($d){([string]$d.'Med Adherence DM').Trim()}else{''});OmwDue=$(if($q){ConvertTo-DateText $q.'OMW Critical Due Date'}else{''});TotalGaps=(ConvertTo-NumberValue $e.'Total Care Gaps');IncompleteAttest=(ConvertTo-NumberValue $e.'Incompleted Attestations');OpenIcdCount=@(([string]$e.'Open ICDs') -split ','|Where-Object{$_.Trim() -and $_.Trim() -ne '0'}).Count;Tcm=[bool]((Test-TrueValue $e.TCM) -or ((ConvertTo-NumberValue $e.TCM) -gt 0));RiskContract=$true;DSC=$d;Payer=([string]$e.Payer).Trim();Phone=([string](Get-Field $e 'Phone Number' '')).Trim();ActiveDate=(ConvertTo-DateText (Get-Field $e 'Active Date' ''));PcpVisit=(ConvertTo-DateValue $e.'Last QEM Visit Date with any PCP in assigned TIN');NextAcv=$nextAcv;LastAcv=$lastAcv;AcvHold=$acvHold;EpicPcp=$(if($rp){[string]$rp.epic}else{''})}
  }
- foreach($hid in $unmatchedHr.Keys){$x=$unmatchedHr[$hid];$patients+=[pscustomobject][ordered]@{MemberID=$hid;MRN='';First=[string]$x.'Patient First Name';Last=[string]$x.'Patient Last Name';DOB=$(ConvertTo-DateText $x.DOB);ACOR=$null;ACVDue=$false;Attest=$false;OpenICD='';NewPatient=$false;OpenHedis='';ClosedHedis='';HighRisk=$true;LastVisit=$null;SerialLast=$null;A1cDate=$null;FutureVisits='';NextAppt=$null;NextApptSpecialty='';A1c=$null;A1cText='';Diabetic=$false;EyeOpen=$false;EyeDate=$null;EgfrNeeded=$false;UacrNeeded=$false;MedAdhDM='';OmwDue='';TotalGaps=0;IncompleteAttest=0;OpenIcdCount=0;Tcm=$false;RiskContract=$true;DSC=$null;Payer='';Phone='';ActiveDate='';PcpVisit=$null;NextAcv=$null}}
+ foreach($hid in $unmatchedHr.Keys){$x=$unmatchedHr[$hid];$patients+=[pscustomobject][ordered]@{MemberID=$hid;MRN='';First=[string]$x.'Patient First Name';Last=[string]$x.'Patient Last Name';DOB=$(ConvertTo-DateText $x.DOB);ACOR=$null;ACVDue=$false;Attest=$false;OpenICD='';NewPatient=$false;OpenHedis='';ClosedHedis='';HighRisk=$true;LastVisit=$null;SerialLast=$null;A1cDate=$null;FutureVisits='';NextAppt=$null;NextApptSpecialty='';A1c=$null;A1cText='';Diabetic=$false;EyeOpen=$false;EyeDate=$null;EgfrNeeded=$false;UacrNeeded=$false;MedAdhDM='';OmwDue='';TotalGaps=0;IncompleteAttest=0;OpenIcdCount=0;Tcm=$false;RiskContract=$true;DSC=$null;Payer='';Phone='';ActiveDate='';PcpVisit=$null;NextAcv=$null;LastAcv=$null;AcvHold='';EpicPcp=''}}
  return [ordered]@{asOf=(Get-Date).ToString('o');riskPool=$(if($exports.Count){[string]$exports[0].'Risk Pool'}else{''});patients=@($patients);scorecardNonRisk=@($dsc|Where-Object{([string]$_.Risk) -match 'Non-Risk Population'})}
 }
-$script:PatientDateFields=@('LastVisit','SerialLast','A1cDate','NextAppt','EyeDate','PcpVisit','NextAcv')
+$script:PatientDateFields=@('LastVisit','SerialLast','A1cDate','NextAppt','EyeDate','PcpVisit','NextAcv','LastAcv')
 function ConvertFrom-PatientFacts($Stored){
  # Rebuilds patient facts from analysis-<jobId>.json (dates come back as strings or DateTime depending on the PowerShell version).
  if($null -eq $Stored){throw 'This report was generated before flag support was added; generate a new report for this provider first.'}
@@ -1608,7 +1634,7 @@ $script:RollupColumns=@(
  @('HighRisk','High Risk','On the HR (high-risk) list for this provider.'),
  @('OpenHedis','Open HEDIS','Measures Needed or Non-compliant in PtListQuality, with Diabetes Scorecard overrides for KED, EED, GSD and MAD.'),
  @('ClosedHedis','Closed HEDIS','Measures Completed or Compliant after the same overrides.'),
- @('ACVDue','AWV Due','Last ACV older than 366 days (ACOR) or before January 1 (non-ACOR), and no future ACV booked.'),
+ @('ACVDue','AWV Due','Most recent ACV in the Export (Last ACV Date) or Risk Population Outreach (Last Acv) more than 365 days ago (ACOR) or in an earlier calendar year (non-ACOR), and no future ACV booked.'),
  @('NextAcv','Next AWV','Risk Population Outreach "Next Acv".'),
  @('OpenICD','Open ICDs','Export "Open ICDs".'),@('OpenIcdCount','Open ICD Count','Number of open ICDs listed.'),
  @('LastVisit','Last Visit','Latest of the Export non-PCP QEM, ACV and PCP-in-TIN dates.'),
@@ -2239,24 +2265,28 @@ function Get-ChosenProfiles([object[]]$Npis){
 }
 function Read-GroupSources([object[]]$Chosen,$Run,[string]$Path,[int]$From,[int]$Span){
  # Reads each source once for every chosen provider and groups its rows by the source's provider column (progress runs From..From+Span).
- $groups=@{};$read=@();$step=0;$status=@{};foreach($s in @(Status)){$status[[string]$s.sourceKey]=$s}
+ $groups=@{};$read=@();$step=0;$rpoError='';$status=@{};foreach($s in @(Status)){$status[[string]$s.sourceKey]=$s}
  foreach($key in $script:OverviewSources){
   $step++;$set=@{};foreach($p in $Chosen){$al=Get-OverviewAlias (Get-P $p 'aliases' $null) $key;if($al){$set[$al]=$true}}
+  # Risk Population Outreach is read for every Export patient by member ID, whoever their Epic PCP is, exactly as a single report reads it.
+  $byMember=($key -eq 'RiskPopulationOutreach');$hasAlias=($set.Count -gt 0)
+  if($byMember){$set=@{};if($groups.ContainsKey('Export')){foreach($lst in @($groups['Export'].Values)){foreach($er in $lst){$mid=([string]$er.MemberID).Trim();if($mid){$set[$mid]=$true}}}}}
   if($set.Count -eq 0){continue}
-  $fieldKey=$(if($key -like 'HR-*'){'HR'}else{$key});$filter=[string]$script:FactFilters[$fieldKey];$name=$(if($status.ContainsKey($key)){[string]$status[$key].displayName}else{$key})
+  $fieldKey=$(if($key -like 'HR-*'){'HR'}else{$key});$filter=$(if($byMember){'Member ID'}else{[string]$script:FactFilters[$fieldKey]});$name=$(if($status.ContainsKey($key)){[string]$status[$key].displayName}else{$key})
   Set-RunProgress $Run $Path ([int]($From+$Span*($step-1)/$script:OverviewSources.Count)) ('Reading '+$name+' for '+$Chosen.Count+' provider'+$(if($Chosen.Count -eq 1){''}else{'s'}))
-  $rows=@(Get-SourceRows $key $script:FactFields[$fieldKey] $filter '' -FilterSet $set)
+  if($byMember){try{$rows=@(Get-SourceRows $key $script:FactFields[$fieldKey] $filter '' -FilterSet $set)}catch{if($hasAlias){throw};$rpoError=$_.Exception.Message;Log 'RPO_READ' 'WARN' $rpoError;continue}}
+  else{$rows=@(Get-SourceRows $key $script:FactFields[$fieldKey] $filter '' -FilterSet $set)}
   $g=@{};foreach($r in $rows){$v=([string]$r.$filter).Trim();if(!$g.ContainsKey($v)){$g[$v]=New-Object Collections.Generic.List[object]};$g[$v].Add($r)}
   $groups[$key]=$g
   $st=$(if($status.ContainsKey($key)){$status[$key]}else{$null});$read+=[ordered]@{sourceKey=$key;displayName=$name;importedUtc=$(if($st){ConvertTo-IsoText (Get-Field $st 'importedUtc' '')}else{''});lastWriteTime=$(if($st){ConvertTo-IsoText (Get-Field $st 'lastWriteTime' '')}else{''})}
  }
- return [ordered]@{groups=$groups;sources=@($read)}
+ return [ordered]@{groups=$groups;sources=@($read);rpoError=$rpoError}
 }
 function Get-ProviderFactsFromGroups($Groups,$P){
  # One provider's patient facts from rows read by Read-GroupSources, joined exactly as a single report joins them.
  $a=Get-P $P 'aliases' $null;$exportAlias=Get-OverviewAlias $a 'Export';$hrKey=Get-HrSourceKey $a
  $exports=@(Get-GroupedRows $Groups 'Export' $exportAlias)
- $facts=New-PatientFacts $exports @(Get-GroupedRows $Groups 'PtListQuality' (Get-OverviewAlias $a 'PtListQuality')) @(Get-GroupedRows $Groups 'DiabetesScorecard' (Get-OverviewAlias $a 'DiabetesScorecard')) @(Get-GroupedRows $Groups 'SerialScheduling' (Get-OverviewAlias $a 'SerialScheduling')) @(Get-GroupedRows $Groups 'RiskPopulationOutreach' (Get-OverviewAlias $a 'RiskPopulationOutreach')) @($(if($hrKey){Get-GroupedRows $Groups $hrKey (Get-OverviewAlias $a $hrKey)}))
+ $facts=New-PatientFacts $exports @(Get-GroupedRows $Groups 'PtListQuality' (Get-OverviewAlias $a 'PtListQuality')) @(Get-GroupedRows $Groups 'DiabetesScorecard' (Get-OverviewAlias $a 'DiabetesScorecard')) @(Get-GroupedRows $Groups 'SerialScheduling' (Get-OverviewAlias $a 'SerialScheduling')) @(foreach($x in $exports){Get-GroupedRows $Groups 'RiskPopulationOutreach' (([string]$x.MemberID).Trim())}) @($(if($hrKey){Get-GroupedRows $Groups $hrKey (Get-OverviewAlias $a $hrKey)}))
  $note=$(if($exports.Count -eq 0){'No Export rows for "'+$exportAlias+'"; the name may have changed in the latest export. Check the profile in the Provider Wizard.'}else{''})
  return [ordered]@{facts=$facts;note=$note}
 }
@@ -2829,16 +2859,17 @@ el('build').onclick=async()=>{if(el('build').disabled||busy())return;el('build')
 # Draft 5.10: the same code serves PCP-AWV (ACOR patients, for the PCPs) through $script:AwvKinds; runs are state\<file>-<id>.json and keep the npAwvId field name.
 $script:NpAwvPerSite=30;$script:NpAwvKeep=30;$script:NpAwvInline=$false
 $script:AwvKinds=[ordered]@{
- np=[ordered]@{kind='np';title='NP-AWV';route='/np-awv';api='/api/np-awv';file='npawv';log='NPAWV';tab='npawv';worker='RunNpAwvId';acor=$false;item='awv-np';outreach=$false
+ np=[ordered]@{kind='np';title='NP-AWV';route='/np-awv';api='/api/np-awv';file='npawv';log='NPAWV';tab='npawv';worker='RunNpAwvId';acor=$false;item='awv-np';outreach=$true
   Subtitle='one list per site for the travelling NP: non-ACOR patients with an annual wellness visit due, ranked by urgency across every provider at the site'
-  Criteria='Non-ACOR patients with an annual wellness visit due (last ACV before January 1 of this year in both the Export and Risk Population Outreach, and no future ACV booked), from every selected provider at the site, most urgent first. Urgency is the score on each provider''s own list: 1 for the AWV, plus open measures, open ICDs, and the visit, appointment, A1c and risk factors shown under Why Ranked Here; ties go to the oldest last visit. Each site lists its {max} most urgent.'
+  Criteria='Non-ACOR patients with an annual wellness visit due (most recent ACV in the Export or Risk Population Outreach in the prior calendar year or earlier, and no future ACV booked), from every selected provider at the site, most urgent first. Urgency is the score on each provider''s own list: 1 for the AWV, plus open measures, open ICDs, and the visit, appointment, A1c and risk factors shown under Why Ranked Here; ties go to the oldest last visit. Each site lists its {max} most urgent.'
   None='No non-ACOR patient at this site has an annual wellness visit due.'
+  OutreachCriteria='Outreach list: every non-ACOR patient at the site with an annual wellness visit due (most recent ACV in the Export or Risk Population Outreach in the prior calendar year or earlier, and no future ACV booked), from every selected provider, most urgent first, ranked exactly as on the NP-AWV list but not limited to the top {max}. Phone Number is the Export phone number and is blank when the Export has none for the patient. Last ACV is the most recent of the Export Last ACV Date and the Risk Population Outreach Last Acv.'
   Matches='AWV Due - NP (non-ACOR)'}
  pcp=[ordered]@{kind='pcp';title='PCP-AWV';route='/pcp-awv';api='/api/pcp-awv';file='pcpawv';log='PCPAWV';tab='pcpawv';worker='RunPcpAwvId';acor=$true;item='awv-pcp';outreach=$true
   Subtitle='one list per site for the PCPs: ACOR patients with an annual wellness visit due, ranked by urgency across every provider at the site'
-  Criteria='ACOR patients with an annual wellness visit due (last ACV more than 365 days before the list was generated in both the Export and Risk Population Outreach, and no future ACV booked), from every selected provider at the site, most urgent first. Urgency is the score on each provider''s own list: 1 for the AWV, plus open measures, open ICDs, and the visit, appointment, A1c and risk factors shown under Why Ranked Here; ties go to the oldest last visit. Each site lists its {max} most urgent.'
+  Criteria='ACOR patients with an annual wellness visit due (most recent ACV in the Export or Risk Population Outreach more than 365 days before the list was generated, and no future ACV booked), from every selected provider at the site, most urgent first. Urgency is the score on each provider''s own list: 1 for the AWV, plus open measures, open ICDs, and the visit, appointment, A1c and risk factors shown under Why Ranked Here; ties go to the oldest last visit. Each site lists its {max} most urgent.'
   None='No ACOR patient at this site has an annual wellness visit due.'
-  OutreachCriteria='Outreach list: every ACOR patient at the site with an annual wellness visit due (last ACV more than 365 days before the list was generated in both the Export and Risk Population Outreach, and no future ACV booked), from every selected provider, most urgent first, ranked exactly as on the PCP-AWV list but not limited to the top {max}. Phone Number is the Export phone number and is blank when the Export has none for the patient. Last ACV is the most recent of the Export Last ACV Date and the Risk Population Outreach Last Acv.'
+  OutreachCriteria='Outreach list: every ACOR patient at the site with an annual wellness visit due (most recent ACV in the Export or Risk Population Outreach more than 365 days before the list was generated, and no future ACV booked), from every selected provider, most urgent first, ranked exactly as on the PCP-AWV list but not limited to the top {max}. Phone Number is the Export phone number and is blank when the Export has none for the patient. Last ACV is the most recent of the Export Last ACV Date and the Risk Population Outreach Last Acv.'
   Matches='AWV Due - PCP (ACOR)'}
 }
 function Get-AwvKind($Run){$k=[string](Get-P $Run 'awvKind' 'np');if(!$script:AwvKinds.Contains($k)){$k='np'};return $script:AwvKinds[$k]}
@@ -2846,11 +2877,6 @@ $script:NpAwvColumns=@('#','First Name','Last Name','DOB','Urgency','Epic PCP','
 $script:NpAwvExtraColumns=@('MRN','Member ID','Phone','Payer')
 $script:AwvOutreachColumns=@('MRN','First Name','Last Name','DOB','Phone Number','Last ACV','Urgency','Epic PCP','Payor PCP','Also Needs','Last Visit','Next Appt','Why Ranked Here')
 $script:AwvOutreachExtraColumns=@('Member ID','Payer')
-function Test-AwvAcvDue($K,$LastAcv,[DateTime]$AsOf){
- # A patient is due when the most recent ACV on file is more than 365 days old (ACOR) or before January 1 of this year (non-ACOR), on the day the list is generated.
- if($null -eq $LastAcv){return $true};$d=([DateTime]$LastAcv).Date
- if($K.acor){return (($AsOf.Date-$d).TotalDays -gt 365)};return ($d -lt (New-Object DateTime($AsOf.Year,1,1)))
-}
 function Get-AwvLayout($K,[string]$Layout){if($Layout -eq 'outreach'){if(!$K.outreach){throw ($K.title+' has no outreach list.')};return 'outreach'};return 'list'}
 function Get-AwvLabel($K,[string]$Layout){return ([string]$K.title+$(if($Layout -eq 'outreach'){' Outreach List'}else{''}))}
 function Format-PhoneText([string]$Text){
@@ -2868,22 +2894,12 @@ $script:NpAwvText=[ordered]@{
 }
 function Get-AwvPath($K,[string]$Id){if($Id -notmatch '^[a-f0-9]{32}$'){throw ('Invalid '+$K.title+' list ID.')};return (Join-Path $script:Paths.State ($K.file+'-'+$Id+'.json'))}
 function Get-AwvRuns($K){return @(Get-ChildItem $script:Paths.State -Filter ($K.file+'-*.json') -File -ErrorAction SilentlyContinue|ForEach-Object{Json $_.FullName}|Where-Object{$null -ne $_}|Sort-Object -Property @{Expression={ConvertTo-IsoText (Get-P $_ 'requestedUtc' '')}} -Descending)}
-function Get-NpAwvRpoLookup([string[]]$MemberIds){
- # Epic PCP and Next ACV per member from the whole Risk Population Outreach source (a provider's own read only covers patients whose Epic PCP is that provider).
- $out=@{};$set=@{};foreach($id in @($MemberIds|Where-Object{$_})){$set[[string]$id]=$true};if($set.Count -eq 0){return $out}
- $names=@{};foreach($pr in @(Get-ProviderProfiles)){$alias=([string](Get-Alias (Get-P $pr 'aliases' $null) 'RiskPopulationOutreach')).Trim();if($alias -and !$names.ContainsKey($alias)){$names[$alias]=[string](Get-P $pr 'displayName' $alias)}}
- foreach($r in @(Get-SourceRows 'RiskPopulationOutreach' @('Member ID','Epic Pcp','Next Acv','Last Acv') 'Member ID' '' $set)){
-  $id=([string]$r.'Member ID').Trim();if(!$id -or $out.ContainsKey($id)){continue};$epic=([string]$r.'Epic Pcp').Trim()
-  $out[$id]=@{epic=$(if($names.ContainsKey($epic)){$names[$epic]}else{$epic});nextAcv=(ConvertTo-DateValue $r.'Next Acv');lastAcv=(ConvertTo-DateValue $r.'Last Acv')}
- }
- return $out
-}
 function New-AwvCandidate($K,$p,[string]$Npi,[string]$Display){
  # One scored patient as stored in the run: identity for flags, sort keys, and the list cells computed exactly as on the provider's AWV list.
  $r=$script:OutreachRules;$score=[int]$p.Urgency;$tier=$(if($score -ge $r.UrgentScore){'Urgent'}elseif($score -ge $r.SoonScore){'Soon'}else{'Routine'})
  $row=@{p=$p;score=$score;tier=$tier;items=$p.Items;boost=@($p.Needs);k=@([string]$K.item)};$last=Get-PatientLastVisit $p
  $cells=[ordered]@{};foreach($h in @('Urgency','Also Needs','Last Visit','Next Appt','Why Ranked Here')){$cells[$h]=[string](Get-OutreachCell $h $row)}
- return [ordered]@{memberId=[string]$p.MemberID;first=[string]$p.First;last=[string]$p.Last;dob=[string]$p.DOB;mrn=[string](Get-P $p 'MRN' '');phone=(Format-PhoneText ([string](Get-P $p 'Phone' '')));lastAcv='';payer=[string](Get-P $p 'Payer' '');npis=@($Npi);payorPcp=$Display;epicPcp='';score=$score;lastVisitKey=$(if($last){([DateTime]$last).ToString('yyyy-MM-dd')}else{''});cells=$cells;snapshot=(New-FlagSnapshot $p)}
+ return [ordered]@{memberId=[string]$p.MemberID;first=[string]$p.First;last=[string]$p.Last;dob=[string]$p.DOB;mrn=[string](Get-P $p 'MRN' '');phone=(Format-PhoneText ([string](Get-P $p 'Phone' '')));lastAcv=(ConvertTo-DateText (Get-P $p 'LastAcv' $null));payer=[string](Get-P $p 'Payer' '');npis=@($Npi);payorPcp=$Display;epicPcp=[string](Get-P $p 'EpicPcp' '');score=$score;lastVisitKey=$(if($last){([DateTime]$last).ToString('yyyy-MM-dd')}else{''});cells=$cells;snapshot=(New-FlagSnapshot $p)}
 }
 function Get-NpAwvFlagIndex([object[]]$Npis){
  # Every active flag on the providers behind a list, by member ID and by last name + first name + DOB.
@@ -3073,19 +3089,21 @@ function Invoke-AwvRun($K,[string]$Id){
   Set-P $run 'workerPid' $PID;Set-P $run 'startedUtc' ([DateTime]::UtcNow.ToString('o'));Set-RunProgress $run $path 3 'Reading provider profiles'
   $chosen=@(Get-ChosenProfiles @($run.npis))
   $src=Read-GroupSources $chosen $run $path 5 60;$groups=$src.groups
-  # Export Last ACV Date per member (column AD), for the outreach list's Last ACV with Risk Population Outreach Last Acv.
-  $exportAcv=@{};if($groups.ContainsKey('Export')){foreach($lst in @($groups['Export'].Values)){foreach($er in $lst){$mid=([string]$er.MemberID).Trim();$ad=ConvertTo-DateValue $er.'Last ACV Date';if($mid -and $ad -and (!$exportAcv.ContainsKey($mid) -or $ad -gt $exportAcv[$mid])){$exportAcv[$mid]=$ad}}}}
+  # Epic PCP is shown by the provider's display name when an RPO alias belongs to a saved profile.
+  $epicNames=@{};foreach($pr in @(Get-ProviderProfiles)){$alias=([string](Get-Alias (Get-P $pr 'aliases' $null) 'RiskPopulationOutreach')).Trim();if($alias -and !$epicNames.ContainsKey($alias)){$epicNames[$alias]=[string](Get-P $pr 'displayName' $alias)}}
   $asOf=Get-Date;$sites=[ordered]@{};$i=0
   foreach($p in $chosen){
    $i++;$npi=[string](Get-P $p 'npi' '');$display=[string](Get-P $p 'displayName' $npi);$loc=([string](Get-P $p 'location' '')).Trim();$site=$(if($loc){$loc}else{'(No location)'})
    Set-RunProgress $run $path ([int](65+20*($i-1)/$chosen.Count)) ('Scoring patients for '+$display+' ('+$i+' of '+$chosen.Count+')')
-   if(!$sites.Contains($site)){$sites[$site]=@{providers=New-Object Collections.Generic.List[object];byId=@{}}}
+   if(!$sites.Contains($site)){$sites[$site]=@{providers=New-Object Collections.Generic.List[object];byId=@{};held=@{}}}
    $prow=[ordered]@{npi=$npi;displayName=$display;due=0;note='';error=''}
    try{
     $pf=Get-ProviderFactsFromGroups $groups $p;$prow.note=$pf.note
     $prev=$script:AsOf;$script:AsOf=ConvertTo-DateValue (Get-Field $pf.facts 'asOf' $null)
     try{
-     foreach($pt in @(Get-Field $pf.facts 'patients' @()|Where-Object{$null -ne $_ -and $_.ACOR -eq $K.acor -and $_.ACVDue})){
+     foreach($pt in @(Get-Field $pf.facts 'patients' @()|Where-Object{$null -ne $_ -and $_.ACOR -eq $K.acor})){
+      # ACVDue is the report's own flag (Test-AcvDue), so this list and the provider's dashboard always agree.
+      if(!$pt.ACVDue){$hold=[string](Get-P $pt 'AcvHold' '');if($hold){$sites[$site].held[[string]$pt.MemberID]=$hold};continue}
       Set-P $pt 'Items' (Get-PatientItems $pt);Set-P $pt 'Needs' @(Get-PatientNeeds $pt);Set-P $pt 'Urgency' (Get-PatientUrgency $pt);$prow.due++
       $c=New-AwvCandidate $K $pt $npi $display;$by=$sites[$site].byId
       # The same member under two providers at one site is listed once, under both payor PCPs, so a flag reaches both lists.
@@ -3095,18 +3113,14 @@ function Invoke-AwvRun($K,[string]$Id){
    }catch{$prow.error=$_.Exception.Message;Log ($K.log+'_PROVIDER') 'FAILED' ($npi+' '+$_.Exception.Message)}
    $sites[$site].providers.Add($prow)
   }
-  Set-RunProgress $run $path 87 'Looking up Epic PCP and booked ACVs in Risk Population Outreach'
-  $ids=@();foreach($sk in @($sites.Keys)){$ids+=@($sites[$sk].byId.Keys)};$rpo=@{};$epicError=''
-  try{$rpo=Get-NpAwvRpoLookup $ids}catch{$epicError=$_.Exception.Message;Log ($K.log+'_RPO') 'WARN' $epicError}
+  Set-RunProgress $run $path 87 'Ranking each site'
+  $epicError=[string](Get-Field $src 'rpoError' '')
   $out=@();$index=Get-NpAwvFlagIndex @($chosen|ForEach-Object{[string](Get-P $_ 'npi' '')})
   foreach($sk in @($sites.Keys|Sort-Object -Property $script:GroupSort)){
    $booked=0;$recent=0;$list=@()
-   foreach($c in @($sites[$sk].byId.Values)){$x=$(if($rpo.ContainsKey($c.memberId)){$rpo[$c.memberId]}else{$null})
-    $acvs=@();if($exportAcv.ContainsKey($c.memberId)){$acvs+=$exportAcv[$c.memberId]};if($x -and $x.lastAcv){$acvs+=$x.lastAcv};$latest=$null;if($acvs.Count -gt 0){$latest=($acvs|Sort-Object -Descending|Select-Object -First 1);$c.lastAcv=ConvertTo-DateText $latest}
-    if($x){$c.epicPcp=[string]$x.epic;if($x.nextAcv -and $x.nextAcv.Date -ge $asOf.Date){$booked++;continue}}
-    # The Export decided "due" from its own Last ACV Date; a more recent ACV in Risk Population Outreach means the patient is not due yet.
-    if(!(Test-AwvAcvDue $K $latest $asOf)){$recent++;continue}
-    $list+=$c}
+   foreach($c in @($sites[$sk].byId.Values)){if($epicNames.ContainsKey([string]$c.epicPcp)){$c.epicPcp=$epicNames[[string]$c.epicPcp]};$list+=$c}
+   # Left out at this site (once per member, and not when the member is due under another provider here): a future ACV booked, or a more recent ACV in RPO.
+   foreach($mid in @($sites[$sk].held.Keys)){if($sites[$sk].byId.ContainsKey($mid)){continue};if($sites[$sk].held[$mid] -eq 'booked'){$booked++}else{$recent++}}
    $list=@($list|Sort-Object -Property @{Expression={-[int]$_.score}},@{Expression={[string]$_.lastVisitKey}},@{Expression={[string]$_.last}},@{Expression={[string]$_.first}})
    $s=[ordered]@{site=$sk;providers=@($sites[$sk].providers.ToArray()|Sort-Object -Property @{Expression={[string]$_.displayName}});candidates=$list;booked=$booked;recentAcv=$recent;listed=@()}
    $s.listed=@((Get-NpAwvSiteView $s $index).rows|ForEach-Object{[string]$_.c.memberId})
