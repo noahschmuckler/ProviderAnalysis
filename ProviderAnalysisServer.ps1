@@ -10,12 +10,13 @@
 # Draft 5.13: one AWV rule everywhere (reports, dashboards, Overview, New Patients, NP-AWV, PCP-AWV): Test-AcvDue on the most recent ACV in the Export or
 # Risk Population Outreach (read by member ID, whatever the Epic PCP), with no future ACV booked. NP-AWV gets the Outreach List too.
 # Draft 5.14: PCP-AWV adds a Gap Outreach List: the Outreach List limited to patients with GSD, CBP, MAD, EED or KED open.
+# Draft 5.15: Care Gaps tab (/care-gaps): the same per-site List and Outreach List for patients with GSD, EED, KED, MAD, COLO or BCS open, each weighted 3.
 # Adds provider indexes, guided cross-source mapping, fuzzy suggestions, NPI profiles, prepared job tracking, ranked outreach lists,
 # a flag mode (/flag?jobId=...) that excludes flagged patients from every list and panel on every later report for that provider,
 # and a Communication tab (/communication) that emails every provider in a risk pool a fresh report PDF via Outlook drafts.
 # The POC Coding tab (/poc-coding) analyzes point-of-care billing and coding for one department of a billing export and saves each run as an HTML report.
 [CmdletBinding()]
-param([int]$PreferredPort=8765,[switch]$NoBrowser,[switch]$SkipModuleInstallPrompt,[string]$RunJobId='',[string]$RunOverviewId='',[string]$RunNewListId='',[string]$RunPocId='',[string]$RunNpAwvId='',[string]$RunPcpAwvId='')
+param([int]$PreferredPort=8765,[switch]$NoBrowser,[switch]$SkipModuleInstallPrompt,[string]$RunJobId='',[string]$RunOverviewId='',[string]$RunNewListId='',[string]$RunPocId='',[string]$RunNpAwvId='',[string]$RunPcpAwvId='',[string]$RunCareGapsId='')
 Set-StrictMode -Version 2.0
 $ErrorActionPreference='Stop'
 $script:Root=Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -268,7 +269,7 @@ function Request($Context){
   if($method -eq 'GET' -and $path -eq '/new-patients'){Send $Context 200 'text/html; charset=utf-8' (NewPatientsPage);return};if($method -eq 'GET' -and $path -eq '/api/new-patients'){Send $Context 200 'application/json' ((Get-NewListPageModel)|ConvertTo-Json -Depth 8);return}
   if($method -eq 'POST' -and $path -eq '/api/new-patients'){$result=New-NewListRun (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $path -eq '/api/new-patients-run'){Send $Context 200 'application/json' ((Get-NewListModel ([string]$Context.Request.QueryString['id']))|ConvertTo-Json -Depth 8);return}
   if($method -eq 'GET' -and $path -eq '/new-patients.file'){Send-NewListFile $Context ([string]$Context.Request.QueryString['id']) ([string]$Context.Request.QueryString['n']);return};
-  if($path -match '^(/api)?/(np|pcp)-awv(-run|-flag|/view|\.file)?$'){$awvK=$script:AwvKinds[[string]$Matches[2]];$awvApi=[bool]$Matches[1];$awvSub=[string]$Matches[3];$q=$Context.Request.QueryString
+  if($path -match '^(/api)?/(np-awv|pcp-awv|care-gaps)(-run|-flag|/view|\.file)?$'){$awvK=Get-AwvKindByRoute ('/'+[string]$Matches[2]);$awvApi=[bool]$Matches[1];$awvSub=[string]$Matches[3];$q=$Context.Request.QueryString
    if($method -eq 'GET' -and !$awvApi -and !$awvSub){Send $Context 200 'text/html; charset=utf-8' (AwvPage $awvK);return};if($method -eq 'GET' -and $awvApi -and !$awvSub){Send $Context 200 'application/json' ((Get-AwvPageModel $awvK)|ConvertTo-Json -Depth 8);return}
    if($method -eq 'POST' -and $awvApi -and !$awvSub){$result=New-AwvRun $awvK (Read-BodyJson $Context);Send $Context 200 'application/json' ($result|ConvertTo-Json -Depth 8);return};if($method -eq 'GET' -and $awvApi -and $awvSub -eq '-run'){Send $Context 200 'application/json' ((Get-AwvModel $awvK ([string]$q['id']))|ConvertTo-Json -Depth 8);return}
    if($method -eq 'GET' -and !$awvApi -and $awvSub -eq '/view'){Send $Context 200 'text/html; charset=utf-8' (ConvertTo-AwvDocument (Get-CompletedAwv $awvK ([string]$q['id'])) ([string]$q['site']) -Interactive -Layout ([string]$q['layout']));return};if($method -eq 'GET' -and !$awvApi -and $awvSub -eq '.file'){Send-AwvFile $Context $awvK ([string]$q['id']) ([string]$q['site']) ([string]$q['format']) ([string]$q['layout']);return}
@@ -440,7 +441,7 @@ function New-PreparedJob($Body){if($null -eq $Body.aliases){throw 'Confirmed ali
 function Get-Jobs{return @(Get-ChildItem $script:Paths.State -Filter 'job-*.json' -File -ErrorAction SilentlyContinue|ForEach-Object{Json $_.FullName}|Sort-Object queuedUtc -Descending)}
 $script:TabCss='.tabs{display:flex;gap:4px;background:#17365d;padding:0 22px}.tabs a{color:#cfe0f5;text-decoration:none;padding:10px 18px;border-radius:8px 8px 0 0;font-weight:600}.tabs a:hover{background:#274b7a;color:#fff}.tabs a.active{background:#f4f7fb;color:#17365d}'
 function Get-NavHtml([string]$Active){
- $tabs=@(@('sources','/','Sources'),@('wizard','/providers','Provider Wizard'),@('index','/provider-index','Provider Index'),@('communication','/communication','Communication'),@('overview','/overview','Overview'),@('newpatients','/new-patients','New Patients'),@('npawv','/np-awv','NP-AWV'),@('pcpawv','/pcp-awv','PCP-AWV'),@('poc','/poc-coding','POC Coding'))
+ $tabs=@(@('sources','/','Sources'),@('wizard','/providers','Provider Wizard'),@('index','/provider-index','Provider Index'),@('communication','/communication','Communication'),@('overview','/overview','Overview'),@('newpatients','/new-patients','New Patients'),@('npawv','/np-awv','NP-AWV'),@('pcpawv','/pcp-awv','PCP-AWV'),@('caregaps','/care-gaps','Care Gaps'),@('poc','/poc-coding','POC Coding'))
  $links=foreach($t in $tabs){'<a href="'+$t[1]+'"'+$(if($t[0] -eq $Active){' class="active"'}else{''})+'>'+$t[2]+'</a>'}
  return '<nav class="tabs">'+($links -join '')+'</nav>'
 }
@@ -2861,19 +2862,56 @@ el('build').onclick=async()=>{if(el('build').disabled||busy())return;el('build')
 # Draft 5.10: the same code serves PCP-AWV (ACOR patients, for the PCPs) through $script:AwvKinds; runs are state\<file>-<id>.json and keep the npAwvId field name.
 $script:NpAwvPerSite=30;$script:NpAwvKeep=30;$script:NpAwvInline=$false
 $script:AwvKinds=[ordered]@{
- np=[ordered]@{kind='np';title='NP-AWV';route='/np-awv';api='/api/np-awv';file='npawv';log='NPAWV';tab='npawv';worker='RunNpAwvId';acor=$false;item='awv-np';outreach=$true;gaps=$false
+ np=[ordered]@{kind='np';title='NP-AWV';route='/np-awv';api='/api/np-awv';file='npawv';log='NPAWV';tab='npawv';worker='RunNpAwvId';acor=$false;item='awv-np';outreach=$true;gaps=$false;awv=$true
   Subtitle='one list per site for the travelling NP: non-ACOR patients with an annual wellness visit due, ranked by urgency across every provider at the site'
   Criteria='Non-ACOR patients with an annual wellness visit due (most recent ACV in the Export or Risk Population Outreach in the prior calendar year or earlier, and no future ACV booked), from every selected provider at the site, most urgent first. Urgency is the score on each provider''s own list: 1 for the AWV, plus open measures, open ICDs, and the visit, appointment, A1c and risk factors shown under Why Ranked Here; ties go to the oldest last visit. Each site lists its {max} most urgent.'
   None='No non-ACOR patient at this site has an annual wellness visit due.'
   OutreachCriteria='Outreach list: every non-ACOR patient at the site with an annual wellness visit due (most recent ACV in the Export or Risk Population Outreach in the prior calendar year or earlier, and no future ACV booked), from every selected provider, most urgent first, ranked exactly as on the NP-AWV list but not limited to the top {max}. Phone Number is the Export phone number and is blank when the Export has none for the patient. Last ACV is the most recent of the Export Last ACV Date and the Risk Population Outreach Last Acv.'
   Matches='AWV Due - NP (non-ACOR)'}
- pcp=[ordered]@{kind='pcp';title='PCP-AWV';route='/pcp-awv';api='/api/pcp-awv';file='pcpawv';log='PCPAWV';tab='pcpawv';worker='RunPcpAwvId';acor=$true;item='awv-pcp';outreach=$true;gaps=$true
+ pcp=[ordered]@{kind='pcp';title='PCP-AWV';route='/pcp-awv';api='/api/pcp-awv';file='pcpawv';log='PCPAWV';tab='pcpawv';worker='RunPcpAwvId';acor=$true;item='awv-pcp';outreach=$true;gaps=$true;awv=$true
   Subtitle='one list per site for the PCPs: ACOR patients with an annual wellness visit due, ranked by urgency across every provider at the site'
   Criteria='ACOR patients with an annual wellness visit due (most recent ACV in the Export or Risk Population Outreach more than 365 days before the list was generated, and no future ACV booked), from every selected provider at the site, most urgent first. Urgency is the score on each provider''s own list: 1 for the AWV, plus open measures, open ICDs, and the visit, appointment, A1c and risk factors shown under Why Ranked Here; ties go to the oldest last visit. Each site lists its {max} most urgent.'
   None='No ACOR patient at this site has an annual wellness visit due.'
   OutreachCriteria='Outreach list: every ACOR patient at the site with an annual wellness visit due (most recent ACV in the Export or Risk Population Outreach more than 365 days before the list was generated, and no future ACV booked), from every selected provider, most urgent first, ranked exactly as on the PCP-AWV list but not limited to the top {max}. Phone Number is the Export phone number and is blank when the Export has none for the patient. Last ACV is the most recent of the Export Last ACV Date and the Risk Population Outreach Last Acv.'
   GapCriteria='Gap Outreach List: the PCP-AWV Outreach List limited to patients who also have one or more of GSD, CBP, MAD, EED or KED open (the measures shown under Also Needs; KED counts only while an eGFR or uACR is still missing). Urgency, ranking, columns and flags are exactly as on the Outreach List, and every such patient is listed (not limited to the top {max}).'
   Matches='AWV Due - PCP (ACOR)'}
+ cg=[ordered]@{kind='cg';title='Care Gaps';route='/care-gaps';api='/api/care-gaps';file='caregaps';log='CAREGAPS';tab='caregaps';worker='RunCareGapsId';acor=$null;item='';outreach=$true;gaps=$false;awv=$false;UrgentScore=9;SoonScore=6
+  Subtitle='one list per site of patients with open care gaps (GSD, EED, KED, MAD, COLO, BCS), ranked by urgency across every provider at the site'
+  Criteria='Patients (ACOR and non-ACOR) with one or more of GSD, EED, KED, MAD, COLO or BCS open, from every selected provider at the site, most urgent first. Urgency: 3 for each of those care gaps (KED on a diabetic only while an eGFR or uACR is missing), 1 for an annual wellness visit due, plus 1 per other open measure (diabetes measures weighted as on the provider lists), 1 for open ICDs, and the visit, appointment, A1c and risk factors shown under Why Ranked Here. Urgent = 9 or more, Soon = 6 or more; ties go to the oldest last visit. Each site lists its {max} most urgent.'
+  None='No patient at this site has GSD, EED, KED, MAD, COLO or BCS open.'
+  OutreachCriteria='Outreach list: every patient at the site with one or more of GSD, EED, KED, MAD, COLO or BCS open, from every selected provider, ranked exactly as on the Care Gaps list but not limited to the top {max}. Phone Number is the Export phone number and is blank when the Export has none for the patient. Last ACV is the most recent of the Export Last ACV Date and the Risk Population Outreach Last Acv.'
+  PageColumns='Care Gaps lists the open GSD, EED, KED, MAD, COLO and BCS; AWV Due marks an annual wellness visit due (it adds urgency but does not put a patient on the list); Also Needs lists the other open items, and Epic PCP and Payor PCP are shown as on NP-AWV and PCP-AWV.'
+  Matches=''}
+}
+function Get-AwvKindByRoute([string]$Route){foreach($k in @($script:AwvKinds.Values)){if([string]$k.route -eq $Route){return $k}};throw ('Unknown list '+$Route)}
+# --- Draft 5.15: Care Gaps - the six care gaps each count 3 toward urgency; an AWV due counts 1; everything else counts as on the provider lists ---
+$script:CareGapMeasures=@('GSD','EED','KED','MAD','COLO','BCS');$script:CareGapWeight=3
+$script:CareGapColumns=@('#','First Name','Last Name','DOB','Urgency','Care Gaps','AWV Due','Epic PCP','Payor PCP','Also Needs','Last Visit','Next Appt','Why Ranked Here')
+$script:CareGapOutreachColumns=@('MRN','First Name','Last Name','DOB','Phone Number','Last ACV','Urgency','Care Gaps','AWV Due','Epic PCP','Payor PCP','Also Needs','Last Visit','Next Appt','Why Ranked Here')
+function Get-CareGapList($p){
+ # The care gaps open on the patient; KED on a diabetic counts only while an eGFR or uACR is missing, as on the provider lists.
+ $open=@(([string]$p.OpenHedis) -split ',\s*'|Where-Object{$_});$g=@()
+ foreach($m in $script:CareGapMeasures){
+  if($open -notcontains $m){continue}
+  if($m -eq 'KED' -and $p.Diabetic){$labs=@();if($p.EgfrNeeded){$labs+='eGFR'};if($p.UacrNeeded){$labs+='uACR'};if($labs.Count -eq 0){continue};$g+=('KED ('+($labs -join ', ')+')');continue}
+  $g+=$m
+ }
+ return $g
+}
+function Set-CareGapScore($p){
+ # Items keep everything but the six care gaps and the AWV (so Also Needs lists the rest); Urgency adds 3 per care gap and 1 for an AWV due. Returns the care gap count.
+ $gaps=@(Get-CareGapList $p)
+ $q=$p.PSObject.Copy();$q.OpenHedis=((@(([string]$p.OpenHedis) -split ',\s*'|Where-Object{$_ -and $script:CareGapMeasures -notcontains $_})) -join ', ');$q.ACVDue=$false
+ $items=Get-PatientItems $q;$needs=@(Get-PatientNeeds $p)
+ $score=$script:CareGapWeight*$gaps.Count+$(if($p.ACVDue){1}else{0});foreach($k in @($items.Keys)){$score+=[int]$items[$k].weight};foreach($n in $needs){$score+=[int]$n.weight}
+ Set-P $p 'Items' $items;Set-P $p 'Needs' $needs;Set-P $p 'Urgency' $score;Set-P $p 'CareGaps' ($gaps -join ', ')
+ return $gaps.Count
+}
+function Get-AwvColumns($K,[string]$Layout,[switch]$Extra){
+ $full=(Test-AwvFullLayout $Layout)
+ if($K.awv){$c=$(if($full){$script:AwvOutreachColumns}else{$script:NpAwvColumns})}else{$c=$(if($full){$script:CareGapOutreachColumns}else{$script:CareGapColumns})}
+ if($Extra){$c=@($c)+@($(if($full){$script:AwvOutreachExtraColumns}else{$script:NpAwvExtraColumns}))}
+ return @($c)
 }
 function Get-AwvKind($Run){$k=[string](Get-P $Run 'awvKind' 'np');if(!$script:AwvKinds.Contains($k)){$k='np'};return $script:AwvKinds[$k]}
 $script:NpAwvColumns=@('#','First Name','Last Name','DOB','Urgency','Epic PCP','Payor PCP','Also Needs','Last Visit','Next Appt','Why Ranked Here')
@@ -2913,9 +2951,10 @@ function Get-AwvPath($K,[string]$Id){if($Id -notmatch '^[a-f0-9]{32}$'){throw ('
 function Get-AwvRuns($K){return @(Get-ChildItem $script:Paths.State -Filter ($K.file+'-*.json') -File -ErrorAction SilentlyContinue|ForEach-Object{Json $_.FullName}|Where-Object{$null -ne $_}|Sort-Object -Property @{Expression={ConvertTo-IsoText (Get-P $_ 'requestedUtc' '')}} -Descending)}
 function New-AwvCandidate($K,$p,[string]$Npi,[string]$Display){
  # One scored patient as stored in the run: identity for flags, sort keys, and the list cells computed exactly as on the provider's AWV list.
- $r=$script:OutreachRules;$score=[int]$p.Urgency;$tier=$(if($score -ge $r.UrgentScore){'Urgent'}elseif($score -ge $r.SoonScore){'Soon'}else{'Routine'})
+ $r=$script:OutreachRules;$score=[int]$p.Urgency;$urgent=[int](Get-Field $K 'UrgentScore' $r.UrgentScore);$soon=[int](Get-Field $K 'SoonScore' $r.SoonScore);$tier=$(if($score -ge $urgent){'Urgent'}elseif($score -ge $soon){'Soon'}else{'Routine'})
  $row=@{p=$p;score=$score;tier=$tier;items=$p.Items;boost=@($p.Needs);k=@([string]$K.item)};$last=Get-PatientLastVisit $p
  $cells=[ordered]@{};foreach($h in @('Urgency','Also Needs','Last Visit','Next Appt','Why Ranked Here')){$cells[$h]=[string](Get-OutreachCell $h $row)}
+ if(!$K.awv){$cells['Care Gaps']=[string](Get-P $p 'CareGaps' '');$cells['AWV Due']=$(if($p.ACVDue){$(if($p.ACOR -eq $true){'PCP (ACOR)'}else{'NP (non-ACOR)'})}else{''})}
  return [ordered]@{memberId=[string]$p.MemberID;first=[string]$p.First;last=[string]$p.Last;dob=[string]$p.DOB;mrn=[string](Get-P $p 'MRN' '');phone=(Format-PhoneText ([string](Get-P $p 'Phone' '')));lastAcv=(ConvertTo-DateText (Get-P $p 'LastAcv' $null));payer=[string](Get-P $p 'Payer' '');npis=@($Npi);payorPcp=$Display;epicPcp=[string](Get-P $p 'EpicPcp' '');gaps=(Get-AwvGapText $p);score=$score;lastVisitKey=$(if($last){([DateTime]$last).ToString('yyyy-MM-dd')}else{''});cells=$cells;snapshot=(New-FlagSnapshot $p)}
 }
 function Get-NpAwvFlagIndex([object[]]$Npis){
@@ -2995,7 +3034,7 @@ function ConvertTo-NpAwvTableHtml([string[]]$Columns,[object[]]$Rows,[bool]$Inte
  foreach($r in @($Rows)){
   $c=$r.c;$attr=$(if($r.movedUp){' class="moved"'}else{''})
   if($Interactive){$attr+=' data-member="'+(ConvertTo-HtmlEncoded (Get-Field $c 'memberId' ''))+'" data-name="'+(ConvertTo-HtmlEncoded (Get-PatientDisplayName ([pscustomobject]@{Last=[string](Get-Field $c 'last' '');First=[string](Get-Field $c 'first' '')})))+'"'}
-  $h+='<tr'+$attr+'>'+(($Columns|ForEach-Object{$v=Get-NpAwvCell $r $_;'<td'+$(if($_ -eq '#'){' class="i"'}elseif($_ -in @('Also Needs','Why Ranked Here')){' class="wrap"'}else{''})+'>'+(ConvertTo-HtmlEncoded $v)+'</td>'}) -join '')+'</tr>'
+  $h+='<tr'+$attr+'>'+(($Columns|ForEach-Object{$v=Get-NpAwvCell $r $_;'<td'+$(if($_ -eq '#'){' class="i"'}elseif($_ -in @('Also Needs','Why Ranked Here','Care Gaps')){' class="wrap"'}else{''})+'>'+(ConvertTo-HtmlEncoded $v)+'</td>'}) -join '')+'</tr>'
  }
  return $h+'</tbody></table>'
 }
@@ -3012,7 +3051,7 @@ function ConvertTo-AwvDocument($Run,[string]$SiteName='',[switch]$Interactive,[s
  $flagMap=@{};$first=$true
  foreach($v in $views){
   $body+='<section class="site'+$(if(!$first){' brk'}else{''})+'"><h2>'+(ConvertTo-HtmlEncoded $v.site)+'</h2><p class="sum">'+(ConvertTo-HtmlEncoded (Get-NpAwvSummaryText $K $v $Layout))+'</p><p class="muted">Providers (patients due): '+(ConvertTo-HtmlEncoded (Get-NpAwvProvidersText $v))+'</p>';$first=$false
-  if(@($v.rows).Count -gt 0){$body+=ConvertTo-NpAwvTableHtml $(if(Test-AwvFullLayout $Layout){$script:AwvOutreachColumns}else{$script:NpAwvColumns}) @($v.rows) ([bool]$Interactive)}
+  if(@($v.rows).Count -gt 0){$body+=ConvertTo-NpAwvTableHtml (Get-AwvColumns $K $Layout) @($v.rows) ([bool]$Interactive)}
   $fr=@(Get-NpAwvFlaggedRows $v)
   if($fr.Count -gt 0){
    $body+='<div class="flagged"><h3>Flagged exceptions ('+$fr.Count+')</h3><p class="muted">Would have been on this list; left out by a flag saved on the provider profile.</p><table class="pl"><thead><tr><th>Patient</th><th>DOB</th><th>Payor PCP</th><th>Flag</th><th>Note</th><th>Saved</th></tr></thead><tbody>'
@@ -3052,11 +3091,11 @@ function New-AwvWorkbook($Run,[string]$SiteName='',[string]$Layout='list'){
   $lines=@(((Get-AwvLabel $K $Layout)+' - '+$(if($SiteName){$SiteName}else{'All sites'})),('Generated '+$(if($asOf){$asOf.ToString('g')}else{''})+'; flags applied as of '+(Get-Date).ToString('g')+'.'),(Get-NpAwvSourcesText $Run),(Get-AwvCriteria $K $Layout).Replace('{max}',[string]$script:NpAwvPerSite),$script:NpAwvText.Columns,$script:NpAwvText.Flags)
   if((Test-AwvFullLayout $Layout) -and !(Get-P $Run 'lastAcvRead' $false)){$lines+=$script:NpAwvText.OldRun}
   for($i=0;$i -lt $lines.Count;$i++){$ws.Cells[($i+1),1].Value=$lines[$i]};$ws.Cells[1,1].Style.Font.Bold=$true;$ws.Cells[1,1].Style.Font.Size=14
-  $r=$lines.Count+2;$heads=@('Site','Listed','Eligible','Flagged','Already booked','Recent ACV (RPO)','Providers (patients due)');if(Test-AwvFullLayout $Layout){$heads+='Phone on file'};for($c=0;$c -lt $heads.Count;$c++){$ws.Cells[$r,($c+1)].Value=$heads[$c]};$hr=$r
-  foreach($v in $views){$r++;Set-RollupCell $ws $r 1 $v.site;Set-RollupCell $ws $r 2 ([int]@($v.rows).Count);Set-RollupCell $ws $r 3 ([int]$v.eligible);Set-RollupCell $ws $r 4 ([int]$v.flaggedAll);Set-RollupCell $ws $r 5 ([int]$v.booked);Set-RollupCell $ws $r 6 ([int]$v.recentAcv);Set-RollupCell $ws $r 7 (Get-NpAwvProvidersText $v);if(Test-AwvFullLayout $Layout){Set-RollupCell $ws $r 8 ([int](Get-AwvPhoneCount $v))}}
+  $r=$lines.Count+2;$heads=@('Site','Listed','Eligible','Flagged');if($K.awv){$heads+=@('Already booked','Recent ACV (RPO)')};$heads+=$(if($K.awv){'Providers (patients due)'}else{'Providers (patients listed)'});$pc=$heads.Count;if(Test-AwvFullLayout $Layout){$heads+='Phone on file'};for($c=0;$c -lt $heads.Count;$c++){$ws.Cells[$r,($c+1)].Value=$heads[$c]};$hr=$r
+  foreach($v in $views){$r++;$vals=@($v.site,[int]@($v.rows).Count,[int]$v.eligible,[int]$v.flaggedAll);if($K.awv){$vals+=@([int]$v.booked,[int]$v.recentAcv)};$vals+=(Get-NpAwvProvidersText $v);if(Test-AwvFullLayout $Layout){$vals+=[int](Get-AwvPhoneCount $v)};for($c=0;$c -lt $vals.Count;$c++){Set-RollupCell $ws $r ($c+1) $vals[$c]}}
   $h=$ws.Cells[$hr,1,$hr,$heads.Count];$h.Style.Font.Bold=$true;$h.Style.Fill.PatternType=[OfficeOpenXml.Style.ExcelFillStyle]::Solid;$h.Style.Fill.BackgroundColor.SetColor([Drawing.Color]::FromArgb(234,241,248))
-  $ws.Column(1).Width=28;for($c=2;$c -le 6;$c++){$ws.Column($c).Width=12};$ws.Column(7).Width=90;if(Test-AwvFullLayout $Layout){$ws.Column(8).Width=14}
-  $cols=$(if(Test-AwvFullLayout $Layout){@($script:AwvOutreachColumns+$script:AwvOutreachExtraColumns)}else{@($script:NpAwvColumns+$script:NpAwvExtraColumns)});$flagRows=@()
+  $ws.Column(1).Width=28;for($c=2;$c -lt $pc;$c++){$ws.Column($c).Width=12};$ws.Column($pc).Width=90;if(Test-AwvFullLayout $Layout){$ws.Column($pc+1).Width=14}
+  $cols=@(Get-AwvColumns $K $Layout -Extra);$flagRows=@()
   foreach($v in $views){
    $ws=$pkg.Workbook.Worksheets.Add((Get-RollupSheetName $v.site $used))
    for($c=0;$c -lt $cols.Count;$c++){$ws.Cells[1,($c+1)].Value=$cols[$c]};$r=1
@@ -3119,10 +3158,14 @@ function Invoke-AwvRun($K,[string]$Id){
     $pf=Get-ProviderFactsFromGroups $groups $p;$prow.note=$pf.note
     $prev=$script:AsOf;$script:AsOf=ConvertTo-DateValue (Get-Field $pf.facts 'asOf' $null)
     try{
-     foreach($pt in @(Get-Field $pf.facts 'patients' @()|Where-Object{$null -ne $_ -and $_.ACOR -eq $K.acor})){
-      # ACVDue is the report's own flag (Test-AcvDue), so this list and the provider's dashboard always agree.
-      if(!$pt.ACVDue){$hold=[string](Get-P $pt 'AcvHold' '');if($hold){$sites[$site].held[[string]$pt.MemberID]=$hold};continue}
-      Set-P $pt 'Items' (Get-PatientItems $pt);Set-P $pt 'Needs' @(Get-PatientNeeds $pt);Set-P $pt 'Urgency' (Get-PatientUrgency $pt);$prow.due++
+     foreach($pt in @(Get-Field $pf.facts 'patients' @()|Where-Object{$null -ne $_ -and (!$K.awv -or $_.ACOR -eq $K.acor)})){
+      if(!$K.awv){if((Set-CareGapScore $pt) -eq 0){continue}}
+      else{
+       # ACVDue is the report's own flag (Test-AcvDue), so this list and the provider's dashboard always agree.
+       if(!$pt.ACVDue){$hold=[string](Get-P $pt 'AcvHold' '');if($hold){$sites[$site].held[[string]$pt.MemberID]=$hold};continue}
+       Set-P $pt 'Items' (Get-PatientItems $pt);Set-P $pt 'Needs' @(Get-PatientNeeds $pt);Set-P $pt 'Urgency' (Get-PatientUrgency $pt)
+      }
+      $prow.due++
       $c=New-AwvCandidate $K $pt $npi $display;$by=$sites[$site].byId
       # The same member under two providers at one site is listed once, under both payor PCPs, so a flag reaches both lists.
       if($by.ContainsKey($c.memberId)){$o=$by[$c.memberId];$npis=@($o.npis)+@($npi);$pcps=([string]$o.payorPcp)+'; '+$display;if($c.score -gt $o.score){$by[$c.memberId]=$c;$o=$c};$o.npis=$npis;$o.payorPcp=$pcps}else{$by[$c.memberId]=$c}
@@ -3159,7 +3202,7 @@ function Update-AwvLiveness($Run){
 function Get-AwvModel($K,[string]$Id,[switch]$Summary){
  $run=Json (Get-AwvPath $K $Id);if(!$run){throw ($K.title+' list was not found.')}
  $null=Update-AwvLiveness $run
- $m=[ordered]@{npAwvId=[string]$run.npAwvId;state=[string]$run.state;percent=[int](Get-P $run 'percent' 0);stage=[string](Get-P $run 'stage' '');requestedUtc=(ConvertTo-IsoText (Get-P $run 'requestedUtc' ''));completedUtc=(ConvertTo-IsoText (Get-P $run 'completedUtc' ''));seconds=(Get-P $run 'seconds' $null);npis=@(Get-P $run 'npis' @());providerCount=@(Get-P $run 'npis' @()).Count;selection=(Get-OverviewSelectionText $run);errorSummary=[string](Get-P $run 'errorSummary' '');failedProviders=[int](Get-P $run 'failedProviders' 0);epicError=[string](Get-P $run 'epicError' '');siteCount=0;listed=0;sites=@();all=$null;sourcesText='';perSite=$script:NpAwvPerSite;outreach=[bool]$K.outreach;gaps=[bool]$K.gaps}
+ $m=[ordered]@{npAwvId=[string]$run.npAwvId;state=[string]$run.state;percent=[int](Get-P $run 'percent' 0);stage=[string](Get-P $run 'stage' '');requestedUtc=(ConvertTo-IsoText (Get-P $run 'requestedUtc' ''));completedUtc=(ConvertTo-IsoText (Get-P $run 'completedUtc' ''));seconds=(Get-P $run 'seconds' $null);npis=@(Get-P $run 'npis' @());providerCount=@(Get-P $run 'npis' @()).Count;selection=(Get-OverviewSelectionText $run);errorSummary=[string](Get-P $run 'errorSummary' '');failedProviders=[int](Get-P $run 'failedProviders' 0);epicError=[string](Get-P $run 'epicError' '');siteCount=0;listed=0;sites=@();all=$null;sourcesText='';perSite=$script:NpAwvPerSite;outreach=[bool]$K.outreach;gaps=[bool]$K.gaps;awv=[bool]$K.awv}
  if($m.state -eq 'Completed'){
   $file={param([string]$Site,[string]$Layout)$q='id='+$m.npAwvId+$(if($Site){'&site='+[Uri]::EscapeDataString($Site)}else{''})+$(if($Layout){'&layout='+$Layout}else{''});[ordered]@{view=$K.route+'/view?'+$q;html=$K.route+'.file?'+$q+'&format=html';pdf=$K.route+'.file?'+$q+'&format=pdf';xlsx=$K.route+'.file?'+$q+'&format=xlsx'}}
   $links={param([string]$Site)$l=& $file $Site '';if($K.outreach){$l['outreach']=(& $file $Site 'outreach')};if($K.gaps){$l['gaps']=(& $file $Site 'gaps')};$l}
@@ -3207,7 +3250,7 @@ table.sites{border-collapse:collapse;width:100%;margin-top:6px}table.sites th,ta
 <p class="muted">Tick a location to include all of its providers (or tick providers individually). Each site gets one list of its __MAX__ most urgent patients, whichever provider they belong to.</p>
 <div id="picker"><span class="muted">Loading profiles...</span></div>
 <div class="row"><button class="alt" id="all">Select all</button><button class="alt" id="none">Clear</button><button class="go" id="build" disabled>Generate lists</button><span id="count" class="muted"></span></div>
-<p class="muted">Columns match the __MATCHES__ list on each provider's dashboard, plus Epic PCP and Payor PCP. Flagged patients are left out; flag a patient from View &amp; flag and the flag is saved to that patient's provider, so it applies to the provider's lists too. HTML, PDF and Excel are built when you open them, with the current flags.</p>
+<p class="muted">__COLUMNSNOTE__ Flagged patients are left out; flag a patient from View &amp; flag and the flag is saved to that patient's provider, so it applies to the provider's lists too. HTML, PDF and Excel are built when you open them, with the current flags.</p>
 __OUTREACHNOTE__
 </section>
 <section class="card"><h2>Lists</h2><div id="result"><span class="muted">Loading...</span></div></section>
@@ -3227,9 +3270,9 @@ function showResult(o){
  if(o.state==='Starting'||o.state==='Running'){el('result').innerHTML='<p>Generating lists for '+plural(o.providerCount,'provider')+'... '+o.percent+'%</p><div class="progress"><span style="width:'+Math.max(0,Math.min(100,o.percent))+'%"></span></div><span class="muted">'+esc(o.stage)+'</span>';syncChecks();return}
  if(o.state==='Failed'){el('result').innerHTML='<p class="error">The lists could not be generated: '+esc(o.errorSummary)+'</p><span class="muted">Requested '+esc(when(o.requestedUtc))+'</span>';syncChecks();return}
  let h='<div class="row"><b>'+plural(o.listed,'patient')+' listed across '+plural(o.siteCount,'site')+'</b><span class="muted">generated '+esc(when(o.completedUtc))+(o.seconds!=null?' in '+o.seconds+' s':'')+' from '+plural(o.providerCount,'provider')+'</span></div>';
- h+='<table class="sites"><thead><tr><th>Site</th><th class="n">Listed</th><th class="n">Eligible</th><th class="n">Flagged</th><th class="n">Already booked</th>'+(o.outreach?'<th>List (top '+o.perSite+')</th><th>Outreach list (all patients)</th>'+(o.gaps?'<th>Gap outreach list (GSD, CBP, MAD, EED, KED)</th>':''):'<th>Open</th>')+'</tr></thead><tbody>';
- h+=o.sites.map(s=>'<tr><td><b>'+esc(s.site)+'</b><div class="provlist">'+s.providers.map(p=>esc(p.displayName)+' ('+p.due+')'+(p.error?' <span class="error">not read: '+esc(p.error)+'</span>':p.note?' <span class="warn">'+esc(p.note)+'</span>':'')).join(', ')+'</div>'+(s.movedUp?'<div class="warn">'+plural(s.movedUp,'patient')+' moved up after flags were saved</div>':'')+(s.recentAcv?'<div class="provlist">'+plural(s.recentAcv,'patient')+' left out: a more recent ACV in Risk Population Outreach</div>':'')+'</td><td class="n">'+s.listed+' of '+o.perSite+'</td><td class="n">'+s.eligible+'</td><td class="n">'+s.flagged+'</td><td class="n">'+s.booked+'</td><td class="links">'+links(s.links)+'</td>'+(o.outreach?'<td class="links">'+links(s.links.outreach)+'</td>':'')+(o.gaps?'<td class="links">'+links(s.links.gaps)+'<div class="provlist">'+plural(s.gapCount,'patient')+'</div></td>':'')+'</tr>').join('');
- if(o.sites.length>1)h+='<tr class="all"><td>All sites (one file, each site on its own page or sheet)</td><td class="n">'+o.listed+'</td><td></td><td></td><td></td><td class="links">'+links(o.all)+'</td>'+(o.outreach?'<td class="links">'+links(o.all.outreach)+'</td>':'')+(o.gaps?'<td class="links">'+links(o.all.gaps)+'</td>':'')+'</tr>';
+ h+='<table class="sites"><thead><tr><th>Site</th><th class="n">Listed</th><th class="n">Eligible</th><th class="n">Flagged</th>'+(o.awv?'<th class="n">Already booked</th>':'')+(o.outreach?'<th>List (top '+o.perSite+')</th><th>Outreach list (all patients)</th>'+(o.gaps?'<th>Gap outreach list (GSD, CBP, MAD, EED, KED)</th>':''):'<th>Open</th>')+'</tr></thead><tbody>';
+ h+=o.sites.map(s=>'<tr><td><b>'+esc(s.site)+'</b><div class="provlist">'+s.providers.map(p=>esc(p.displayName)+' ('+p.due+')'+(p.error?' <span class="error">not read: '+esc(p.error)+'</span>':p.note?' <span class="warn">'+esc(p.note)+'</span>':'')).join(', ')+'</div>'+(s.movedUp?'<div class="warn">'+plural(s.movedUp,'patient')+' moved up after flags were saved</div>':'')+(s.recentAcv?'<div class="provlist">'+plural(s.recentAcv,'patient')+' left out: a more recent ACV in Risk Population Outreach</div>':'')+'</td><td class="n">'+s.listed+' of '+o.perSite+'</td><td class="n">'+s.eligible+'</td><td class="n">'+s.flagged+'</td>'+(o.awv?'<td class="n">'+s.booked+'</td>':'')+'<td class="links">'+links(s.links)+'</td>'+(o.outreach?'<td class="links">'+links(s.links.outreach)+'</td>':'')+(o.gaps?'<td class="links">'+links(s.links.gaps)+'<div class="provlist">'+plural(s.gapCount,'patient')+'</div></td>':'')+'</tr>').join('');
+ if(o.sites.length>1)h+='<tr class="all"><td>All sites (one file, each site on its own page or sheet)</td><td class="n">'+o.listed+'</td><td></td><td></td>'+(o.awv?'<td></td>':'')+'<td class="links">'+links(o.all)+'</td>'+(o.outreach?'<td class="links">'+links(o.all.outreach)+'</td>':'')+(o.gaps?'<td class="links">'+links(o.all.gaps)+'</td>':'')+'</tr>';
  h+='</tbody></table>';
  if(o.epicError)h+='<p class="warn">Epic PCP could not be read from Risk Population Outreach: '+esc(o.epicError)+'</p>';
  h+='<p class="muted">'+esc(o.sourcesText)+'.'+(o.failedProviders?' <span class="error">'+plural(o.failedProviders,'provider')+' could not be read; see the red notes above.</span>':'')+'</p><p class="warn" id="selNote" style="display:none">Your selection has changed since these lists were generated; select Generate lists to update them.</p>';
@@ -3250,7 +3293,8 @@ el('build').onclick=async()=>{if(el('build').disabled||busy())return;el('build')
 </script></body></html>
 '@
  $note=$(if($K.outreach){'<p class="muted"><b>Outreach list</b> - the same generation also gives an outreach list per site: every eligible patient (not only the top __MAX__), most urgent first, with MRN, First Name, Last Name, DOB, Phone Number and Last ACV first. Open it from the Outreach list column, as View &amp; flag, HTML, PDF or Excel.</p>'}else{''})+$(if($K.gaps){'<p class="muted"><b>Gap outreach list</b> - the same outreach list, limited to patients who also have GSD, CBP, MAD, EED or KED open. Same urgency, columns and files; open it from the Gap outreach list column.</p>'}else{''})
- return $html.Replace('__OUTREACHNOTE__',$note).Replace('__NAV__',(Get-NavHtml ([string]$K.tab))).Replace('__TITLE__',[string]$K.title).Replace('__SUBTITLE__',[string]$K.Subtitle).Replace('__MATCHES__',[string]$K.Matches).Replace('__API__',[string]$K.api).Replace('__TABCSS__',$script:TabCss).Replace('__RUNCSS__',$script:RunPageCss).Replace('__PICKERJS__',$script:PickerJs).Replace('__MAX__',[string]$script:NpAwvPerSite)
+ $cols=$(if($K.awv){'Columns match the '+[string]$K.Matches+' list on each provider''s dashboard, plus Epic PCP and Payor PCP.'}else{[string]$K.PageColumns})
+ return $html.Replace('__OUTREACHNOTE__',$note).Replace('__COLUMNSNOTE__',(ConvertTo-HtmlEncoded $cols)).Replace('__NAV__',(Get-NavHtml ([string]$K.tab))).Replace('__TITLE__',[string]$K.title).Replace('__SUBTITLE__',[string]$K.Subtitle).Replace('__MATCHES__',[string]$K.Matches).Replace('__API__',[string]$K.api).Replace('__TABCSS__',$script:TabCss).Replace('__RUNCSS__',$script:RunPageCss).Replace('__PICKERJS__',$script:PickerJs).Replace('__MAX__',[string]$script:NpAwvPerSite)
 }
 # --- Draft 5.7: POC Coding tab - point-of-care billing and coding behavior for one department of a billing export, each run saved as an HTML report ---
 # The billing export is chosen in the browser and kept under poc-coding\source-files (the newest few), its Department column fills the target
@@ -3784,4 +3828,4 @@ function Invoke-AnalysisJob([string]$JobId){$path=Join-Path $script:Paths.State 
 function Invoke-NextPendingJob{$jobs=@(Get-Jobs);if(@($jobs|Where-Object{$_.state -in @('Starting','Running')}).Count -gt 0){return};$j=@($jobs|Where-Object{$_.state -eq 'Prepared' -or $_.state -eq 'Queued'}|Sort-Object queuedUtc|Select-Object -First 1);if($j.Count -ne 1){return};$job=$j[0];$job.state='Starting';$job.percent=1;$attempt=1+[int](Get-P $job 'attempts' 0);Set-P $job 'attempts' $attempt;$job.stage=$(if($attempt -gt 1){'Launching background analysis worker (attempt '+$attempt+' of '+$script:MaxJobAttempts+')'}else{'Launching background analysis worker'});$jobPath=Join-Path $script:Paths.State ('job-'+$job.jobId+'.json');Save-JsonAtomic $jobPath $job;$exe=(Get-Process -Id $PID).Path;$out=Join-Path $script:Paths.Logs ('worker-'+$job.jobId+'.out.log');$err=Join-Path $script:Paths.Logs ('worker-'+$job.jobId+'.err.log');try{$quotedScript='"'+$PSCommandPath+'"';$p=Start-Process -FilePath $exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$quotedScript,'-RunJobId',$job.jobId,'-NoBrowser') -RedirectStandardOutput $out -RedirectStandardError $err -WindowStyle Hidden -PassThru;Set-P $job 'workerPid' $p.Id;Save-JsonAtomic $jobPath $job}catch{$job.state='Failed';$job.stage='Worker launch failed';Set-P $job 'errorSummary' $_.Exception.Message;Save-JsonAtomic $jobPath $job}};function Invoke-PendingJobs{while(@(Get-Jobs|Where-Object{$_.state -eq 'Prepared' -or $_.state -eq 'Queued'}).Count -gt 0){Invoke-NextPendingJob;Start-Sleep -Milliseconds 500}}
 function Send-JobOutput($Context,[string]$JobId,[string]$Type){if($JobId -notmatch '^[a-f0-9]{32}$'){throw 'Invalid job ID.'};$job=Json (Join-Path $script:Paths.State ('job-'+$JobId+'.json'));if(!$job){throw 'Job not found.'};$path=Resolve-JobOutputPath $job $Type;if(!$path){throw 'Output is not available; the file may have been moved or deleted.'};$bytes=[IO.File]::ReadAllBytes($path);$Context.Response.StatusCode=200;$Context.Response.ContentType=$(if($Type -eq 'pdf'){'application/pdf'}else{'text/html; charset=utf-8'});$Context.Response.Headers['Content-Disposition']='inline; filename="'+[IO.Path]::GetFileName($path)+'"';$Context.Response.ContentLength64=$bytes.Length;$Context.Response.Headers['Cache-Control']='no-store';$Context.Response.OutputStream.Write($bytes,0,$bytes.Length);$Context.Response.Close()}
 function Initialize-AnalysisJobRecovery{$script:RunNext=$false;foreach($f in Get-ChildItem $script:Paths.State -Filter 'job-*.json' -File -ErrorAction SilentlyContinue){$j=Json $f.FullName;if(!$j){continue};$state=[string](Get-P $j 'state' '');$err=[string](Get-P $j 'errorSummary' '');if($state -in @('Starting','Running')){if(Test-WorkerAlive $j){$age=([DateTime]::UtcNow-(Get-Item -LiteralPath $f.FullName).LastWriteTimeUtc).TotalMinutes;if($age -lt $script:StartupStaleMinutes){continue};Stop-WorkerProcess ([int](Get-P $j 'workerPid' 0));Reset-InterruptedJob $j $f.FullName ('it had made no progress for '+[int]$age+' minutes when the server restarted')}else{Reset-InterruptedJob $j $f.FullName 'the server was restarted while the report was running'}}elseif($state -eq 'Failed' -and $err -like '*ConvertTo-NumberValue*'){$j.state='Prepared';$j.percent=0;$j.stage='Recovered after Draft 4.2 helper/queue repair';Set-P $j 'errorSummary' '';Save-JsonAtomic $f.FullName $j}}}
-if($RunJobId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-AnalysisJob $RunJobId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};if($RunOverviewId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-OverviewRun $RunOverviewId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};if($RunNewListId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-NewListRun $RunNewListId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};if($RunPocId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-PocRun $RunPocId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};if($RunNpAwvId -or $RunPcpAwvId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;if($RunNpAwvId){Invoke-AwvRun $script:AwvKinds['np'] $RunNpAwvId}else{Invoke-AwvRun $script:AwvKinds['pcp'] $RunPcpAwvId};exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};try{Initialize-AppFolders;Lock;Initialize-AppConfiguration;Test-ImportExcelModule;Initialize-AnalysisJobRecovery;Initialize-ProviderIndexes;Serve}catch{$detail=$_.Exception.Message+' | '+$_.ScriptStackTrace;try{Log 'APPLICATION' 'FAILED' $detail}catch{};Write-Error $detail;exit 1}finally{if($script:Listener){try{$script:Listener.Stop();$script:Listener.Close()}catch{}};if($script:Mutex){try{$script:Mutex.ReleaseMutex()}catch{};$script:Mutex.Dispose()};try{Log 'SERVER_STOP'}catch{}}
+if($RunJobId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-AnalysisJob $RunJobId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};if($RunOverviewId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-OverviewRun $RunOverviewId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};if($RunNewListId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-NewListRun $RunNewListId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};if($RunPocId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;Invoke-PocRun $RunPocId;exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};if($RunNpAwvId -or $RunPcpAwvId -or $RunCareGapsId){try{Initialize-AppFolders;Initialize-AppConfiguration;Test-ImportExcelModule;if($RunNpAwvId){Invoke-AwvRun $script:AwvKinds['np'] $RunNpAwvId}elseif($RunPcpAwvId){Invoke-AwvRun $script:AwvKinds['pcp'] $RunPcpAwvId}else{Invoke-AwvRun $script:AwvKinds['cg'] $RunCareGapsId};exit 0}catch{Write-Error ($_.Exception.Message+' | '+$_.ScriptStackTrace);exit 1}};try{Initialize-AppFolders;Lock;Initialize-AppConfiguration;Test-ImportExcelModule;Initialize-AnalysisJobRecovery;Initialize-ProviderIndexes;Serve}catch{$detail=$_.Exception.Message+' | '+$_.ScriptStackTrace;try{Log 'APPLICATION' 'FAILED' $detail}catch{};Write-Error $detail;exit 1}finally{if($script:Listener){try{$script:Listener.Stop();$script:Listener.Close()}catch{}};if($script:Mutex){try{$script:Mutex.ReleaseMutex()}catch{};$script:Mutex.Dispose()};try{Log 'SERVER_STOP'}catch{}}
