@@ -13,6 +13,8 @@
 # Draft 5.15: Care Gaps tab (/care-gaps): the same per-site List and Outreach List for patients with GSD, EED, KED, MAD, COLO or BCS open, each weighted 3.
 # Draft 5.16: Care Gap Retro (Care Gap Appointment Retro detail export) is an eighth source, matched by MRN after the other sources are joined; its latest
 # record per MRN + measure is the final word on BCS, COLO, CBP, EED, GSD, KED and SUPD in every report, comparison, Overview and list. It is optional.
+# Care Gap Detail: each patient keeps every source's own status (and dated evidence) for BCS, COLO, CBP, EED, GSD, KED, MAD and SUPD, shown on a Care Gap
+# Detail sheet in the patient rollup and in the "Excel + gap detail" file of every NP-AWV, PCP-AWV and Care Gaps list and outreach list.
 # Adds provider indexes, guided cross-source mapping, fuzzy suggestions, NPI profiles, prepared job tracking, ranked outreach lists,
 # a flag mode (/flag?jobId=...) that excludes flagged patients from every list and panel on every later report for that provider,
 # and a Communication tab (/communication) that emails every provider in a risk pool a fresh report PDF via Outlook drafts.
@@ -1185,9 +1187,9 @@ $script:FactFields=[ordered]@{
  Export=@('Provider Name','Risk Pool','NPI','MemberID','First Name','Last Name','Date of Birth','Payer','Last QEM date with non-PCP','Last ACV Date','Last QEM Visit Date with any PCP in assigned TIN','Completed Attestations','Incompleted Attestations','Open ICDs','New Patient','Total Care Gaps','TCM','Phone Number','Active Date')
  PtListQuality=@('Provider Name','Risk Pool','NPI','MemberID','First Name','Last Name','DOB','BCS','COLO','EED','GSD','CBP','OMW','KED','SPC','MAD','MAC','MAH','SUPD','COB','POLY','OMW Critical Due Date')
  DiabetesScorecard=@('Provider','Cdo','Patient','Member ID','Mrn','KED','EED','Eye Exam Gap Status','Eye Exam Date','Next Appt Date','Next Appt Specialty','Next Appt Location','Risk','GSD','Med Adherence DM','MAD Days Supply','Dx Date','Avg Last A1c','% eGFR last 12 mo.','% uACR last 12 mo.')
- SerialScheduling=@('Provider Name','Risk Pool','Member ID','MRN','Future PCP Visits 2026','PCP Visit Dates','A1c Date')
+ SerialScheduling=@('Provider Name','Risk Pool','Member ID','MRN','Future PCP Visits 2026','PCP Visit Dates','A1c Date','Last A1c','GSD','BCS','COLO','CBP','DM Eye Exam','Kidney Evaluation for Diabetes','Med Adherence DM','SUPD')
  HR=@('PCP Name','Patient First Name','Patient Last Name','DOB','Patient Insurance ID')
- RiskPopulationOutreach=@('Epic Pcp','Cdo','Member ID','Mrn','Next Acv','Last Acv')
+ RiskPopulationOutreach=@('Epic Pcp','Cdo','Member ID','Mrn','Next Acv','Last Acv','Last A1c','Last A1c Value')
 }
 $script:FactFilters=[ordered]@{Export='Provider Name';PtListQuality='Provider Name';DiabetesScorecard='Provider';SerialScheduling='Provider Name';RiskPopulationOutreach='Epic Pcp';HR='PCP Name'}
 function Get-ProviderPatientFacts($Job){
@@ -1205,13 +1207,13 @@ function Test-AcvDue([bool]$Acor,$LastAcv,[DateTime]$AsOf){
  if($Acor){return (($AsOf.Date-$d).TotalDays -gt 365)};return ($d -lt (New-Object DateTime($AsOf.Year,1,1)))
 }
 function Get-RpoMemberMap([object[]]$Rows){
- # Risk Population Outreach by member ID. A member on several rows keeps the most recent Last Acv and Next Acv and the first MRN and Epic PCP.
+ # Risk Population Outreach by member ID. A member on several rows keeps the most recent Last Acv and Next Acv and the first MRN, Epic PCP and Last A1c.
  $out=@{}
  foreach($r in @($Rows|Where-Object{$null -ne $_})){
   $id=([string](Get-Field $r 'Member ID' '')).Trim();if(!$id){continue}
-  $la=ConvertTo-DateValue (Get-Field $r 'Last Acv' $null);$na=ConvertTo-DateValue (Get-Field $r 'Next Acv' $null);$mrn=([string](Get-Field $r 'Mrn' '')).Trim();$epic=([string](Get-Field $r 'Epic Pcp' '')).Trim()
-  if(!$out.ContainsKey($id)){$out[$id]=@{lastAcv=$la;nextAcv=$na;mrn=$mrn;epic=$epic};continue}
-  $o=$out[$id];if($la -and (!$o.lastAcv -or $la -gt $o.lastAcv)){$o.lastAcv=$la};if($na -and (!$o.nextAcv -or $na -gt $o.nextAcv)){$o.nextAcv=$na};if(!$o.mrn -or $o.mrn -eq '0'){$o.mrn=$mrn};if(!$o.epic){$o.epic=$epic}
+  $la=ConvertTo-DateValue (Get-Field $r 'Last Acv' $null);$na=ConvertTo-DateValue (Get-Field $r 'Next Acv' $null);$mrn=([string](Get-Field $r 'Mrn' '')).Trim();$epic=([string](Get-Field $r 'Epic Pcp' '')).Trim();$a1=([string](Get-Field $r 'Last A1c' '')).Trim();$a1v=([string](Get-Field $r 'Last A1c Value' '')).Trim()
+  if(!$out.ContainsKey($id)){$out[$id]=@{lastAcv=$la;nextAcv=$na;mrn=$mrn;epic=$epic;a1c=$a1;a1cValue=$a1v};continue}
+  $o=$out[$id];if($la -and (!$o.lastAcv -or $la -gt $o.lastAcv)){$o.lastAcv=$la};if($na -and (!$o.nextAcv -or $na -gt $o.nextAcv)){$o.nextAcv=$na};if(!$o.mrn -or $o.mrn -eq '0'){$o.mrn=$mrn};if(!$o.epic){$o.epic=$epic};if(!$o.a1c -and !$o.a1cValue){$o.a1c=$a1;$o.a1cValue=$a1v}
  }
  return $out
 }
@@ -1278,6 +1280,83 @@ function Get-CareGapRetroForRun{
  if($null -eq $ix -and !$script:CareGapRetroMissingLogged){$script:CareGapRetroMissingLogged=$true;Log 'CAREGAPRETRO_MISSING' 'WARN' 'Care Gap Retro is not imported; gap statuses come from the other sources only' 'CareGapRetro'}
  return @{index=$ix;error=''}
 }
+# Care Gap Detail: every source's own status for the measures the sources share, with the dates they carry, kept on the patient as GapDetail
+# (m measure, q PtListQuality, d Diabetes Scorecard, s Serial Scheduling, c/cd/ca Care Gap Retro status/visit date/appointment status,
+# dd/sd measure-specific Diabetes Scorecard/Serial Scheduling dates, by the source that decided the end state, f the end state, ev other evidence).
+$script:GapDetailMeasures=@('BCS','COLO','CBP','EED','GSD','KED','MAD','SUPD')
+$script:GapDetailDsc=@{KED='KED';EED='EED';GSD='GSD';MAD='Med Adherence DM'}
+$script:GapDetailSerial=@{GSD='GSD';BCS='BCS';COLO='COLO';CBP='CBP';EED='DM Eye Exam';KED='Kidney Evaluation for Diabetes';MAD='Med Adherence DM';SUPD='SUPD'}
+$script:GapDetailColumns=@('Measure','End State','Decided By','PtListQuality','PtListQuality Date','Diabetes Scorecard','Diabetes Scorecard Date','Serial Scheduling','Serial Scheduling Date','Care Gap Retro','Care Gap Retro Date','Other Evidence')
+$script:GapDetailText=@(
+ 'Care Gap Detail: one row per patient per measure (BCS, COLO, CBP, EED, GSD, KED, MAD, SUPD) that any source reports, showing each source''s own status and how the end state was reached.',
+ 'End State is the status the lists and reports use. Decided By is the last source that set it, in order: PtListQuality, then the Diabetes Scorecard (KED, EED, GSD, MAD; KED is closed when eGFR and uACR are both at 100%), then Care Gap Retro (matched by MRN, latest visit). Serial Scheduling is shown for reference only.',
+ 'Dates are specific to the measure where the source has one (Diabetes Scorecard eye exam date for EED, Serial Scheduling A1c date and value for GSD, Care Gap Retro visit date); otherwise the date the source file was exported, marked (file date).'
+)
+function New-GapDetailEntry([string]$M){return [ordered]@{m=$M;q='';d='';s='';dd='';sd='';c='';cd='';ca='';by='';f='';ev=''}}
+function ConvertTo-DetailDate($Value){$t=([string]$Value).Trim();if(!$t){return ''};if($t -match '^\d{4}-\d{2}-\d{2}' -or $t -match '/' -or $t -match '^\d{5}(\.\d+)?$'){$d=ConvertTo-DateValue $t;if($d){return $d.ToString('M/d/yyyy')}};return $t}
+function New-GapDetail($Q,$D,$S,$Rp,[hashtable]$By){
+ # Each source's own status for the shared measures, with any measure-specific date or value it carries; Care Gap Retro and the end state are added later.
+ $out=@()
+ foreach($m in $script:GapDetailMeasures){
+  $x=New-GapDetailEntry $m;$ev=@()
+  if($Q){$x.q=([string](Get-Field $Q $m '')).Trim()}
+  if($D -and $script:GapDetailDsc.ContainsKey($m)){$x.d=([string](Get-Field $D $script:GapDetailDsc[$m] '')).Trim()}
+  if($S){$x.s=([string](Get-Field $S $script:GapDetailSerial[$m] '')).Trim()}
+  if($m -eq 'EED' -and $D){$x.dd=ConvertTo-DetailDate (Get-Field $D 'Eye Exam Date' '');$eg=([string](Get-Field $D 'Eye Exam Gap Status' '')).Trim();if($eg){$ev+=('Diabetes Scorecard eye exam gap '+$eg)}}
+  if($m -eq 'GSD'){
+   if($S){$ad=ConvertTo-DetailDate (Get-Field $S 'A1c Date' '');$av=([string](Get-Field $S 'Last A1c' '')).Trim();if($ad -or $av){$x.sd=($ad+$(if($av){' (A1c '+$av+')'}else{''})).Trim()}}
+   if($D){$avg=([string](Get-Field $D 'Avg Last A1c' '')).Trim();if($avg){$ev+=('Diabetes Scorecard avg last A1c '+$avg)}}
+   if($Rp -and ($Rp.a1c -or $Rp.a1cValue)){$ev+=('Risk Population Outreach last A1c '+((ConvertTo-DetailDate $Rp.a1c)+$(if($Rp.a1cValue){' ('+$Rp.a1cValue+')'}else{''})).Trim())}
+  }
+  if($m -eq 'KED' -and $D){$eg=([string](Get-Field $D '% eGFR last 12 mo.' '')).Trim();$ua=([string](Get-Field $D '% uACR last 12 mo.' '')).Trim();if($eg -or $ua){$ev+=('Diabetes Scorecard % eGFR / uACR last 12 mo.: '+$(if($eg){$eg}else{'-'})+' / '+$(if($ua){$ua}else{'-'}))}}
+  if($m -eq 'MAD' -and $D){$ds=([string](Get-Field $D 'MAD Days Supply' '')).Trim();if($ds){$ev+=('Diabetes Scorecard MAD days supply '+$ds)}}
+  if($By.ContainsKey($m)){$x.by=[string]$By[$m]}
+  $x.ev=($ev -join '; ')
+  # A measure no source has a status, date or evidence for gets no row (Care Gap Retro may still add one).
+  if(!$x.q -and !$x.d -and !$x.s -and !$x.by -and !$x.dd -and !$x.sd -and !$x.ev){continue}
+  $out+=$x
+ }
+ return ,$out
+}
+function Complete-GapDetail([object[]]$Patients){
+ # The end state of each detail row is the patient's final OpenHedis / ClosedHedis, so the sheet always agrees with the lists and reports.
+ foreach($p in @($Patients|Where-Object{$null -ne $_})){
+  $op=@(([string]$p.OpenHedis) -split ',\s*');$cl=@(([string]$p.ClosedHedis) -split ',\s*')
+  foreach($x in @(Get-P $p 'GapDetail' @()|Where-Object{$null -ne $_})){$m=[string]$x.m;$x.f=$(if($op -contains $m){'Open'}elseif($cl -contains $m){'Closed'}else{''});if(!$x.f){$x.by=''}}
+ }
+}
+function Test-HasField($Object,[string]$Name){if($null -eq $Object){return $false};if($Object -is [Collections.IDictionary]){return $Object.Contains($Name)};return ($null -ne $Object.PSObject.Properties[$Name])}
+function Get-SourceDateMap([object[]]$Sources){
+ # sourceKey -> export date (M/d/yyyy) from a report's or list's saved source list; the fallback date for a status that carries no date of its own.
+ $out=@{}
+ foreach($x in @($Sources|Where-Object{$null -ne $_})){$k=[string](Get-Field $x 'sourceKey' '');if(!$k){continue};$dt=$null;foreach($fld in @('exportedUtc','importedUtc','lastWriteTime')){$dt=ConvertTo-DateValue (Get-Field $x $fld '');if($dt){break}};if($dt){if($dt.Kind -eq [DateTimeKind]::Utc){$dt=$dt.ToLocalTime()};$out[$k]=$dt.ToString('M/d/yyyy')}}
+ return $out
+}
+function Get-GapDetailRows($Detail,[hashtable]$Dates){
+ # One row of $script:GapDetailColumns per detail entry.
+ $fd={param([string]$Key,[string]$Status,[string]$Specific)if($Specific){return $Specific};if(!$Status){return ''};if($Dates.ContainsKey($Key)){return ([string]$Dates[$Key]+' (file date)')};return '(file date not recorded)'}
+ $rows=@()
+ foreach($x in @($Detail|Where-Object{$null -ne $_})){
+  $g={param([string]$n)return ([string](Get-Field $x $n ''))}
+  $cd=& $g 'cd';$ca=& $g 'ca'
+  $rows+=,@((& $g 'm'),(& $g 'f'),(& $g 'by'),(& $g 'q'),(& $fd 'PtListQuality' (& $g 'q') ''),(& $g 'd'),(& $fd 'DiabetesScorecard' (& $g 'd') (& $g 'dd')),(& $g 's'),(& $fd 'SerialScheduling' (& $g 's') (& $g 'sd')),(& $g 'c'),$(if($cd){$cd+' visit'+$(if($ca){' ('+$ca+')'}else{''})}else{''}),(& $g 'ev'))
+ }
+ return ,$rows
+}
+function Add-GapDetailSheet($Pkg,[hashtable]$Used,[string[]]$Lead,[object[]]$Entries){
+ # Entries: @{lead=<values for $Lead>;detail=<GapDetail>;has=<detail was recorded>;dates=<Get-SourceDateMap>}. Returns how many had no detail recorded.
+ $ws=$Pkg.Workbook.Worksheets.Add((Get-RollupSheetName 'Care Gap Detail' $Used));$heads=@($Lead)+@($script:GapDetailColumns)
+ for($c=0;$c -lt $heads.Count;$c++){$ws.Cells[1,($c+1)].Value=$heads[$c]};$r=1;$old=0
+ foreach($e in @($Entries)){
+  if(!$e.has){$old++;continue}
+  $rows=Get-GapDetailRows $e.detail $e.dates
+  foreach($row in $rows){$r++;$vals=@($e.lead)+@($row);for($c=0;$c -lt $vals.Count;$c++){Set-RollupCell $ws $r ($c+1) $vals[$c]}}
+ }
+ if($r -eq 1){$ws.Cells[2,1].Value=$(if($old){'Care gap detail was not recorded when this was generated; generate it again to see the detail.'}else{'No patient here has a care gap status in any source.'})}
+ elseif($old){$ws.Cells[($r+2),1].Value=([string]$old+' patient(s) were saved before care gap detail was recorded and are not shown; generate again to include them.')}
+ Set-RollupSheetStyle $ws $r $heads.Count 1
+ return $old
+}
 function Set-CareGapRetroOverlay([object[]]$Patients,$Index){
  # Care Gap Retro is the final word on each measure it has a record for, for every patient whose MRN (leading zeros ignored) is unique among these patients.
  # Gap Open puts the measure in OpenHedis (an open KED then counts however complete the Diabetes Scorecard labs look); Gap Closed puts it in ClosedHedis
@@ -1292,14 +1371,18 @@ function Set-CareGapRetroOverlay([object[]]$Patients,$Index){
    $open=New-Object Collections.Generic.List[string];foreach($x in @(([string]$p.OpenHedis) -split ',\s*')){if($x -and !$open.Contains($x)){$open.Add($x)}}
    $closed=New-Object Collections.Generic.List[string];foreach($x in @(([string]$p.ClosedHedis) -split ',\s*')){if($x -and !$closed.Contains($x)){$closed.Add($x)}}
    $before=($open -join ', ')+'|'+($closed -join ', ');$prov=@();$ked=$false
+   $gd=@(Get-P $p 'GapDetail' @()|Where-Object{$null -ne $_});$em=@{};foreach($x in $gd){$em[[string](Get-Field $x 'm' '')]=$x}
    foreach($m in @($recs.Keys|Sort-Object)){
     $rec=$recs[$m]
     if($rec.status -eq 'Open'){[void]$closed.Remove($m);if(!$open.Contains($m)){$open.Add($m)};if($m -eq 'KED'){$ked=$true}}
     else{[void]$open.Remove($m);if(!$closed.Contains($m)){$closed.Add($m)};if($m -eq 'EED'){Set-P $p 'EyeOpen' $false}}
     $prov+=($m+' '+$rec.status+' '+([DateTime]$rec.date).ToString('M/d/yyyy')+$(if($rec.appt){' '+$rec.appt}else{''})+$(if($rec.conflict){' (conflicting rows)'}else{''}))
+    if(!$em.ContainsKey($m)){$x=New-GapDetailEntry $m;$gd+=$x;$em[$m]=$x};$x=$em[$m]
+    $x.c=[string]$rec.status;$x.cd=([DateTime]$rec.date).ToString('M/d/yyyy');$x.ca=[string]$rec.appt;$x.by=$(if($rec.conflict){'Care Gap Retro (same-day rows disagreed; counted as Open)'}else{'Care Gap Retro'})
    }
    $o=($open -join ', ');$c=($closed -join ', ');if(($o+'|'+$c) -ne $before){$changed++}
    Set-P $p 'OpenHedis' $o;Set-P $p 'ClosedHedis' $c;Set-P $p 'KedConfirmed' $ked;Set-P $p 'CareGapRetro' ($prov -join '; ')
+   Set-P $p 'GapDetail' @($gd|Sort-Object -Property @{Expression={[array]::IndexOf($script:GapDetailMeasures,[string](Get-Field $_ 'm' ''))}})
   }
   if($dupes){Log 'CAREGAPRETRO_DUPLICATE_MRN' 'WARN' ([string]$dupes+' patients share an MRN with another patient in the same provider panel; Care Gap Retro was not applied to them') 'CareGapRetro'}
  }
@@ -1312,17 +1395,18 @@ function New-PatientFacts([object[]]$exports,[object[]]$quality,[object[]]$dsc,[
  $qIndex=New-UniqueIndex $quality 'MemberID';$dIndex=New-UniqueIndex $dsc 'Member ID';$sIndex=New-UniqueIndex $serial 'Member ID';$rpoMap=Get-RpoMemberMap $rpo;$hrIds=@{};foreach($x in $hr){$id=([string]$x.'Patient Insurance ID').Trim();if($id){$hrIds[$id]=$x}};$exportIds=New-Object Collections.Generic.List[string];foreach($x in $exports){$exportIds.Add(([string]$x.MemberID).Trim())};$highIds=@{};$unmatchedHr=@{};foreach($hid in $hrIds.Keys){$matchCount=0;$matchId='';foreach($eid in $exportIds){if($eid -eq $hid -or $eid.StartsWith($hid)){$matchCount++;if($matchCount -eq 1){$matchId=$eid}}};if($matchCount -eq 1){$highIds[$matchId]=$true}elseif($matchCount -eq 0){$unmatchedHr[$hid]=$hrIds[$hid]}}
  $hedis=@('BCS','COLO','EED','GSD','CBP','OMW','KED','SPC','MAD','MAC','MAH','SUPD','COB','POLY');$patients=@();$seen=@{}
  foreach($e in $exports){$id=([string]$e.MemberID).Trim();if(!$id){continue};$seen[$id]=$true;$q=$(if($qIndex.ContainsKey($id)){$qIndex[$id]}else{$null});$d=$(if($dIndex.ContainsKey($id)){$dIndex[$id]}else{$null});$s=$(if($sIndex.ContainsKey($id)){$sIndex[$id]}else{$null});$rp=$(if($rpoMap.ContainsKey($id)){$rpoMap[$id]}else{$null})
-  $open=@();$closed=@();if($q){foreach($m in $hedis){$v=([string]$q.$m).Trim();if($v -in @('Needed','Non-compliant')){$open+=$m}elseif($v -in @('Completed','Compliant')){$closed+=$m}}}
-  if($d){$overrides=@{'KED'=[string]($d.KED);'EED'=[string]($d.EED);'GSD'=[string]($d.GSD);'MAD'=[string]($d.'Med Adherence DM')};foreach($m in $overrides.Keys){$v=$overrides[$m];if($v -in @('Needed','Non-compliant')){if($open -notcontains $m){$open+=$m};$closed=@($closed|Where-Object{$_ -ne $m})}elseif($v -in @('Completed','Compliant')){$open=@($open|Where-Object{$_ -ne $m});if($closed -notcontains $m){$closed+=$m}}};$egfrComplete=(ConvertTo-NumberValue $d.'% eGFR last 12 mo.') -ge 100;$uacrComplete=(ConvertTo-NumberValue $d.'% uACR last 12 mo.') -ge 100;if($egfrComplete -and $uacrComplete){$open=@($open|Where-Object{$_ -ne 'KED'});if($closed -notcontains 'KED'){$closed+='KED'}}}
+  $open=@();$closed=@();$by=@{};if($q){foreach($m in $hedis){$v=([string]$q.$m).Trim();if($v -in @('Needed','Non-compliant')){$open+=$m;$by[$m]='PtListQuality'}elseif($v -in @('Completed','Compliant')){$closed+=$m;$by[$m]='PtListQuality'}}}
+  if($d){$overrides=@{'KED'=[string]($d.KED);'EED'=[string]($d.EED);'GSD'=[string]($d.GSD);'MAD'=[string]($d.'Med Adherence DM')};foreach($m in $overrides.Keys){$v=$overrides[$m];if($v -in @('Needed','Non-compliant','Completed','Compliant')){$by[$m]='Diabetes Scorecard'};if($v -in @('Needed','Non-compliant')){if($open -notcontains $m){$open+=$m};$closed=@($closed|Where-Object{$_ -ne $m})}elseif($v -in @('Completed','Compliant')){$open=@($open|Where-Object{$_ -ne $m});if($closed -notcontains $m){$closed+=$m}}};$egfrComplete=(ConvertTo-NumberValue $d.'% eGFR last 12 mo.') -ge 100;$uacrComplete=(ConvertTo-NumberValue $d.'% uACR last 12 mo.') -ge 100;if($egfrComplete -and $uacrComplete){$by['KED']='Diabetes Scorecard: eGFR and uACR at 100%';$open=@($open|Where-Object{$_ -ne 'KED'});if($closed -notcontains 'KED'){$closed+='KED'}}}
   $high=$highIds.ContainsKey($id);$acor=([string]$e.Payer).Trim() -eq 'ACOR';$acvNow=Get-Date;$exportAcv=ConvertTo-DateValue $e.'Last ACV Date';$lastAcv=$exportAcv;if($rp -and $rp.lastAcv -and (!$lastAcv -or $rp.lastAcv -gt $lastAcv)){$lastAcv=$rp.lastAcv};$nextAcv=$(if($rp){$rp.nextAcv}else{$null})
   # AcvHold says why a patient the Export alone would call due is not: a future ACV is booked, or Risk Population Outreach shows a more recent ACV.
   $due=Test-AcvDue $acor $lastAcv $acvNow;$acvHold='';if($due -and $nextAcv -and $nextAcv.Date -ge $acvNow.Date){$due=$false;$acvHold='booked'}elseif(!$due -and (Test-AcvDue $acor $exportAcv $acvNow)){$acvHold='recent'}
   $vis=@((ConvertTo-DateValue $e.'Last QEM date with non-PCP'),(ConvertTo-DateValue $e.'Last ACV Date'),(ConvertTo-DateValue $e.'Last QEM Visit Date with any PCP in assigned TIN'))|Where-Object{$_};$last=$(if($vis){$vis|Sort-Object -Descending|Select-Object -First 1}else{$null});$serialLast=$(if($s){Get-LatestDateFromText ([string]$s.'PCP Visit Dates')}else{$null})
   $mrn='';foreach($cand in @($(if($d){$d.Mrn}else{''}),$(if($s){$s.MRN}else{''}),$(if($rp){$rp.Mrn}else{''}))){$c=([string]$cand).Trim();if($c -and $c -ne '0'){$mrn=$c;break}}
-  $patients+=[pscustomobject][ordered]@{MemberID=$id;MRN=$mrn;First=[string]$e.'First Name';Last=[string]$e.'Last Name';DOB=$(ConvertTo-DateText $e.'Date of Birth');ACOR=$acor;ACVDue=$due;Attest=((ConvertTo-NumberValue $e.'Completed Attestations')+(ConvertTo-NumberValue $e.'Incompleted Attestations')) -gt 0;OpenICD=[string]$e.'Open ICDs';NewPatient=(Test-TrueValue $e.'New Patient');OpenHedis=($open -join ', ');ClosedHedis=($closed -join ', ');HighRisk=$high;LastVisit=$last;SerialLast=$serialLast;A1cDate=$(if($s){ConvertTo-DateValue $s.'A1c Date'}else{$null});FutureVisits=$(if($s){[string]$s.'Future PCP Visits 2026'}else{''});NextAppt=$(if($d){ConvertTo-DateValue $d.'Next Appt Date'}else{$null});NextApptSpecialty=$(if($d){([string]$d.'Next Appt Specialty').Trim()}else{''});A1c=$(if($d){ConvertTo-NumberOrNull $d.'Avg Last A1c'}else{$null});A1cText=$(if($d){([string]$d.'Avg Last A1c').Trim()}else{''});Diabetic=($null -ne $d);EyeOpen=[bool]($d -and (([string]$d.'Eye Exam Gap Status').Trim() -eq 'Open'));EyeDate=$(if($d){ConvertTo-DateValue $d.'Eye Exam Date'}else{$null});EgfrNeeded=[bool]($d -and ((ConvertTo-NumberValue $d.'% eGFR last 12 mo.') -lt 100));UacrNeeded=[bool]($d -and ((ConvertTo-NumberValue $d.'% uACR last 12 mo.') -lt 100));MedAdhDM=$(if($d){([string]$d.'Med Adherence DM').Trim()}else{''});OmwDue=$(if($q){ConvertTo-DateText $q.'OMW Critical Due Date'}else{''});TotalGaps=(ConvertTo-NumberValue $e.'Total Care Gaps');IncompleteAttest=(ConvertTo-NumberValue $e.'Incompleted Attestations');OpenIcdCount=@(([string]$e.'Open ICDs') -split ','|Where-Object{$_.Trim() -and $_.Trim() -ne '0'}).Count;Tcm=[bool]((Test-TrueValue $e.TCM) -or ((ConvertTo-NumberValue $e.TCM) -gt 0));RiskContract=$true;DSC=$d;Payer=([string]$e.Payer).Trim();Phone=([string](Get-Field $e 'Phone Number' '')).Trim();ActiveDate=(ConvertTo-DateText (Get-Field $e 'Active Date' ''));PcpVisit=(ConvertTo-DateValue $e.'Last QEM Visit Date with any PCP in assigned TIN');NextAcv=$nextAcv;LastAcv=$lastAcv;AcvHold=$acvHold;EpicPcp=$(if($rp){[string]$rp.epic}else{''});KedConfirmed=$false;CareGapRetro=''}
+  $gd=New-GapDetail $q $d $s $rp $by
+  $patients+=[pscustomobject][ordered]@{MemberID=$id;MRN=$mrn;First=[string]$e.'First Name';Last=[string]$e.'Last Name';DOB=$(ConvertTo-DateText $e.'Date of Birth');ACOR=$acor;ACVDue=$due;Attest=((ConvertTo-NumberValue $e.'Completed Attestations')+(ConvertTo-NumberValue $e.'Incompleted Attestations')) -gt 0;OpenICD=[string]$e.'Open ICDs';NewPatient=(Test-TrueValue $e.'New Patient');OpenHedis=($open -join ', ');ClosedHedis=($closed -join ', ');HighRisk=$high;LastVisit=$last;SerialLast=$serialLast;A1cDate=$(if($s){ConvertTo-DateValue $s.'A1c Date'}else{$null});FutureVisits=$(if($s){[string]$s.'Future PCP Visits 2026'}else{''});NextAppt=$(if($d){ConvertTo-DateValue $d.'Next Appt Date'}else{$null});NextApptSpecialty=$(if($d){([string]$d.'Next Appt Specialty').Trim()}else{''});A1c=$(if($d){ConvertTo-NumberOrNull $d.'Avg Last A1c'}else{$null});A1cText=$(if($d){([string]$d.'Avg Last A1c').Trim()}else{''});Diabetic=($null -ne $d);EyeOpen=[bool]($d -and (([string]$d.'Eye Exam Gap Status').Trim() -eq 'Open'));EyeDate=$(if($d){ConvertTo-DateValue $d.'Eye Exam Date'}else{$null});EgfrNeeded=[bool]($d -and ((ConvertTo-NumberValue $d.'% eGFR last 12 mo.') -lt 100));UacrNeeded=[bool]($d -and ((ConvertTo-NumberValue $d.'% uACR last 12 mo.') -lt 100));MedAdhDM=$(if($d){([string]$d.'Med Adherence DM').Trim()}else{''});OmwDue=$(if($q){ConvertTo-DateText $q.'OMW Critical Due Date'}else{''});TotalGaps=(ConvertTo-NumberValue $e.'Total Care Gaps');IncompleteAttest=(ConvertTo-NumberValue $e.'Incompleted Attestations');OpenIcdCount=@(([string]$e.'Open ICDs') -split ','|Where-Object{$_.Trim() -and $_.Trim() -ne '0'}).Count;Tcm=[bool]((Test-TrueValue $e.TCM) -or ((ConvertTo-NumberValue $e.TCM) -gt 0));RiskContract=$true;DSC=$d;Payer=([string]$e.Payer).Trim();Phone=([string](Get-Field $e 'Phone Number' '')).Trim();ActiveDate=(ConvertTo-DateText (Get-Field $e 'Active Date' ''));PcpVisit=(ConvertTo-DateValue $e.'Last QEM Visit Date with any PCP in assigned TIN');NextAcv=$nextAcv;LastAcv=$lastAcv;AcvHold=$acvHold;EpicPcp=$(if($rp){[string]$rp.epic}else{''});KedConfirmed=$false;CareGapRetro='';GapDetail=$gd}
  }
- foreach($hid in $unmatchedHr.Keys){$x=$unmatchedHr[$hid];$patients+=[pscustomobject][ordered]@{MemberID=$hid;MRN='';First=[string]$x.'Patient First Name';Last=[string]$x.'Patient Last Name';DOB=$(ConvertTo-DateText $x.DOB);ACOR=$null;ACVDue=$false;Attest=$false;OpenICD='';NewPatient=$false;OpenHedis='';ClosedHedis='';HighRisk=$true;LastVisit=$null;SerialLast=$null;A1cDate=$null;FutureVisits='';NextAppt=$null;NextApptSpecialty='';A1c=$null;A1cText='';Diabetic=$false;EyeOpen=$false;EyeDate=$null;EgfrNeeded=$false;UacrNeeded=$false;MedAdhDM='';OmwDue='';TotalGaps=0;IncompleteAttest=0;OpenIcdCount=0;Tcm=$false;RiskContract=$true;DSC=$null;Payer='';Phone='';ActiveDate='';PcpVisit=$null;NextAcv=$null;LastAcv=$null;AcvHold='';EpicPcp='';KedConfirmed=$false;CareGapRetro=''}}
- $cgStats=Set-CareGapRetroOverlay $patients $CareGap
+ foreach($hid in $unmatchedHr.Keys){$x=$unmatchedHr[$hid];$patients+=[pscustomobject][ordered]@{MemberID=$hid;MRN='';First=[string]$x.'Patient First Name';Last=[string]$x.'Patient Last Name';DOB=$(ConvertTo-DateText $x.DOB);ACOR=$null;ACVDue=$false;Attest=$false;OpenICD='';NewPatient=$false;OpenHedis='';ClosedHedis='';HighRisk=$true;LastVisit=$null;SerialLast=$null;A1cDate=$null;FutureVisits='';NextAppt=$null;NextApptSpecialty='';A1c=$null;A1cText='';Diabetic=$false;EyeOpen=$false;EyeDate=$null;EgfrNeeded=$false;UacrNeeded=$false;MedAdhDM='';OmwDue='';TotalGaps=0;IncompleteAttest=0;OpenIcdCount=0;Tcm=$false;RiskContract=$true;DSC=$null;Payer='';Phone='';ActiveDate='';PcpVisit=$null;NextAcv=$null;LastAcv=$null;AcvHold='';EpicPcp='';KedConfirmed=$false;CareGapRetro='';GapDetail=@()}}
+ $cgStats=Set-CareGapRetroOverlay $patients $CareGap;Complete-GapDetail $patients
  return [ordered]@{careGapRetro=$cgStats;asOf=(Get-Date).ToString('o');riskPool=$(if($exports.Count){[string]$exports[0].'Risk Pool'}else{''});patients=@($patients);scorecardNonRisk=@($dsc|Where-Object{([string]$_.Risk) -match 'Non-Risk Population'})}
 }
 $script:PatientDateFields=@('LastVisit','SerialLast','A1cDate','NextAppt','EyeDate','PcpVisit','NextAcv','LastAcv')
@@ -1809,6 +1893,9 @@ function New-RollupWorkbook([string]$Npi,[string[]]$JobIds,[bool]$IncludeChanges
    }
    Set-RollupSheetStyle $ws ($r-1) $last
   }
+  # Care Gap Detail: every chosen snapshot, one row per patient per measure, so the same patient can be followed across reports
+  $entries=@();foreach($s in $snaps){$dates=Get-SourceDateMap @(Get-P $s.stored 'sources' @());foreach($p in @($s.facts.patients|Sort-Object -Property @{Expression={[string]$_.Last}},@{Expression={[string]$_.First}})){$entries+=@{lead=@($s.sheet,[string]$p.MemberID,[string](Get-P $p 'MRN' ''),[string]$p.Last,[string]$p.First,[string]$p.DOB);detail=(Get-P $p 'GapDetail' $null);has=(Test-HasField $p 'GapDetail');dates=$dates}}}
+  $null=Add-GapDetailSheet $pkg $used @('Snapshot','Member ID','MRN','Last Name','First Name','DOB') $entries
   # Changes: newest chosen snapshot compared with the next one chosen
   if($changesWs){
    $new=$snaps[0];$old=$snaps[1];$cmp=Compare-ReportSnapshots $old.snap $new.snap
@@ -1835,6 +1922,7 @@ function New-RollupWorkbook([string]$Npi,[string[]]$JobIds,[bool]$IncludeChanges
   if($changesWs){$r++;& $put $r @(('Changes sheet: every difference between "'+$snaps[0].sheet+'" and "'+$snaps[1].sheet+'", one row per patient per field. "Closed" means the measure is compliant in the source data; it does not say who closed it.')) $false;$r++}
   $r++;& $put $r @('Source files behind each snapshot') $true;$r++;& $put $r @('Sheet','Source','Export date','Rows in file','SHA-256') $true;$r++
   foreach($s in $snaps){$srcs=@(Get-P $s.stored 'sources' @()|Where-Object{$null -ne $_});if($srcs.Count -eq 0){& $put $r @($s.sheet,'Not recorded (report predates source tracking)') $false;$r++;continue};foreach($x in $srcs){& $put $r @($s.sheet,[string](Get-Field $x 'displayName' ''),(ConvertTo-DateValue (Get-Field $x 'exportedUtc' '')),[int](Get-Field $x 'rowCount' 0),[string](Get-Field $x 'sha256' '')) $false;$r++}}
+  $r++;& $put $r @('Care Gap Detail sheet') $true;$r++;foreach($t in $script:GapDetailText){& $put $r @($t) $false;$r++};& $put $r @('Reports generated before care gap detail was recorded have no rows on it.') $false;$r++
   $r++;& $put $r @('Columns on the snapshot sheets') $true;$r++;& $put $r @('Column','Meaning') $true;$r++
   foreach($col in $script:RollupColumns){& $put $r @($col[1],$col[2]) $false;$r++};foreach($col in $script:RollupComputed){& $put $r @($col[0],$col[1]) $false;$r++}
   try{$a.Column(1).Width=34;$a.Column(2).Width=60;$a.Column(3).Width=36;$a.Column(4).Width=40;$a.Column(5).Width=44;$a.Column(6).Width=10}catch{}
@@ -2387,11 +2475,11 @@ function Read-GroupSources([object[]]$Chosen,$Run,[string]$Path,[int]$From,[int]
   else{$rows=@(Get-SourceRows $key $script:FactFields[$fieldKey] $filter '' -FilterSet $set)}
   $g=@{};foreach($r in $rows){$v=([string]$r.$filter).Trim();if(!$g.ContainsKey($v)){$g[$v]=New-Object Collections.Generic.List[object]};$g[$v].Add($r)}
   $groups[$key]=$g
-  $st=$(if($status.ContainsKey($key)){$status[$key]}else{$null});$read+=[ordered]@{sourceKey=$key;displayName=$name;importedUtc=$(if($st){ConvertTo-IsoText (Get-Field $st 'importedUtc' '')}else{''});lastWriteTime=$(if($st){ConvertTo-IsoText (Get-Field $st 'lastWriteTime' '')}else{''})}
+  $st=$(if($status.ContainsKey($key)){$status[$key]}else{$null});$read+=[ordered]@{sourceKey=$key;displayName=$name;exportedUtc=$(if($st){ConvertTo-IsoText (Get-Field $st 'fileCreationTime' '')}else{''});importedUtc=$(if($st){ConvertTo-IsoText (Get-Field $st 'importedUtc' '')}else{''});lastWriteTime=$(if($st){ConvertTo-IsoText (Get-Field $st 'lastWriteTime' '')}else{''})}
  }
  # Care Gap Retro is read whole once (matched by MRN later, never by provider); the source list says when it was not available.
  $cg=Get-CareGapRetroForRun;$groups['_CareGapRetro']=$cg.index;$st=$(if($status.ContainsKey('CareGapRetro')){$status['CareGapRetro']}else{$null})
- $read+=[ordered]@{sourceKey='CareGapRetro';displayName='Care Gap Retro';importedUtc=$(if($st){ConvertTo-IsoText (Get-Field $st 'importedUtc' '')}else{''});lastWriteTime=$(if($st){ConvertTo-IsoText (Get-Field $st 'lastWriteTime' '')}else{''});missing=($null -eq $cg.index);error=$cg.error}
+ $read+=[ordered]@{sourceKey='CareGapRetro';displayName='Care Gap Retro';exportedUtc=$(if($st){ConvertTo-IsoText (Get-Field $st 'fileCreationTime' '')}else{''});importedUtc=$(if($st){ConvertTo-IsoText (Get-Field $st 'importedUtc' '')}else{''});lastWriteTime=$(if($st){ConvertTo-IsoText (Get-Field $st 'lastWriteTime' '')}else{''});missing=($null -eq $cg.index);error=$cg.error}
  return [ordered]@{groups=$groups;sources=@($read);rpoError=$rpoError}
 }
 function Get-ProviderFactsFromGroups($Groups,$P){
@@ -3065,7 +3153,7 @@ function New-AwvCandidate($K,$p,[string]$Npi,[string]$Display){
  $row=@{p=$p;score=$score;tier=$tier;items=$p.Items;boost=@($p.Needs);k=@([string]$K.item)};$last=Get-PatientLastVisit $p
  $cells=[ordered]@{};foreach($h in @('Urgency','Also Needs','Last Visit','Next Appt','Why Ranked Here')){$cells[$h]=[string](Get-OutreachCell $h $row)}
  if(!$K.awv){$cells['Care Gaps']=[string](Get-P $p 'CareGaps' '');$cells['AWV Due']=$(if($p.ACVDue){$(if($p.ACOR -eq $true){'PCP (ACOR)'}else{'NP (non-ACOR)'})}else{''})}
- return [ordered]@{memberId=[string]$p.MemberID;first=[string]$p.First;last=[string]$p.Last;dob=[string]$p.DOB;mrn=[string](Get-P $p 'MRN' '');phone=(Format-PhoneText ([string](Get-P $p 'Phone' '')));lastAcv=(ConvertTo-DateText (Get-P $p 'LastAcv' $null));payer=[string](Get-P $p 'Payer' '');npis=@($Npi);payorPcp=$Display;epicPcp=[string](Get-P $p 'EpicPcp' '');gaps=(Get-AwvGapText $p);score=$score;lastVisitKey=$(if($last){([DateTime]$last).ToString('yyyy-MM-dd')}else{''});cells=$cells;snapshot=(New-FlagSnapshot $p)}
+ return [ordered]@{memberId=[string]$p.MemberID;first=[string]$p.First;last=[string]$p.Last;dob=[string]$p.DOB;mrn=[string](Get-P $p 'MRN' '');phone=(Format-PhoneText ([string](Get-P $p 'Phone' '')));lastAcv=(ConvertTo-DateText (Get-P $p 'LastAcv' $null));payer=[string](Get-P $p 'Payer' '');npis=@($Npi);payorPcp=$Display;epicPcp=[string](Get-P $p 'EpicPcp' '');gaps=(Get-AwvGapText $p);score=$score;lastVisitKey=$(if($last){([DateTime]$last).ToString('yyyy-MM-dd')}else{''});cells=$cells;snapshot=(New-FlagSnapshot $p);detail=@(Get-P $p 'GapDetail' @()|Where-Object{$null -ne $_})}
 }
 function Get-NpAwvFlagIndex([object[]]$Npis){
  # Every active flag on the providers behind a list, by member ID and by last name + first name + DOB.
@@ -3192,7 +3280,8 @@ document.addEventListener('click',function(ev){var t=ev.target;if(!t.closest)ret
 try{var y=sessionStorage.getItem('flagScroll');if(y){sessionStorage.removeItem('flagScroll');window.scrollTo(0,parseInt(y,10)||0)}}catch(e){}
 })();
 '@
-function New-AwvWorkbook($Run,[string]$SiteName='',[string]$Layout='list'){
+function New-AwvWorkbook($Run,[string]$SiteName='',[string]$Layout='list',[switch]$Detail){
+ # Detail adds a Care Gap Detail sheet: each source's status and date for every measure of every listed patient, in list order.
  # About (criteria, sources, one line per site), one sheet per site (the list plus MRN, member ID, phone and payer for booking), and Flagged.
  try{Add-Type -AssemblyName System.Drawing -ErrorAction Stop}catch{}
  $K=Get-AwvKind $Run;$Layout=Get-AwvLayout $K $Layout;$views=@(Get-NpAwvViews $Run $SiteName $Layout);$asOf=ConvertTo-DateValue (Get-P $Run 'asOf' $null);$pkg=New-Object OfficeOpenXml.ExcelPackage;$used=@{}
@@ -3200,6 +3289,7 @@ function New-AwvWorkbook($Run,[string]$SiteName='',[string]$Layout='list'){
   $ws=$pkg.Workbook.Worksheets.Add((Get-RollupSheetName 'About' $used))
   $lines=@(((Get-AwvLabel $K $Layout)+' - '+$(if($SiteName){$SiteName}else{'All sites'})),('Generated '+$(if($asOf){$asOf.ToString('g')}else{''})+'; flags applied as of '+(Get-Date).ToString('g')+'.'),(Get-NpAwvSourcesText $Run),(Get-AwvCriteria $K $Layout).Replace('{max}',[string]$script:NpAwvPerSite),$script:NpAwvText.Columns,$script:NpAwvText.Flags)
   if((Test-AwvFullLayout $Layout) -and !(Get-P $Run 'lastAcvRead' $false)){$lines+=$script:NpAwvText.OldRun}
+  if($Detail){$lines+=$script:GapDetailText}
   for($i=0;$i -lt $lines.Count;$i++){$ws.Cells[($i+1),1].Value=$lines[$i]};$ws.Cells[1,1].Style.Font.Bold=$true;$ws.Cells[1,1].Style.Font.Size=14
   $r=$lines.Count+2;$heads=@('Site','Listed','Eligible','Flagged');if($K.awv){$heads+=@('Already booked','Recent ACV (RPO)')};$heads+=$(if($K.awv){'Providers (patients due)'}else{'Providers (patients listed)'});$pc=$heads.Count;if(Test-AwvFullLayout $Layout){$heads+='Phone on file'};for($c=0;$c -lt $heads.Count;$c++){$ws.Cells[$r,($c+1)].Value=$heads[$c]};$hr=$r
   foreach($v in $views){$r++;$vals=@($v.site,[int]@($v.rows).Count,[int]$v.eligible,[int]$v.flaggedAll);if($K.awv){$vals+=@([int]$v.booked,[int]$v.recentAcv)};$vals+=(Get-NpAwvProvidersText $v);if(Test-AwvFullLayout $Layout){$vals+=[int](Get-AwvPhoneCount $v)};for($c=0;$c -lt $vals.Count;$c++){Set-RollupCell $ws $r ($c+1) $vals[$c]}}
@@ -3212,6 +3302,11 @@ function New-AwvWorkbook($Run,[string]$SiteName='',[string]$Layout='list'){
    foreach($row in @($v.rows)){$r++;for($c=0;$c -lt $cols.Count;$c++){if($cols[$c] -eq '#'){Set-RollupCell $ws $r 1 ([int]$row.rank);if($row.movedUp){$ws.Cells[$r,1].AddComment('Moved up after a flag was saved',[string]$K.title)|Out-Null};continue};Set-RollupCell $ws $r ($c+1) (Get-NpAwvCell $row $cols[$c])}}
    Set-RollupSheetStyle $ws $r $cols.Count 1
    foreach($x in @(Get-NpAwvFlaggedRows $v)){$flagRows+=,(@($v.site)+@($x.cells)+@([string](Get-Field $x.c 'mrn' ''),[string](Get-Field $x.c 'memberId' '')))}
+  }
+  if($Detail){
+   $dates=Get-SourceDateMap @(Get-P $Run 'sources' @());$entries=@()
+   foreach($v in $views){foreach($row in @($v.rows)){$c=$row.c;$entries+=@{lead=@($v.site,[int]$row.rank,[string](Get-Field $c 'mrn' ''),[string](Get-Field $c 'last' ''),[string](Get-Field $c 'first' ''),[string](Get-Field $c 'dob' ''),[int](Get-Field $c 'score' 0));detail=(Get-Field $c 'detail' $null);has=(Test-HasField $c 'detail');dates=$dates}}}
+   $null=Add-GapDetailSheet $pkg $used @('Site','#','MRN','Last Name','First Name','DOB','Urgency') $entries
   }
   $ws=$pkg.Workbook.Worksheets.Add((Get-RollupSheetName 'Flagged' $used));$fh=@('Site','Patient','DOB','Payor PCP','Flag','Note','Saved','MRN','Member ID')
   for($c=0;$c -lt $fh.Count;$c++){$ws.Cells[1,($c+1)].Value=$fh[$c]};$r=1;foreach($fr in $flagRows){$r++;for($c=0;$c -lt $fh.Count;$c++){Set-RollupCell $ws $r ($c+1) $fr[$c]}}
@@ -3228,6 +3323,7 @@ function Send-AwvFile($Context,$K,[string]$Id,[string]$Site,[string]$Format,[str
  switch($Format){
   'html'{Send-Bytes $Context 'text/html; charset=utf-8' ([Text.Encoding]::UTF8.GetBytes((ConvertTo-AwvDocument $run $Site -Layout $Layout))) ('inline; filename="'+$name+'.html"')}
   'xlsx'{Send-Bytes $Context 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' (New-AwvWorkbook $run $Site $Layout) ('attachment; filename="'+$name+'.xlsx"')}
+  'detail'{Send-Bytes $Context 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' (New-AwvWorkbook $run $Site $Layout -Detail) ('attachment; filename="'+$name+' - care gap detail.xlsx"')}
   'pdf'{
    # Rendered under a space-free staging name (the browser command line is not quoted).
    $stem=Join-Path $script:Paths.Staging ($K.file+'-'+$Id+'-'+[Guid]::NewGuid().ToString('N').Substring(0,8));$h=$stem+'.html';$pp=$stem+'.pdf'
@@ -3314,7 +3410,7 @@ function Get-AwvModel($K,[string]$Id,[switch]$Summary){
  $null=Update-AwvLiveness $run
  $m=[ordered]@{npAwvId=[string]$run.npAwvId;state=[string]$run.state;percent=[int](Get-P $run 'percent' 0);stage=[string](Get-P $run 'stage' '');requestedUtc=(ConvertTo-IsoText (Get-P $run 'requestedUtc' ''));completedUtc=(ConvertTo-IsoText (Get-P $run 'completedUtc' ''));seconds=(Get-P $run 'seconds' $null);npis=@(Get-P $run 'npis' @());providerCount=@(Get-P $run 'npis' @()).Count;selection=(Get-OverviewSelectionText $run);errorSummary=[string](Get-P $run 'errorSummary' '');failedProviders=[int](Get-P $run 'failedProviders' 0);epicError=[string](Get-P $run 'epicError' '');siteCount=0;listed=0;sites=@();all=$null;sourcesText='';perSite=$script:NpAwvPerSite;outreach=[bool]$K.outreach;gaps=[bool]$K.gaps;awv=[bool]$K.awv}
  if($m.state -eq 'Completed'){
-  $file={param([string]$Site,[string]$Layout)$q='id='+$m.npAwvId+$(if($Site){'&site='+[Uri]::EscapeDataString($Site)}else{''})+$(if($Layout){'&layout='+$Layout}else{''});[ordered]@{view=$K.route+'/view?'+$q;html=$K.route+'.file?'+$q+'&format=html';pdf=$K.route+'.file?'+$q+'&format=pdf';xlsx=$K.route+'.file?'+$q+'&format=xlsx'}}
+  $file={param([string]$Site,[string]$Layout)$q='id='+$m.npAwvId+$(if($Site){'&site='+[Uri]::EscapeDataString($Site)}else{''})+$(if($Layout){'&layout='+$Layout}else{''});[ordered]@{view=$K.route+'/view?'+$q;html=$K.route+'.file?'+$q+'&format=html';pdf=$K.route+'.file?'+$q+'&format=pdf';xlsx=$K.route+'.file?'+$q+'&format=xlsx';detail=$K.route+'.file?'+$q+'&format=detail'}}
   $links={param([string]$Site)$l=& $file $Site '';if($K.outreach){$l['outreach']=(& $file $Site 'outreach')};if($K.gaps){$l['gaps']=(& $file $Site 'gaps')};$l}
   $m.all=& $links ''
   # History rows show the count as generated; the open list applies the current flags (one flag file read per provider).
@@ -3373,7 +3469,7 @@ function busy(){return !!current&&(current.state==='Starting'||current.state==='
 function changed(){if(!current||current.state!=='Completed')return false;return [...sel].sort().join(',')!==[...current.npis].sort().join(',')}
 function syncChecks(){pickerSync();el('build').disabled=sel.size===0||busy();el('build').textContent=busy()?'Generating...':'Generate lists';const note=el('selNote');if(note)note.style.display=changed()?'':'none'}
 function plural(n,w){return n+' '+w+(n===1?'':'s')}
-function links(l){return '<a target="_blank" href="'+esc(l.view)+'">View &amp; flag</a><a target="_blank" href="'+esc(l.html)+'">HTML</a><a target="_blank" href="'+esc(l.pdf)+'">PDF</a><a href="'+esc(l.xlsx)+'">Excel</a>'}
+function links(l){return '<a target="_blank" href="'+esc(l.view)+'">View &amp; flag</a><a target="_blank" href="'+esc(l.html)+'">HTML</a><a target="_blank" href="'+esc(l.pdf)+'">PDF</a><a href="'+esc(l.xlsx)+'">Excel</a>'+(l.detail?'<a href="'+esc(l.detail)+'" title="The Excel file plus a Care Gap Detail sheet: each source&#39;s status and date for every measure of every patient on this list">Excel + gap detail</a>':'')}
 function showResult(o){
  current=o;
  if(!o){el('result').innerHTML='<span class="muted">No lists generated yet. Choose sites above, then select Generate lists.</span>';syncChecks();return}
