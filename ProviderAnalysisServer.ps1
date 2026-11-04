@@ -15,6 +15,8 @@
 # record per MRN + measure is the final word on BCS, COLO, CBP, EED, GSD, KED and SUPD in every report, comparison, Overview and list. It is optional.
 # Care Gap Detail: each patient keeps every source's own status (and dated evidence) for BCS, COLO, CBP, EED, GSD, KED, MAD and SUPD, shown on a Care Gap
 # Detail sheet in the patient rollup and in the "Excel + gap detail" file of every NP-AWV, PCP-AWV and Care Gaps list and outreach list.
+# Draft 5.19: an Overview covering more than one risk pool starts with totals by risk pool, then has a sheet (Excel) or section (page and PDF) per
+# risk pool with all of its locations.
 # Draft 5.18: Overview, New Patients, NP-AWV, PCP-AWV and Care Gaps files are named for what was generated: risk pool (CMM, PHNY, RIV, CRH), plus the
 # location for one location, or location and provider for one provider.
 # Draft 5.17: NP-AWV adds a Priority Gap List: the Outreach List limited to patients with a diabetes measure (GSD, EED, KED, MAD), CBP, COLO or BCS
@@ -2601,53 +2603,108 @@ function Get-OverviewSourcesText($Ov){
  return ('Source files: '+($parts -join ', '))
 }
 function Get-KpiCellsHtml($Kpi){$h='';foreach($c in $script:KpiColumns){$h+='<td class="n">'+$(if($null -eq $Kpi){'-'}else{[string](Get-Field $Kpi $c[0] 0)})+'</td>'};return $h}
-function ConvertTo-OverviewTablesHtml($Ov){
- # One table: providers grouped by location with a subtotal under each, grand total last; then totals by risk pool. Shared by the page and the PDF.
- $heads='';foreach($c in $script:KpiColumns){$heads+='<th class="n">'+(ConvertTo-HtmlEncoded $c[1])+'</th>'};$span=2+$script:KpiColumns.Count
- $body=''
- foreach($l in @(Get-P $Ov 'locations' @())){
-  if($null -eq $l){continue};$members=@(Get-Field $l 'rows' @()|Where-Object{$null -ne $_});$lt=Get-Field $l 'total' $null
-  $body+='<tr class="loc"><th colspan="'+$span+'">'+(ConvertTo-HtmlEncoded (Get-Field $l 'location' ''))+'</th></tr>'
-  foreach($r in $members){$note=[string](Get-Field $r 'note' '');$err=[string](Get-Field $r 'error' '');$body+='<tr><td>'+(ConvertTo-HtmlEncoded (Get-Field $r 'displayName' ''))+$(if($err){'<div class="rowerr">Not counted: '+(ConvertTo-HtmlEncoded $err)+'</div>'}elseif($note){'<div class="rownote">'+(ConvertTo-HtmlEncoded $note)+'</div>'}else{''})+'</td><td class="pool">'+(ConvertTo-HtmlEncoded (Get-Field $r 'riskPool' ''))+'</td>'+(Get-KpiCellsHtml (Get-Field $r 'kpi' $null))+'</tr>'}
-  $body+='<tr class="sub"><td>'+(ConvertTo-HtmlEncoded (Get-Field $l 'location' ''))+' total</td><td>'+[int](Get-Field $lt 'providers' 0)+' provider'+$(if([int](Get-Field $lt 'providers' 0) -eq 1){''}else{'s'})+'</td>'+(Get-KpiCellsHtml (Get-Field $lt 'kpi' $null))+'</tr>'
+function Get-OverviewPoolViews($Ov){
+ # The overview split by risk pool: each pool's locations with only that pool's providers, location subtotals and the pool total (also works for saved overviews).
+ $out=@()
+ foreach($p in @(Get-P $Ov 'pools' @()|Where-Object{$null -ne $_})){
+  $pn=[string](Get-Field $p 'riskPool' '');$locs=@();$all=@()
+  foreach($l in @(Get-P $Ov 'locations' @()|Where-Object{$null -ne $_})){
+   $members=@(Get-Field $l 'rows' @()|Where-Object{$null -ne $_ -and [string](Get-Field $_ 'riskPool' '') -eq $pn});if($members.Count -eq 0){continue}
+   $all+=$members;$locs+=[ordered]@{location=[string](Get-Field $l 'location' '');rows=$members;total=(New-KpiTotal $members)}
+  }
+  $out+=[ordered]@{riskPool=$pn;locations=$locs;total=(New-KpiTotal $all)}
  }
+ return $out
+}
+function Test-OverviewMultiPool($Ov){return (@(Get-P $Ov 'pools' @()|Where-Object{$null -ne $_}).Count -gt 1)}
+function ConvertTo-OverviewLocationTableHtml([object[]]$Locations,$Total,[string]$TotalLabel,[bool]$ShowPool){
+ # Providers grouped by location with a subtotal under each, and a total row last.
+ $heads='';foreach($c in $script:KpiColumns){$heads+='<th class="n">'+(ConvertTo-HtmlEncoded $c[1])+'</th>'};$span=1+$(if($ShowPool){1}else{0})+$script:KpiColumns.Count
+ $body=''
+ foreach($l in @($Locations)){
+  if($null -eq $l){continue};$members=@(Get-Field $l 'rows' @()|Where-Object{$null -ne $_});$lt=Get-Field $l 'total' $null;$ln=[string](Get-Field $l 'location' '')
+  $body+='<tr class="loc"><th colspan="'+$span+'">'+(ConvertTo-HtmlEncoded $ln)+'</th></tr>'
+  foreach($r in $members){$note=[string](Get-Field $r 'note' '');$err=[string](Get-Field $r 'error' '');$body+='<tr><td>'+(ConvertTo-HtmlEncoded (Get-Field $r 'displayName' ''))+$(if($err){'<div class="rowerr">Not counted: '+(ConvertTo-HtmlEncoded $err)+'</div>'}elseif($note){'<div class="rownote">'+(ConvertTo-HtmlEncoded $note)+'</div>'}else{''})+'</td>'+$(if($ShowPool){'<td class="pool">'+(ConvertTo-HtmlEncoded (Get-Field $r 'riskPool' ''))+'</td>'}else{''})+(Get-KpiCellsHtml (Get-Field $r 'kpi' $null))+'</tr>'}
+  $ln2=[int](Get-Field $lt 'providers' 0)
+  $body+='<tr class="sub"><td>'+(ConvertTo-HtmlEncoded $ln)+' total'+$(if(!$ShowPool){' ('+$ln2+' provider'+$(if($ln2 -eq 1){''}else{'s'})+')'}else{''})+'</td>'+$(if($ShowPool){'<td>'+$ln2+' provider'+$(if($ln2 -eq 1){''}else{'s'})+'</td>'}else{''})+(Get-KpiCellsHtml (Get-Field $lt 'kpi' $null))+'</tr>'
+ }
+ $tn=[int](Get-Field $Total 'providers' 0)
+ $body+='<tr class="grand"><td>'+(ConvertTo-HtmlEncoded $TotalLabel)+$(if(!$ShowPool){' ('+$tn+' provider'+$(if($tn -eq 1){''}else{'s'})+')'}else{''})+'</td>'+$(if($ShowPool){'<td>'+$tn+' provider'+$(if($tn -eq 1){''}else{'s'})+'</td>'}else{''})+(Get-KpiCellsHtml (Get-Field $Total 'kpi' $null))+'</tr>'
+ return '<table class="ov"><thead><tr><th>Provider</th>'+$(if($ShowPool){'<th>Risk pool</th>'}else{''})+$heads+'</tr></thead><tbody>'+$body+'</tbody></table>'
+}
+function ConvertTo-OverviewPoolTotalsHtml($Ov){
+ $heads='';foreach($c in $script:KpiColumns){$heads+='<th class="n">'+(ConvertTo-HtmlEncoded $c[1])+'</th>'}
  $t=Get-P $Ov 'total' $null;$tn=[int](Get-Field $t 'providers' 0)
- $body+='<tr class="grand"><td>All providers</td><td>'+$tn+' provider'+$(if($tn -eq 1){''}else{'s'})+'</td>'+(Get-KpiCellsHtml (Get-Field $t 'kpi' $null))+'</tr>'
  $poolRows='';foreach($p in @(Get-P $Ov 'pools' @())){if($null -eq $p){continue};$poolRows+='<tr><td class="pool">'+(ConvertTo-HtmlEncoded (Get-Field $p 'riskPool' ''))+'</td><td class="n">'+[int](Get-Field $p 'providers' 0)+'</td>'+(Get-KpiCellsHtml (Get-Field $p 'kpi' $null))+'</tr>'}
  $poolRows+='<tr class="grand"><td>All risk pools</td><td class="n">'+$tn+'</td>'+(Get-KpiCellsHtml (Get-Field $t 'kpi' $null))+'</tr>'
- return '<table class="ov"><thead><tr><th>Provider</th><th>Risk pool</th>'+$heads+'</tr></thead><tbody>'+$body+'</tbody></table><h3 class="ovh">Totals by risk pool</h3><table class="ov"><thead><tr><th>Risk pool</th><th class="n">Providers</th>'+$heads+'</tr></thead><tbody>'+$poolRows+'</tbody></table>'
+ return '<table class="ov"><thead><tr><th>Risk pool</th><th class="n">Providers</th>'+$heads+'</tr></thead><tbody>'+$poolRows+'</tbody></table>'
 }
-$script:OverviewCss='table.ov{border-collapse:collapse;width:100%;margin-top:8px}table.ov th,table.ov td{padding:5px 7px;border-bottom:1px solid #dce4ef;text-align:left;vertical-align:top}table.ov thead th{background:#17365d;color:#fff;font-weight:600;vertical-align:bottom}table.ov .n,table.ov .pool{white-space:nowrap}table.ov .n{text-align:right}table.ov thead th.n{white-space:normal;max-width:80px}table.ov tr.loc th{background:#eaf1f8;color:#17365d;font-size:1.05em;padding-top:9px}table.ov tr.sub td{background:#f4f7fb;font-weight:700;border-bottom:2px solid #c8d2e0}table.ov tr.grand td{background:#dfe9f5;font-weight:700;border-top:2px solid #17365d}.rownote{color:#9a5b00;font-size:.85em}.rowerr{color:#a61b1b;font-size:.85em}h3.ovh{color:#17365d;margin:18px 0 0}'
+function ConvertTo-OverviewTablesHtml($Ov){
+ # Shared by the page and the PDF. One risk pool: providers grouped by location with subtotals and a grand total, then totals by risk pool.
+ # Several risk pools: totals by risk pool first, then a section per risk pool (its own PDF page) with all of that pool's locations.
+ if(Test-OverviewMultiPool $Ov){
+  $views=@(Get-OverviewPoolViews $Ov);$i=0
+  $nav='<p class="ovnav">Risk pools: '+((@($views|ForEach-Object{$i++;'<a href="#ovpool'+$i+'">'+(ConvertTo-HtmlEncoded $_.riskPool)+'</a>'})) -join ' &middot; ')+'</p>'
+  $h='<h3 class="ovh">Totals by risk pool</h3>'+(ConvertTo-OverviewPoolTotalsHtml $Ov)+$nav;$i=0
+  foreach($v in $views){$i++;$h+='<section class="ovpool" id="ovpool'+$i+'"><h2 class="ovp">'+(ConvertTo-HtmlEncoded $v.riskPool)+'</h2>'+(ConvertTo-OverviewLocationTableHtml @($v.locations) $v.total ($v.riskPool+' total') $false)+'</section>'}
+  return $h
+ }
+ return (ConvertTo-OverviewLocationTableHtml @(Get-P $Ov 'locations' @()) (Get-P $Ov 'total' $null) 'All providers' $true)+'<h3 class="ovh">Totals by risk pool</h3>'+(ConvertTo-OverviewPoolTotalsHtml $Ov)
+}
+$script:OverviewCss='table.ov{border-collapse:collapse;width:100%;margin-top:8px}table.ov th,table.ov td{padding:5px 7px;border-bottom:1px solid #dce4ef;text-align:left;vertical-align:top}table.ov thead th{background:#17365d;color:#fff;font-weight:600;vertical-align:bottom}table.ov .n,table.ov .pool{white-space:nowrap}table.ov .n{text-align:right}table.ov thead th.n{white-space:normal;max-width:80px}table.ov tr.loc th{background:#eaf1f8;color:#17365d;font-size:1.05em;padding-top:9px}table.ov tr.sub td{background:#f4f7fb;font-weight:700;border-bottom:2px solid #c8d2e0}table.ov tr.grand td{background:#dfe9f5;font-weight:700;border-top:2px solid #17365d}.rownote{color:#9a5b00;font-size:.85em}.rowerr{color:#a61b1b;font-size:.85em}h3.ovh{color:#17365d;margin:18px 0 0}h2.ovp{color:#17365d;margin:22px 0 0;font-size:1.25em;border-bottom:2px solid #17365d;padding-bottom:3px}p.ovnav{margin:8px 0 0}p.ovnav a{color:#1769aa}'
 function ConvertTo-OverviewDocument($Ov){
  # Printable landscape page for the PDF.
  $n=@(Get-P $Ov 'npis' @()).Count;$asOf=ConvertTo-DateValue (Get-P $Ov 'asOf' $null);$when=$(if($asOf){$asOf.ToString('g')}else{''})
- return '<!doctype html><html><head><meta charset="utf-8"><title>Provider Overview</title><style>@page{size:letter landscape;margin:.4in}body{font:10px Segoe UI,Arial;color:#172033;margin:0}h1{font-size:17px;color:#17365d;margin:0 0 2px}.muted{color:#667085}table.ov{page-break-inside:auto}table.ov tr{page-break-inside:avoid}table.ov thead{display:table-header-group}'+$script:OverviewCss+'</style></head><body><h1>Provider Overview</h1><div class="muted">'+$n+' provider'+$(if($n -eq 1){''}else{'s'})+' &middot; generated '+(ConvertTo-HtmlEncoded $when)+' &middot; '+(ConvertTo-HtmlEncoded (Get-OverviewSourcesText $Ov))+' &middot; flagged patients are excluded from every count, as on each dashboard</div>'+(ConvertTo-OverviewTablesHtml $Ov)+'</body></html>'
+ return '<!doctype html><html><head><meta charset="utf-8"><title>Provider Overview</title><style>@page{size:letter landscape;margin:.4in}body{font:10px Segoe UI,Arial;color:#172033;margin:0}h1{font-size:17px;color:#17365d;margin:0 0 2px}.muted{color:#667085}table.ov{page-break-inside:auto}table.ov tr{page-break-inside:avoid}table.ov thead{display:table-header-group}section.ovpool{page-break-before:always}p.ovnav{display:none}'+$script:OverviewCss+'</style></head><body><h1>Provider Overview</h1><div class="muted">'+$n+' provider'+$(if($n -eq 1){''}else{'s'})+' &middot; generated '+(ConvertTo-HtmlEncoded $when)+' &middot; '+(ConvertTo-HtmlEncoded (Get-OverviewSourcesText $Ov))+' &middot; flagged patients are excluded from every count, as on each dashboard</div>'+(ConvertTo-OverviewTablesHtml $Ov)+'</body></html>'
 }
 function Send-Bytes($Context,[string]$Type,[byte[]]$Bytes,[string]$Disposition){$Context.Response.StatusCode=200;$Context.Response.ContentType=$Type;$Context.Response.Headers['Content-Disposition']=$Disposition;$Context.Response.Headers['Cache-Control']='no-store';$Context.Response.ContentLength64=$Bytes.Length;$Context.Response.OutputStream.Write($Bytes,0,$Bytes.Length);$Context.Response.Close()}
 function Get-CompletedOverview([string]$Id){$ov=Json (Get-OverviewPath $Id);if(!$ov -or [string](Get-P $ov 'state' '') -ne 'Completed'){throw 'That overview is not complete.'};return $ov}
 function New-OverviewWorkbook($Ov){
- # Same layout as the page: providers grouped by location with subtotals and a grand total, then totals by risk pool.
+ # One risk pool: one sheet, providers grouped by location with subtotals and a grand total, then totals by risk pool (as on the page).
+ # Several risk pools: an Overview sheet with the totals by risk pool, then one sheet per risk pool with all of its locations.
  try{Add-Type -AssemblyName System.Drawing -ErrorAction Stop}catch{}
- $pkg=New-Object OfficeOpenXml.ExcelPackage;$ws=$pkg.Workbook.Worksheets.Add('Overview');$kc=$script:KpiColumns.Count
- $asOf=ConvertTo-DateValue (Get-P $Ov 'asOf' $null)
- $ws.Cells[1,1].Value='Provider Overview';$ws.Cells[1,1].Style.Font.Bold=$true;$ws.Cells[1,1].Style.Font.Size=14
- $ws.Cells[2,1].Value=('Generated '+$(if($asOf){$asOf.ToString('g')}else{''})+'. '+(Get-OverviewSourcesText $Ov)+'. Flagged patients are excluded from every count, as on each dashboard.')
+ $pkg=New-Object OfficeOpenXml.ExcelPackage;$kc=$script:KpiColumns.Count;$used=@{}
+ $asOf=ConvertTo-DateValue (Get-P $Ov 'asOf' $null);$multi=Test-OverviewMultiPool $Ov;$t=Get-P $Ov 'total' $null
+ $ws=$null
  $fill={param($Row,[int]$LastCol,[string]$Hex,[bool]$Bold)$rng=$ws.Cells[$Row,1,$Row,$LastCol];$rng.Style.Fill.PatternType=[OfficeOpenXml.Style.ExcelFillStyle]::Solid;$h=$Hex.TrimStart('#');$rng.Style.Fill.BackgroundColor.SetColor([Drawing.Color]::FromArgb([Convert]::ToInt32($h.Substring(0,2),16),[Convert]::ToInt32($h.Substring(2,2),16),[Convert]::ToInt32($h.Substring(4,2),16)));if($Bold){$rng.Style.Font.Bold=$true}}
- $r=4;$heads=@('Location','Provider','NPI','Risk Pool')+@($script:KpiColumns|ForEach-Object{$_[1]});$last=$heads.Count
- for($c=0;$c -lt $last;$c++){$ws.Cells[$r,($c+1)].Value=$heads[$c]};& $fill $r $last '#17365D' $true;$ws.Cells[$r,1,$r,$last].Style.Font.Color.SetColor([Drawing.Color]::White);$ws.Cells[$r,1,$r,$last].Style.WrapText=$true;$headRow=$r
  $put={param($Row,[int]$Col,$Kpi)for($k=0;$k -lt $kc;$k++){if($null -ne $Kpi){$ws.Cells[$Row,($Col+$k)].Value=[int](Get-Field $Kpi $script:KpiColumns[$k][0] 0)}}}
- foreach($l in @(Get-P $Ov 'locations' @())){
-  if($null -eq $l){continue};$ln=[string](Get-Field $l 'location' '')
-  foreach($x in @(Get-Field $l 'rows' @()|Where-Object{$null -ne $_})){$r++;$ws.Cells[$r,1].Value=$ln;$ws.Cells[$r,2].Value=[string](Get-Field $x 'displayName' '');$ws.Cells[$r,3].Value=[string](Get-Field $x 'npi' '');$ws.Cells[$r,4].Value=[string](Get-Field $x 'riskPool' '');& $put $r 5 (Get-Field $x 'kpi' $null);$err=[string](Get-Field $x 'error' '');if($err){$ws.Cells[$r,($last+1)].Value=('Not counted: '+$err)}else{$note=[string](Get-Field $x 'note' '');if($note){$ws.Cells[$r,($last+1)].Value=$note}}}
-  $lt=Get-Field $l 'total' $null;$r++;$ws.Cells[$r,1].Value=$ln;$ws.Cells[$r,2].Value=($ln+' total ('+[int](Get-Field $lt 'providers' 0)+')');& $put $r 5 (Get-Field $lt 'kpi' $null);& $fill $r $last '#F4F7FB' $true
+ $title={param([string]$Text)$ws.Cells[1,1].Value=$Text;$ws.Cells[1,1].Style.Font.Bold=$true;$ws.Cells[1,1].Style.Font.Size=14
+  $ws.Cells[2,1].Value=('Generated '+$(if($asOf){$asOf.ToString('g')}else{''})+'. '+(Get-OverviewSourcesText $Ov)+'. Flagged patients are excluded from every count, as on each dashboard.')}
+ $head={param([int]$Row,[string[]]$Heads)for($c=0;$c -lt $Heads.Count;$c++){$ws.Cells[$Row,($c+1)].Value=$Heads[$c]};& $fill $Row $Heads.Count '#17365D' $true;$ws.Cells[$Row,1,$Row,$Heads.Count].Style.Font.Color.SetColor([Drawing.Color]::White);$ws.Cells[$Row,1,$Row,$Heads.Count].Style.WrapText=$true}
+ $locTable={param([int]$Row,[object[]]$Locations,$Total,[string]$AllLoc,[string]$AllLabel,[bool]$ShowPool)
+  # Writes the location table from $Row; returns the last row written.
+  $heads=@('Location','Provider','NPI')+$(if($ShowPool){@('Risk Pool')}else{@()})+@($script:KpiColumns|ForEach-Object{$_[1]});$last=$heads.Count;$kcol=$(if($ShowPool){5}else{4})
+  & $head $Row $heads;$r=$Row
+  foreach($l in @($Locations)){
+   if($null -eq $l){continue};$ln=[string](Get-Field $l 'location' '')
+   foreach($x in @(Get-Field $l 'rows' @()|Where-Object{$null -ne $_})){$r++;$ws.Cells[$r,1].Value=$ln;$ws.Cells[$r,2].Value=[string](Get-Field $x 'displayName' '');$ws.Cells[$r,3].Value=[string](Get-Field $x 'npi' '');if($ShowPool){$ws.Cells[$r,4].Value=[string](Get-Field $x 'riskPool' '')};& $put $r $kcol (Get-Field $x 'kpi' $null);$err=[string](Get-Field $x 'error' '');if($err){$ws.Cells[$r,($last+1)].Value=('Not counted: '+$err)}else{$note=[string](Get-Field $x 'note' '');if($note){$ws.Cells[$r,($last+1)].Value=$note}}}
+   $lt=Get-Field $l 'total' $null;$r++;$ws.Cells[$r,1].Value=$ln;$ws.Cells[$r,2].Value=($ln+' total ('+[int](Get-Field $lt 'providers' 0)+')');& $put $r $kcol (Get-Field $lt 'kpi' $null);& $fill $r $last '#F4F7FB' $true
+  }
+  $r++;$ws.Cells[$r,1].Value=$AllLoc;$ws.Cells[$r,2].Value=($AllLabel+' ('+[int](Get-Field $Total 'providers' 0)+')');& $put $r $kcol (Get-Field $Total 'kpi' $null);& $fill $r $last '#DFE9F5' $true
+  $ws.Column(1).Width=24;$ws.Column(2).Width=30;$ws.Column(3).Width=13;if($ShowPool){$ws.Column(4).Width=18};for($c=$kcol;$c -le $last;$c++){$ws.Column($c).Width=12};$ws.Column($last+1).Width=60
+  $ws.View.FreezePanes(($Row+1),3)
+  return $r
  }
- $t=Get-P $Ov 'total' $null;$r++;$ws.Cells[$r,1].Value='All locations';$ws.Cells[$r,2].Value=('All providers ('+[int](Get-Field $t 'providers' 0)+')');& $put $r 5 (Get-Field $t 'kpi' $null);& $fill $r $last '#DFE9F5' $true
- $r+=3;$ws.Cells[$r,1].Value='Totals by risk pool';$ws.Cells[$r,1].Style.Font.Bold=$true;$r++
- $pheads=@('Risk Pool','Providers')+@($script:KpiColumns|ForEach-Object{$_[1]});$plast=$pheads.Count;for($c=0;$c -lt $plast;$c++){$ws.Cells[$r,($c+1)].Value=$pheads[$c]};& $fill $r $plast '#17365D' $true;$ws.Cells[$r,1,$r,$plast].Style.Font.Color.SetColor([Drawing.Color]::White);$ws.Cells[$r,1,$r,$plast].Style.WrapText=$true
- foreach($p in @(Get-P $Ov 'pools' @())){if($null -eq $p){continue};$r++;$ws.Cells[$r,1].Value=[string](Get-Field $p 'riskPool' '');$ws.Cells[$r,2].Value=[int](Get-Field $p 'providers' 0);& $put $r 3 (Get-Field $p 'kpi' $null)}
- $r++;$ws.Cells[$r,1].Value='All risk pools';$ws.Cells[$r,2].Value=[int](Get-Field $t 'providers' 0);& $put $r 3 (Get-Field $t 'kpi' $null);& $fill $r $plast '#DFE9F5' $true
- $ws.Column(1).Width=24;$ws.Column(2).Width=30;$ws.Column(3).Width=13;$ws.Column(4).Width=18;for($c=5;$c -le $last;$c++){$ws.Column($c).Width=12};$ws.Column($last+1).Width=60
- $ws.View.FreezePanes(($headRow+1),3)
+ $poolTable={param([int]$Row)
+  $pheads=@('Risk Pool','Providers')+@($script:KpiColumns|ForEach-Object{$_[1]});$plast=$pheads.Count;& $head $Row $pheads;$r=$Row
+  foreach($p in @(Get-P $Ov 'pools' @())){if($null -eq $p){continue};$r++;$ws.Cells[$r,1].Value=[string](Get-Field $p 'riskPool' '');$ws.Cells[$r,2].Value=[int](Get-Field $p 'providers' 0);& $put $r 3 (Get-Field $p 'kpi' $null)}
+  $r++;$ws.Cells[$r,1].Value='All risk pools';$ws.Cells[$r,2].Value=[int](Get-Field $t 'providers' 0);& $put $r 3 (Get-Field $t 'kpi' $null);& $fill $r $plast '#DFE9F5' $true
+  return $r
+ }
+ if($multi){
+  $ws=$pkg.Workbook.Worksheets.Add((Get-RollupSheetName 'Overview' $used));& $title 'Provider Overview - totals by risk pool'
+  $ws.Cells[4,1].Value='Totals by risk pool';$ws.Cells[4,1].Style.Font.Bold=$true;$r=& $poolTable 5
+  $ws.Cells[($r+2),1].Value='Each risk pool has its own sheet with all of its locations and providers.'
+  $ws.Column(1).Width=24;$ws.Column(2).Width=12;for($c=3;$c -le (2+$kc);$c++){$ws.Column($c).Width=12};$ws.View.FreezePanes(6,2)
+  foreach($v in @(Get-OverviewPoolViews $Ov)){
+   $ws=$pkg.Workbook.Worksheets.Add((Get-RollupSheetName $v.riskPool $used));& $title ('Provider Overview - '+$v.riskPool)
+   $null=& $locTable 4 @($v.locations) $v.total ('All '+$v.riskPool+' locations') ($v.riskPool+' total') $false
+  }
+ }else{
+  $ws=$pkg.Workbook.Worksheets.Add((Get-RollupSheetName 'Overview' $used));& $title 'Provider Overview'
+  $r=& $locTable 4 @(Get-P $Ov 'locations' @()) $t 'All locations' 'All providers' $true
+  $r+=3;$ws.Cells[$r,1].Value='Totals by risk pool';$ws.Cells[$r,1].Style.Font.Bold=$true;$r++;$null=& $poolTable $r
+ }
  try{return ,$pkg.GetAsByteArray()}finally{$pkg.Dispose()}
 }
 function Send-OverviewFile($Context,[string]$Id,[string]$Type){
