@@ -2771,7 +2771,7 @@ function Get-NewListCriteriaText($Run){
  $c=ConvertTo-DateValue (Get-P $Run 'cutoff' $null);$m=[int](Get-P $Run 'months' $script:NewListMonths)
  return ('Patients marked New Patient in Export with no visit on or after '+$(if($c){$c.ToString('M/d/yyyy')}else{'the cutoff'})+' ('+$m+' months before the list was built) in either Export "Last QEM Visit Date with any PCP in assigned TIN" or the Serial Scheduling "PCP Visit Dates". Flagged patients are excluded, as on each dashboard.')
 }
-function Get-SafeFileName([string]$Name){$n=(($Name -replace '[\\/:*?"<>|\x00-\x1f]',' ') -replace '\s+',' ').Trim().TrimEnd('.').Trim();if(!$n){$n='Provider'};if($n.Length -gt 60){$n=$n.Substring(0,60).Trim()};return $n}
+function Get-SafeFileName([string]$Name,[int]$Max=60){$n=(($Name -replace '[\\/:*?"<>|\x00-\x1f]',' ') -replace '\s+',' ').Trim().TrimEnd('.').Trim();if(!$n){$n='Provider'};if($n.Length -gt $Max){$n=$n.Substring(0,$Max).Trim()};return $n}
 function ConvertTo-NewListSummaryHtml($Run){
  # Providers grouped by location with a subtotal under each and a grand total; shared by the page and the combined files.
  $m=[int](Get-P $Run 'months' $script:NewListMonths);$body=''
@@ -3338,10 +3338,25 @@ function New-AwvWorkbook($Run,[string]$SiteName='',[string]$Layout='list',[switc
  }finally{$pkg.Dispose()}
 }
 function Get-CompletedAwv($K,[string]$Id){$run=Json (Get-AwvPath $K $Id);if(!$run -or [string](Get-P $run 'state' '') -ne 'Completed'){throw ('That '+$K.title+' list is not complete.')};return $run}
+function Get-AwvScopeParts($Run,[string]$Site){
+ # What the list was generated for, for its file names: the risk pool abbreviation (CMM, PHNY, RIV, CRH); then the location when the run covers one location;
+ # then location and provider when it covers one provider. A whole-pool run adds the site of a one-site file, or "All sites".
+ $abbr=@{};foreach($k in @($script:PoolAliases.Keys)){$abbr[[string]$script:PoolAliases[$k]]=[string]$k}
+ $sel=Get-P $Run 'selection' $null;$pools=@()
+ foreach($x in @(Get-Field $sel 'riskPools' @())){if($null -eq $x){continue};$n=ConvertTo-RiskPoolName ([string](Get-Field $x 'name' ''));if(!$n){continue};$a=$(if($abbr.ContainsKey($n)){$abbr[$n]}else{$n});if($pools -notcontains $a){$pools+=$a}}
+ $sites=@(Get-P $Run 'sites' @()|Where-Object{$null -ne $_});$parts=@();if($pools.Count){$parts+=($pools -join '+')}
+ if(@(Get-P $Run 'npis' @()).Count -eq 1 -and $sites.Count -eq 1){
+  $parts+=[string](Get-Field $sites[0] 'site' '');$prov=@(Get-Field $sites[0] 'providers' @()|Where-Object{$null -ne $_});if($prov.Count){$parts+=[string](Get-Field $prov[0] 'displayName' '')}
+ }
+ elseif($sites.Count -eq 1){$parts+=[string](Get-Field $sites[0] 'site' '')}
+ elseif($Site){$parts+=$Site}
+ else{$parts+='All sites'}
+ return @($parts|Where-Object{$_})
+}
 function Send-AwvFile($Context,$K,[string]$Id,[string]$Site,[string]$Format,[string]$Layout='list'){
  # Built on request from the saved generation with the providers' current flags, so a flag saved a minute ago is already reflected.
  $Layout=Get-AwvLayout $K $Layout;$run=Get-CompletedAwv $K $Id;$asOf=ConvertTo-DateValue (Get-P $run 'asOf' $null)
- $name=Get-SafeFileName ((Get-AwvLabel $K $Layout)+' - '+$(if($Site){$Site}else{'All sites'})+' - '+$(if($asOf){$asOf.ToString('yyyy-MM-dd')}else{''}))
+ $name=Get-SafeFileName ((Get-AwvLabel $K $Layout)+' - '+(@(Get-AwvScopeParts $run $Site) -join ' - ')+' - '+$(if($asOf){$asOf.ToString('yyyy-MM-dd')}else{''})) 150
  switch($Format){
   'html'{Send-Bytes $Context 'text/html; charset=utf-8' ([Text.Encoding]::UTF8.GetBytes((ConvertTo-AwvDocument $run $Site -Layout $Layout))) ('inline; filename="'+$name+'.html"')}
   'xlsx'{Send-Bytes $Context 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' (New-AwvWorkbook $run $Site $Layout) ('attachment; filename="'+$name+'.xlsx"')}
