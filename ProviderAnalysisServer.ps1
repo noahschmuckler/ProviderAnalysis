@@ -15,6 +15,8 @@
 # record per MRN + measure is the final word on BCS, COLO, CBP, EED, GSD, KED and SUPD in every report, comparison, Overview and list. It is optional.
 # Care Gap Detail: each patient keeps every source's own status (and dated evidence) for BCS, COLO, CBP, EED, GSD, KED, MAD and SUPD, shown on a Care Gap
 # Detail sheet in the patient rollup and in the "Excel + gap detail" file of every NP-AWV, PCP-AWV and Care Gaps list and outreach list.
+# Draft 5.17: NP-AWV adds a Priority Gap List: the Outreach List limited to patients with a diabetes measure (GSD, EED, KED, MAD, SUPD), CBP, COLO or BCS
+# open, ranked first by how many of those are open and only then by urgency, so one open priority measure outranks any number of other needs.
 # Adds provider indexes, guided cross-source mapping, fuzzy suggestions, NPI profiles, prepared job tracking, ranked outreach lists,
 # a flag mode (/flag?jobId=...) that excludes flagged patients from every list and panel on every later report for that provider,
 # and a Communication tab (/communication) that emails every provider in a risk pool a fresh report PDF via Outlook drafts.
@@ -3060,20 +3062,21 @@ el('build').onclick=async()=>{if(el('build').disabled||busy())return;el('build')
 # Draft 5.10: the same code serves PCP-AWV (ACOR patients, for the PCPs) through $script:AwvKinds; runs are state\<file>-<id>.json and keep the npAwvId field name.
 $script:NpAwvPerSite=30;$script:NpAwvKeep=30;$script:NpAwvInline=$false
 $script:AwvKinds=[ordered]@{
- np=[ordered]@{kind='np';title='NP-AWV';route='/np-awv';api='/api/np-awv';file='npawv';log='NPAWV';tab='npawv';worker='RunNpAwvId';acor=$false;item='awv-np';outreach=$true;gaps=$false;awv=$true
+ np=[ordered]@{kind='np';title='NP-AWV';route='/np-awv';api='/api/np-awv';file='npawv';log='NPAWV';tab='npawv';worker='RunNpAwvId';acor=$false;item='awv-np';outreach=$true;gaps=$false;priority=$true;awv=$true
   Subtitle='one list per site for the travelling NP: non-ACOR patients with an annual wellness visit due, ranked by urgency across every provider at the site'
   Criteria='Non-ACOR patients with an annual wellness visit due (most recent ACV in the Export or Risk Population Outreach in the prior calendar year or earlier, and no future ACV booked), from every selected provider at the site, most urgent first. Urgency is the score on each provider''s own list: 1 for the AWV, plus open measures, open ICDs, and the visit, appointment, A1c and risk factors shown under Why Ranked Here; ties go to the oldest last visit. Each site lists its {max} most urgent.'
   None='No non-ACOR patient at this site has an annual wellness visit due.'
   OutreachCriteria='Outreach list: every non-ACOR patient at the site with an annual wellness visit due (most recent ACV in the Export or Risk Population Outreach in the prior calendar year or earlier, and no future ACV booked), from every selected provider, most urgent first, ranked exactly as on the NP-AWV list but not limited to the top {max}. Phone Number is the Export phone number and is blank when the Export has none for the patient. Last ACV is the most recent of the Export Last ACV Date and the Risk Population Outreach Last Acv.'
+  PriorityCriteria='Priority Gap List: the NP-AWV Outreach List limited to patients who also have one or more priority measures open: the diabetes measures (GSD, EED, KED, MAD, SUPD), CBP, COLO and BCS (KED on a diabetic only while an eGFR or uACR is missing, unless Care Gap Retro shows it open). Patients are ranked first by how many priority measures are open, then by urgency (so even one open priority measure outranks any number of other needs), then by the oldest last visit. Urgency, columns and flags are as on the Outreach List, Priority Gaps lists the open priority measures, and every such patient is listed (not limited to the top {max}).'
   Matches='AWV Due - NP (non-ACOR)'}
- pcp=[ordered]@{kind='pcp';title='PCP-AWV';route='/pcp-awv';api='/api/pcp-awv';file='pcpawv';log='PCPAWV';tab='pcpawv';worker='RunPcpAwvId';acor=$true;item='awv-pcp';outreach=$true;gaps=$true;awv=$true
+ pcp=[ordered]@{kind='pcp';title='PCP-AWV';route='/pcp-awv';api='/api/pcp-awv';file='pcpawv';log='PCPAWV';tab='pcpawv';worker='RunPcpAwvId';acor=$true;item='awv-pcp';outreach=$true;gaps=$true;priority=$false;awv=$true
   Subtitle='one list per site for the PCPs: ACOR patients with an annual wellness visit due, ranked by urgency across every provider at the site'
   Criteria='ACOR patients with an annual wellness visit due (most recent ACV in the Export or Risk Population Outreach more than 365 days before the list was generated, and no future ACV booked), from every selected provider at the site, most urgent first. Urgency is the score on each provider''s own list: 1 for the AWV, plus open measures, open ICDs, and the visit, appointment, A1c and risk factors shown under Why Ranked Here; ties go to the oldest last visit. Each site lists its {max} most urgent.'
   None='No ACOR patient at this site has an annual wellness visit due.'
   OutreachCriteria='Outreach list: every ACOR patient at the site with an annual wellness visit due (most recent ACV in the Export or Risk Population Outreach more than 365 days before the list was generated, and no future ACV booked), from every selected provider, most urgent first, ranked exactly as on the PCP-AWV list but not limited to the top {max}. Phone Number is the Export phone number and is blank when the Export has none for the patient. Last ACV is the most recent of the Export Last ACV Date and the Risk Population Outreach Last Acv.'
   GapCriteria='Gap Outreach List: the PCP-AWV Outreach List limited to patients who also have one or more of GSD, CBP, MAD, EED or KED open (the measures shown under Also Needs; KED counts only while an eGFR or uACR is still missing). Urgency, ranking, columns and flags are exactly as on the Outreach List, and every such patient is listed (not limited to the top {max}).'
   Matches='AWV Due - PCP (ACOR)'}
- cg=[ordered]@{kind='cg';title='Care Gaps';route='/care-gaps';api='/api/care-gaps';file='caregaps';log='CAREGAPS';tab='caregaps';worker='RunCareGapsId';acor=$null;item='';outreach=$true;gaps=$false;awv=$false;UrgentScore=9;SoonScore=6
+ cg=[ordered]@{kind='cg';title='Care Gaps';route='/care-gaps';api='/api/care-gaps';file='caregaps';log='CAREGAPS';tab='caregaps';worker='RunCareGapsId';acor=$null;item='';outreach=$true;gaps=$false;priority=$false;awv=$false;UrgentScore=9;SoonScore=6
   Subtitle='one list per site of patients with open care gaps (GSD, EED, KED, MAD, COLO, BCS), ranked by urgency across every provider at the site'
   Criteria='Patients (ACOR and non-ACOR) with one or more of GSD, EED, KED, MAD, COLO or BCS open, from every selected provider at the site, most urgent first. Urgency: 3 for each of those care gaps (KED on a diabetic only while an eGFR or uACR is missing, unless Care Gap Retro shows it open), 1 for an annual wellness visit due, plus 1 per other open measure (diabetes measures weighted as on the provider lists), 1 for open ICDs, and the visit, appointment, A1c and risk factors shown under Why Ranked Here. Urgent = 9 or more, Soon = 6 or more; ties go to the oldest last visit. Each site lists its {max} most urgent.'
   None='No patient at this site has GSD, EED, KED, MAD, COLO or BCS open.'
@@ -3108,6 +3111,8 @@ function Set-CareGapScore($p){
 function Get-AwvColumns($K,[string]$Layout,[switch]$Extra){
  $full=(Test-AwvFullLayout $Layout)
  if($K.awv){$c=$(if($full){$script:AwvOutreachColumns}else{$script:NpAwvColumns})}else{$c=$(if($full){$script:CareGapOutreachColumns}else{$script:CareGapColumns})}
+ # The priority layout shows the open priority measures right after Urgency.
+ if($Layout -eq 'priority'){$x=@();foreach($h in @($c)){$x+=$h;if($h -eq 'Urgency'){$x+='Priority Gaps'}};$c=$x}
  if($Extra){$c=@($c)+@($(if($full){$script:AwvOutreachExtraColumns}else{$script:NpAwvExtraColumns}))}
  return @($c)
 }
@@ -3116,10 +3121,24 @@ $script:NpAwvColumns=@('#','First Name','Last Name','DOB','Urgency','Epic PCP','
 $script:NpAwvExtraColumns=@('MRN','Member ID','Phone','Payer')
 $script:AwvOutreachColumns=@('MRN','First Name','Last Name','DOB','Phone Number','Last ACV','Urgency','Epic PCP','Payor PCP','Also Needs','Last Visit','Next Appt','Why Ranked Here')
 $script:AwvOutreachExtraColumns=@('Member ID','Payer')
-function Get-AwvLayout($K,[string]$Layout){if($Layout -eq 'outreach'){if(!$K.outreach){throw ($K.title+' has no outreach list.')};return 'outreach'};if($Layout -eq 'gaps'){if(!$K.gaps){throw ($K.title+' has no gap outreach list.')};return 'gaps'};return 'list'}
-function Get-AwvLabel($K,[string]$Layout){return ([string]$K.title+$(if($Layout -eq 'outreach'){' Outreach List'}elseif($Layout -eq 'gaps'){' Gap Outreach List'}else{''}))}
-# The outreach and gap layouts list every patient (no top-N cut) with the outreach columns; the gap layout keeps only patients with a gap measure open.
-function Test-AwvFullLayout([string]$Layout){return ($Layout -eq 'outreach' -or $Layout -eq 'gaps')}
+function Get-AwvLayout($K,[string]$Layout){if($Layout -eq 'outreach'){if(!$K.outreach){throw ($K.title+' has no outreach list.')};return 'outreach'};if($Layout -eq 'gaps'){if(!$K.gaps){throw ($K.title+' has no gap outreach list.')};return 'gaps'};if($Layout -eq 'priority'){if(!$K.priority){throw ($K.title+' has no priority gap list.')};return 'priority'};return 'list'}
+function Get-AwvLabel($K,[string]$Layout){return ([string]$K.title+$(if($Layout -eq 'outreach'){' Outreach List'}elseif($Layout -eq 'gaps'){' Gap Outreach List'}elseif($Layout -eq 'priority'){' Priority Gap List'}else{''}))}
+# The outreach, gap and priority layouts list every patient (no top-N cut) with the outreach columns; the gap and priority layouts keep only patients with one of their measures open.
+function Test-AwvFullLayout([string]$Layout){return ($Layout -eq 'outreach' -or $Layout -eq 'gaps' -or $Layout -eq 'priority')}
+# NP-AWV Priority Gap List: these measures outrank every other urgency factor (the diabetes HEDIS group, CBP, COLO and BCS).
+$script:AwvPriorityMeasures=@('GSD','EED','KED','MAD','SUPD','CBP','COLO','BCS')
+function Get-AwvPriorityText($p){
+ # The priority measures open on the patient, KED counted as the urgency score counts it.
+ $open=@(([string]$p.OpenHedis) -split ',\s*'|Where-Object{$_});$g=@()
+ foreach($m in $script:AwvPriorityMeasures){if($open -notcontains $m){continue};if($m -eq 'KED' -and $p.Diabetic -and !$p.EgfrNeeded -and !$p.UacrNeeded -and !([bool](Get-P $p 'KedConfirmed' $false))){continue};$g+=$m}
+ return ($g -join ', ')
+}
+function Get-AwvPriorityList($Cand){
+ # Lists generated before the priority layout have no prio field; their Also Needs cell names the same open measures.
+ $g=Get-Field $Cand 'prio' $null
+ if($null -eq $g){$t=[string](Get-Field (Get-Field $Cand 'cells' $null) 'Also Needs' '');return @($script:AwvPriorityMeasures|Where-Object{$t -match ('\b'+$_+'\b')})}
+ return @(([string]$g) -split ',\s*'|Where-Object{$_})
+}
 $script:AwvGapMeasures=@('GSD','CBP','MAD','EED','KED')
 function Get-AwvGapText($p){
  # The gap measures open on the patient, counted as the urgency score counts them (KED on a diabetic only while an eGFR or uACR is missing, unless Care Gap Retro shows it open).
@@ -3153,7 +3172,7 @@ function New-AwvCandidate($K,$p,[string]$Npi,[string]$Display){
  $row=@{p=$p;score=$score;tier=$tier;items=$p.Items;boost=@($p.Needs);k=@([string]$K.item)};$last=Get-PatientLastVisit $p
  $cells=[ordered]@{};foreach($h in @('Urgency','Also Needs','Last Visit','Next Appt','Why Ranked Here')){$cells[$h]=[string](Get-OutreachCell $h $row)}
  if(!$K.awv){$cells['Care Gaps']=[string](Get-P $p 'CareGaps' '');$cells['AWV Due']=$(if($p.ACVDue){$(if($p.ACOR -eq $true){'PCP (ACOR)'}else{'NP (non-ACOR)'})}else{''})}
- return [ordered]@{memberId=[string]$p.MemberID;first=[string]$p.First;last=[string]$p.Last;dob=[string]$p.DOB;mrn=[string](Get-P $p 'MRN' '');phone=(Format-PhoneText ([string](Get-P $p 'Phone' '')));lastAcv=(ConvertTo-DateText (Get-P $p 'LastAcv' $null));payer=[string](Get-P $p 'Payer' '');npis=@($Npi);payorPcp=$Display;epicPcp=[string](Get-P $p 'EpicPcp' '');gaps=(Get-AwvGapText $p);score=$score;lastVisitKey=$(if($last){([DateTime]$last).ToString('yyyy-MM-dd')}else{''});cells=$cells;snapshot=(New-FlagSnapshot $p);detail=@(Get-P $p 'GapDetail' @()|Where-Object{$null -ne $_})}
+ return [ordered]@{memberId=[string]$p.MemberID;first=[string]$p.First;last=[string]$p.Last;dob=[string]$p.DOB;mrn=[string](Get-P $p 'MRN' '');phone=(Format-PhoneText ([string](Get-P $p 'Phone' '')));lastAcv=(ConvertTo-DateText (Get-P $p 'LastAcv' $null));payer=[string](Get-P $p 'Payer' '');npis=@($Npi);payorPcp=$Display;epicPcp=[string](Get-P $p 'EpicPcp' '');gaps=(Get-AwvGapText $p);prio=(Get-AwvPriorityText $p);score=$score;lastVisitKey=$(if($last){([DateTime]$last).ToString('yyyy-MM-dd')}else{''});cells=$cells;snapshot=(New-FlagSnapshot $p);detail=@(Get-P $p 'GapDetail' @()|Where-Object{$null -ne $_})}
 }
 function Get-NpAwvFlagIndex([object[]]$Npis){
  # Every active flag on the providers behind a list, by member ID and by last name + first name + DOB.
@@ -3176,15 +3195,17 @@ function Get-NpAwvSiteView($Site,[hashtable]$Index,[string]$Layout='list'){
  # The site's list with current flags applied: the NpAwvPerSite most urgent unflagged patients, and the flagged patients who would have been among them.
  # The outreach layout keeps every unflagged patient (and every flagged one), so nothing on it has "moved up".
  $all=(Test-AwvFullLayout $Layout);$limit=$(if($all){[int]::MaxValue}else{$script:NpAwvPerSite})
- $cands=@(Get-Field $Site 'candidates' @()|Where-Object{$null -ne $_});if($Layout -eq 'gaps'){$cands=@($cands|Where-Object{Test-AwvHasGap $_})}$listed=@{};foreach($m in @(Get-Field $Site 'listed' @())){if($m){$listed[[string]$m]=$true}}
- $rows=@();$flagged=@();$flaggedAll=0;$gapCount=0
+ $cands=@(Get-Field $Site 'candidates' @()|Where-Object{$null -ne $_});if($Layout -eq 'gaps'){$cands=@($cands|Where-Object{Test-AwvHasGap $_})}
+ # Priority layout: only patients with a priority measure open, most priority measures first, then urgency, oldest last visit and name as on every list.
+ if($Layout -eq 'priority'){$cands=@($cands|ForEach-Object{@{c=$_;n=@(Get-AwvPriorityList $_).Count}}|Where-Object{$_.n -gt 0}|Sort-Object -Property @{Expression={-[int]$_.n}},@{Expression={-[int](Get-Field $_.c 'score' 0)}},@{Expression={[string](Get-Field $_.c 'lastVisitKey' '')}},@{Expression={[string](Get-Field $_.c 'last' '')}},@{Expression={[string](Get-Field $_.c 'first' '')}}|ForEach-Object{$_.c})}$listed=@{};foreach($m in @(Get-Field $Site 'listed' @())){if($m){$listed[[string]$m]=$true}}
+ $rows=@();$flagged=@();$flaggedAll=0;$gapCount=0;$prioCount=0
  foreach($c in $cands){
   $hit=Find-NpAwvFlag $c $Index
-  if(!$hit -and (Test-AwvHasGap $c)){$gapCount++}
+  if(!$hit -and (Test-AwvHasGap $c)){$gapCount++};if(!$hit -and @(Get-AwvPriorityList $c).Count -gt 0){$prioCount++}
   if($hit){$flaggedAll++;if($rows.Count -lt $limit){$flagged+=@{c=$c;flag=$hit.flag;npi=$hit.npi}};continue}
   if($rows.Count -lt $limit){$rows+=@{c=$c;rank=($rows.Count+1);movedUp=(!$all -and $listed.Count -gt 0 -and !$listed.ContainsKey([string](Get-Field $c 'memberId' '')))}}
  }
- return @{site=[string](Get-Field $Site 'site' '');providers=@(Get-Field $Site 'providers' @()|Where-Object{$null -ne $_});rows=$rows;flagged=$flagged;candidates=$cands.Count;flaggedAll=$flaggedAll;eligible=($cands.Count-$flaggedAll);gapCount=$gapCount;booked=[int](Get-Field $Site 'booked' 0);recentAcv=[int](Get-Field $Site 'recentAcv' 0)}
+ return @{site=[string](Get-Field $Site 'site' '');providers=@(Get-Field $Site 'providers' @()|Where-Object{$null -ne $_});rows=$rows;flagged=$flagged;candidates=$cands.Count;flaggedAll=$flaggedAll;eligible=($cands.Count-$flaggedAll);gapCount=$gapCount;prioCount=$prioCount;booked=[int](Get-Field $Site 'booked' 0);recentAcv=[int](Get-Field $Site 'recentAcv' 0)}
 }
 function Get-NpAwvViews($Run,[string]$SiteName='',[string]$Layout='list'){
  $sites=@(Get-P $Run 'sites' @()|Where-Object{$null -ne $_});if($SiteName){$sites=@($sites|Where-Object{[string](Get-Field $_ 'site' '') -eq $SiteName});if($sites.Count -eq 0){throw ('Site "'+$SiteName+'" is not on this list.')}}
@@ -3196,6 +3217,7 @@ function Get-NpAwvCell($Row,[string]$Col){
  $c=$Row.c
  switch($Col){
   '#'{return ([string]$Row.rank+$(if($Row.movedUp){' (moved up)'}else{''}))}
+  'Priority Gaps'{return (@(Get-AwvPriorityList $c) -join ', ')}
   'First Name'{return [string](Get-Field $c 'first' '')}
   'Last Name'{return [string](Get-Field $c 'last' '')}
   'DOB'{return [string](Get-Field $c 'dob' '')}
@@ -3226,13 +3248,13 @@ function Get-NpAwvSourcesText($Run){$t=Get-OverviewSourcesText $Run;$e=[string](
 $script:NpAwvCss='body{font:12px Segoe UI,Arial;color:#172033;margin:16px;background:#fff;-webkit-print-color-adjust:exact;print-color-adjust:exact}h1{font-size:19px;color:#17365d;margin:0 0 3px}h2{font-size:16px;color:#17365d;margin:20px 0 2px}h3{font-size:13px;color:#8a1c1c;margin:4px 0}.muted{color:#667085}p{margin:4px 0}p.sum{font-weight:600;margin:4px 0 2px}table.pl{border-collapse:collapse;width:100%;margin-top:6px}table.pl th,table.pl td{padding:4px 6px;border-bottom:1px solid #dce4ef;text-align:left;vertical-align:top}table.pl thead th{background:#17365d;color:#fff;font-weight:600;vertical-align:bottom}table.pl td{white-space:nowrap}table.pl td.wrap{white-space:normal;min-width:16ch;max-width:40ch}table.pl td.i{color:#667085;white-space:nowrap}table.pl tbody tr:nth-child(even) td{background:#f8fafc}tr.moved td.i{color:#9a5b00;font-weight:600}.flagged{margin:10px 0 0;padding:6px 10px;background:#fff6f6;border:1px solid #f1c9c9;border-radius:6px}.flagged table.pl thead th{background:#8a1c1c}.notes{background:#f7f9fc;border-left:3px solid #1769aa;padding:6px 10px;margin:8px 0}'+
  '.flagbar{position:sticky;top:0;z-index:5;display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap;background:#fff7e6;border-bottom:2px solid #e0a800;padding:10px 16px;margin:-16px -16px 14px}.flagbar a.btn{background:#e4e9f0;color:#172033;text-decoration:none;padding:7px 12px;border-radius:5px}button{background:#1769aa;color:#fff;border:0;border-radius:5px;padding:7px 12px;cursor:pointer;font:inherit}button.secondary{background:#e4e9f0;color:#172033}tr[data-member]{cursor:pointer}tr[data-member]:hover td{background:#fffbe6}tr.editor td{background:#fffdf3}.flag-form .radios label{margin-right:16px}.flag-form textarea{display:block;width:100%;max-width:640px;height:60px;margin:8px 0;font:inherit;box-sizing:border-box}.error{color:#a61b1b}'+
  '@page{size:letter landscape;margin:.4in}@media print{body{margin:0;font-size:9px}.flagbar,tr.editor,button{display:none}section.brk{page-break-before:always}table.pl tr{page-break-inside:avoid}table.pl thead{display:table-header-group}h1{font-size:15px}h2{font-size:13px;margin-top:0}}'
-function Get-AwvCriteria($K,[string]$Layout){if($Layout -eq 'outreach'){return [string]$K.OutreachCriteria};if($Layout -eq 'gaps'){return ([string]$K.OutreachCriteria+' '+[string]$K.GapCriteria)};return [string]$K.Criteria}
+function Get-AwvCriteria($K,[string]$Layout){if($Layout -eq 'outreach'){return [string]$K.OutreachCriteria};if($Layout -eq 'gaps'){return ([string]$K.OutreachCriteria+' '+[string]$K.GapCriteria)};if($Layout -eq 'priority'){return ([string]$K.OutreachCriteria+' '+[string]$K.PriorityCriteria)};return [string]$K.Criteria}
 function ConvertTo-NpAwvTableHtml([string[]]$Columns,[object[]]$Rows,[bool]$Interactive){
  $h='<table class="pl"><thead><tr>'+(($Columns|ForEach-Object{'<th>'+(ConvertTo-HtmlEncoded $_)+'</th>'}) -join '')+'</tr></thead><tbody>'
  foreach($r in @($Rows)){
   $c=$r.c;$attr=$(if($r.movedUp){' class="moved"'}else{''})
   if($Interactive){$attr+=' data-member="'+(ConvertTo-HtmlEncoded (Get-Field $c 'memberId' ''))+'" data-name="'+(ConvertTo-HtmlEncoded (Get-PatientDisplayName ([pscustomobject]@{Last=[string](Get-Field $c 'last' '');First=[string](Get-Field $c 'first' '')})))+'"'}
-  $h+='<tr'+$attr+'>'+(($Columns|ForEach-Object{$v=Get-NpAwvCell $r $_;'<td'+$(if($_ -eq '#'){' class="i"'}elseif($_ -in @('Also Needs','Why Ranked Here','Care Gaps')){' class="wrap"'}else{''})+'>'+(ConvertTo-HtmlEncoded $v)+'</td>'}) -join '')+'</tr>'
+  $h+='<tr'+$attr+'>'+(($Columns|ForEach-Object{$v=Get-NpAwvCell $r $_;'<td'+$(if($_ -eq '#'){' class="i"'}elseif($_ -in @('Also Needs','Why Ranked Here','Care Gaps','Priority Gaps')){' class="wrap"'}else{''})+'>'+(ConvertTo-HtmlEncoded $v)+'</td>'}) -join '')+'</tr>'
  }
  return $h+'</tbody></table>'
 }
@@ -3408,16 +3430,16 @@ function Update-AwvLiveness($Run){
 function Get-AwvModel($K,[string]$Id,[switch]$Summary){
  $run=Json (Get-AwvPath $K $Id);if(!$run){throw ($K.title+' list was not found.')}
  $null=Update-AwvLiveness $run
- $m=[ordered]@{npAwvId=[string]$run.npAwvId;state=[string]$run.state;percent=[int](Get-P $run 'percent' 0);stage=[string](Get-P $run 'stage' '');requestedUtc=(ConvertTo-IsoText (Get-P $run 'requestedUtc' ''));completedUtc=(ConvertTo-IsoText (Get-P $run 'completedUtc' ''));seconds=(Get-P $run 'seconds' $null);npis=@(Get-P $run 'npis' @());providerCount=@(Get-P $run 'npis' @()).Count;selection=(Get-OverviewSelectionText $run);errorSummary=[string](Get-P $run 'errorSummary' '');failedProviders=[int](Get-P $run 'failedProviders' 0);epicError=[string](Get-P $run 'epicError' '');siteCount=0;listed=0;sites=@();all=$null;sourcesText='';perSite=$script:NpAwvPerSite;outreach=[bool]$K.outreach;gaps=[bool]$K.gaps;awv=[bool]$K.awv}
+ $m=[ordered]@{npAwvId=[string]$run.npAwvId;state=[string]$run.state;percent=[int](Get-P $run 'percent' 0);stage=[string](Get-P $run 'stage' '');requestedUtc=(ConvertTo-IsoText (Get-P $run 'requestedUtc' ''));completedUtc=(ConvertTo-IsoText (Get-P $run 'completedUtc' ''));seconds=(Get-P $run 'seconds' $null);npis=@(Get-P $run 'npis' @());providerCount=@(Get-P $run 'npis' @()).Count;selection=(Get-OverviewSelectionText $run);errorSummary=[string](Get-P $run 'errorSummary' '');failedProviders=[int](Get-P $run 'failedProviders' 0);epicError=[string](Get-P $run 'epicError' '');siteCount=0;listed=0;sites=@();all=$null;sourcesText='';perSite=$script:NpAwvPerSite;outreach=[bool]$K.outreach;gaps=[bool]$K.gaps;priority=[bool]$K.priority;awv=[bool]$K.awv}
  if($m.state -eq 'Completed'){
   $file={param([string]$Site,[string]$Layout)$q='id='+$m.npAwvId+$(if($Site){'&site='+[Uri]::EscapeDataString($Site)}else{''})+$(if($Layout){'&layout='+$Layout}else{''});[ordered]@{view=$K.route+'/view?'+$q;html=$K.route+'.file?'+$q+'&format=html';pdf=$K.route+'.file?'+$q+'&format=pdf';xlsx=$K.route+'.file?'+$q+'&format=xlsx';detail=$K.route+'.file?'+$q+'&format=detail'}}
-  $links={param([string]$Site)$l=& $file $Site '';if($K.outreach){$l['outreach']=(& $file $Site 'outreach')};if($K.gaps){$l['gaps']=(& $file $Site 'gaps')};$l}
+  $links={param([string]$Site)$l=& $file $Site '';if($K.outreach){$l['outreach']=(& $file $Site 'outreach')};if($K.gaps){$l['gaps']=(& $file $Site 'gaps')};if($K.priority){$l['priority']=(& $file $Site 'priority')};$l}
   $m.all=& $links ''
   # History rows show the count as generated; the open list applies the current flags (one flag file read per provider).
   if($Summary){foreach($s in @(Get-P $run 'sites' @())){if($null -ne $s){$m.siteCount++;$m.listed+=@(Get-Field $s 'listed' @()).Count}}}
   else{
    $views=@(Get-NpAwvViews $run);$m.siteCount=$views.Count;foreach($v in $views){$m.listed+=@($v.rows).Count}
-   $m.sites=@(foreach($v in $views){[ordered]@{site=$v.site;listed=@($v.rows).Count;eligible=[int]$v.eligible;flagged=[int]$v.flaggedAll;booked=[int]$v.booked;recentAcv=[int]$v.recentAcv;gapCount=[int]$v.gapCount;movedUp=@($v.rows|Where-Object{$_.movedUp}).Count;providers=@($v.providers|ForEach-Object{[ordered]@{displayName=[string](Get-Field $_ 'displayName' '');due=[int](Get-Field $_ 'due' 0);note=[string](Get-Field $_ 'note' '');error=[string](Get-Field $_ 'error' '')}});links=(& $links $v.site)}})
+   $m.sites=@(foreach($v in $views){[ordered]@{site=$v.site;listed=@($v.rows).Count;eligible=[int]$v.eligible;flagged=[int]$v.flaggedAll;booked=[int]$v.booked;recentAcv=[int]$v.recentAcv;gapCount=[int]$v.gapCount;prioCount=[int]$v.prioCount;movedUp=@($v.rows|Where-Object{$_.movedUp}).Count;providers=@($v.providers|ForEach-Object{[ordered]@{displayName=[string](Get-Field $_ 'displayName' '');due=[int](Get-Field $_ 'due' 0);note=[string](Get-Field $_ 'note' '');error=[string](Get-Field $_ 'error' '')}});links=(& $links $v.site)}})
    $m.sourcesText=Get-NpAwvSourcesText $run
   }
  }
@@ -3476,9 +3498,9 @@ function showResult(o){
  if(o.state==='Starting'||o.state==='Running'){el('result').innerHTML='<p>Generating lists for '+plural(o.providerCount,'provider')+'... '+o.percent+'%</p><div class="progress"><span style="width:'+Math.max(0,Math.min(100,o.percent))+'%"></span></div><span class="muted">'+esc(o.stage)+'</span>';syncChecks();return}
  if(o.state==='Failed'){el('result').innerHTML='<p class="error">The lists could not be generated: '+esc(o.errorSummary)+'</p><span class="muted">Requested '+esc(when(o.requestedUtc))+'</span>';syncChecks();return}
  let h='<div class="row"><b>'+plural(o.listed,'patient')+' listed across '+plural(o.siteCount,'site')+'</b><span class="muted">generated '+esc(when(o.completedUtc))+(o.seconds!=null?' in '+o.seconds+' s':'')+' from '+plural(o.providerCount,'provider')+'</span></div>';
- h+='<table class="sites"><thead><tr><th>Site</th><th class="n">Listed</th><th class="n">Eligible</th><th class="n">Flagged</th>'+(o.awv?'<th class="n">Already booked</th>':'')+(o.outreach?'<th>List (top '+o.perSite+')</th><th>Outreach list (all patients)</th>'+(o.gaps?'<th>Gap outreach list (GSD, CBP, MAD, EED, KED)</th>':''):'<th>Open</th>')+'</tr></thead><tbody>';
- h+=o.sites.map(s=>'<tr><td><b>'+esc(s.site)+'</b><div class="provlist">'+s.providers.map(p=>esc(p.displayName)+' ('+p.due+')'+(p.error?' <span class="error">not read: '+esc(p.error)+'</span>':p.note?' <span class="warn">'+esc(p.note)+'</span>':'')).join(', ')+'</div>'+(s.movedUp?'<div class="warn">'+plural(s.movedUp,'patient')+' moved up after flags were saved</div>':'')+(s.recentAcv?'<div class="provlist">'+plural(s.recentAcv,'patient')+' left out: a more recent ACV in Risk Population Outreach</div>':'')+'</td><td class="n">'+s.listed+' of '+o.perSite+'</td><td class="n">'+s.eligible+'</td><td class="n">'+s.flagged+'</td>'+(o.awv?'<td class="n">'+s.booked+'</td>':'')+'<td class="links">'+links(s.links)+'</td>'+(o.outreach?'<td class="links">'+links(s.links.outreach)+'</td>':'')+(o.gaps?'<td class="links">'+links(s.links.gaps)+'<div class="provlist">'+plural(s.gapCount,'patient')+'</div></td>':'')+'</tr>').join('');
- if(o.sites.length>1)h+='<tr class="all"><td>All sites (one file, each site on its own page or sheet)</td><td class="n">'+o.listed+'</td><td></td><td></td>'+(o.awv?'<td></td>':'')+'<td class="links">'+links(o.all)+'</td>'+(o.outreach?'<td class="links">'+links(o.all.outreach)+'</td>':'')+(o.gaps?'<td class="links">'+links(o.all.gaps)+'</td>':'')+'</tr>';
+ h+='<table class="sites"><thead><tr><th>Site</th><th class="n">Listed</th><th class="n">Eligible</th><th class="n">Flagged</th>'+(o.awv?'<th class="n">Already booked</th>':'')+(o.outreach?'<th>List (top '+o.perSite+')</th><th>Outreach list (all patients)</th>'+(o.gaps?'<th>Gap outreach list (GSD, CBP, MAD, EED, KED)</th>':'')+(o.priority?'<th>Priority gap list (diabetes measures, CBP, COLO, BCS first)</th>':''):'<th>Open</th>')+'</tr></thead><tbody>';
+ h+=o.sites.map(s=>'<tr><td><b>'+esc(s.site)+'</b><div class="provlist">'+s.providers.map(p=>esc(p.displayName)+' ('+p.due+')'+(p.error?' <span class="error">not read: '+esc(p.error)+'</span>':p.note?' <span class="warn">'+esc(p.note)+'</span>':'')).join(', ')+'</div>'+(s.movedUp?'<div class="warn">'+plural(s.movedUp,'patient')+' moved up after flags were saved</div>':'')+(s.recentAcv?'<div class="provlist">'+plural(s.recentAcv,'patient')+' left out: a more recent ACV in Risk Population Outreach</div>':'')+'</td><td class="n">'+s.listed+' of '+o.perSite+'</td><td class="n">'+s.eligible+'</td><td class="n">'+s.flagged+'</td>'+(o.awv?'<td class="n">'+s.booked+'</td>':'')+'<td class="links">'+links(s.links)+'</td>'+(o.outreach?'<td class="links">'+links(s.links.outreach)+'</td>':'')+(o.gaps?'<td class="links">'+links(s.links.gaps)+'<div class="provlist">'+plural(s.gapCount,'patient')+'</div></td>':'')+(o.priority?'<td class="links">'+links(s.links.priority)+'<div class="provlist">'+plural(s.prioCount,'patient')+'</div></td>':'')+'</tr>').join('');
+ if(o.sites.length>1)h+='<tr class="all"><td>All sites (one file, each site on its own page or sheet)</td><td class="n">'+o.listed+'</td><td></td><td></td>'+(o.awv?'<td></td>':'')+'<td class="links">'+links(o.all)+'</td>'+(o.outreach?'<td class="links">'+links(o.all.outreach)+'</td>':'')+(o.gaps?'<td class="links">'+links(o.all.gaps)+'</td>':'')+(o.priority?'<td class="links">'+links(o.all.priority)+'</td>':'')+'</tr>';
  h+='</tbody></table>';
  if(o.epicError)h+='<p class="warn">Epic PCP could not be read from Risk Population Outreach: '+esc(o.epicError)+'</p>';
  h+='<p class="muted">'+esc(o.sourcesText)+'.'+(o.failedProviders?' <span class="error">'+plural(o.failedProviders,'provider')+' could not be read; see the red notes above.</span>':'')+'</p><p class="warn" id="selNote" style="display:none">Your selection has changed since these lists were generated; select Generate lists to update them.</p>';
@@ -3498,7 +3520,7 @@ el('build').onclick=async()=>{if(el('build').disabled||busy())return;el('build')
 (async()=>{try{const m=await api('__API__');providers=m.providers;const last=m.latest;if(last)restore(last);presetLocation();renderPicker();showResult(last);history=m.history;renderHistory();if(busy())startPoll(last.npAwvId)}catch(e){el('picker').innerHTML='<p class="error">'+esc(e.message)+'</p>'}})();
 </script></body></html>
 '@
- $note=$(if($K.outreach){'<p class="muted"><b>Outreach list</b> - the same generation also gives an outreach list per site: every eligible patient (not only the top __MAX__), most urgent first, with MRN, First Name, Last Name, DOB, Phone Number and Last ACV first. Open it from the Outreach list column, as View &amp; flag, HTML, PDF or Excel.</p>'}else{''})+$(if($K.gaps){'<p class="muted"><b>Gap outreach list</b> - the same outreach list, limited to patients who also have GSD, CBP, MAD, EED or KED open. Same urgency, columns and files; open it from the Gap outreach list column.</p>'}else{''})
+ $note=$(if($K.outreach){'<p class="muted"><b>Outreach list</b> - the same generation also gives an outreach list per site: every eligible patient (not only the top __MAX__), most urgent first, with MRN, First Name, Last Name, DOB, Phone Number and Last ACV first. Open it from the Outreach list column, as View &amp; flag, HTML, PDF or Excel.</p>'}else{''})+$(if($K.gaps){'<p class="muted"><b>Gap outreach list</b> - the same outreach list, limited to patients who also have GSD, CBP, MAD, EED or KED open. Same urgency, columns and files; open it from the Gap outreach list column.</p>'}else{''})+$(if($K.priority){'<p class="muted"><b>Priority gap list</b> - the same outreach list, limited to patients who also have a diabetes measure (GSD, EED, KED, MAD, SUPD), CBP, COLO or BCS open, and ranked by how many of those are open before urgency: one open priority measure outranks any number of other needs. A Priority Gaps column names them; open it from the Priority gap list column.</p>'}else{''})
  $cols=$(if($K.awv){'Columns match the '+[string]$K.Matches+' list on each provider''s dashboard, plus Epic PCP and Payor PCP.'}else{[string]$K.PageColumns})
  return $html.Replace('__OUTREACHNOTE__',$note).Replace('__COLUMNSNOTE__',(ConvertTo-HtmlEncoded $cols)).Replace('__NAV__',(Get-NavHtml ([string]$K.tab))).Replace('__TITLE__',[string]$K.title).Replace('__SUBTITLE__',[string]$K.Subtitle).Replace('__MATCHES__',[string]$K.Matches).Replace('__API__',[string]$K.api).Replace('__TABCSS__',$script:TabCss).Replace('__RUNCSS__',$script:RunPageCss).Replace('__PICKERJS__',$script:PickerJs).Replace('__MAX__',[string]$script:NpAwvPerSite)
 }
